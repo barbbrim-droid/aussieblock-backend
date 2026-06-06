@@ -164,6 +164,10 @@ def create_cod_invoice(customer_id: int, amount: float, order_ref: str) -> dict:
         item_id = _find_item_id(client, token, _COD_ITEM_NAME)
         if not item_id:
             return {"ok": False, "reason": f"QuickBooks item '{_COD_ITEM_NAME}' not found."}
+        # QuickBooks generates the sharable pay link only for invoices that have a
+        # billing email — pull the customer's from QuickBooks.
+        crows = _query(client, token, f"select PrimaryEmailAddr from Customer where Id = '{qbo_id}'", "Customer")
+        bill_email = (crows[0].get("PrimaryEmailAddr") or {}).get("Address") if crows else None
         payload = {
             "CustomerRef": {"value": qbo_id},
             # ACH only — this company doesn't have credit-card payments enabled, and
@@ -179,6 +183,8 @@ def create_cod_invoice(customer_id: int, amount: float, order_ref: str) -> dict:
                 "SalesItemLineDetail": {"ItemRef": {"value": item_id}, "TaxCodeRef": {"value": "NON"}},
             }],
         }
+        if bill_email:
+            payload["BillEmail"] = {"Address": bill_email}
         url = f"{config.QBO_API_BASE}/v3/company/{config.QBO_REALM_ID}/invoice"
         resp = client.post(url, params={"minorversion": config.QBO_MINOR_VERSION},
                            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
