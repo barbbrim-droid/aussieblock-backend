@@ -1,0 +1,14 @@
+# ── Secrets & on-disk state (NEVER commit these) ──
+.env
+qbo_tokens.json
+*.db
+*.db-journal
+
+# ── Python ──
+venv/
+__pycache__/
+*.pyc
+
+# ── OS / editor ──
+.DS_Store
+Thumbs.db

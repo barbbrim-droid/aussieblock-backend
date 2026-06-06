@@ -1,0 +1,38 @@
+# Render Blueprint for the Aussieblock backend (FastAPI).
+# In the Render dashboard: New + > Blueprint > pick this repo. It provisions an
+# always-on web service with a 1 GB persistent disk mounted at /data (where the
+# SQLite database and the rotating QuickBooks token file live, so they survive
+# redeploys). You'll be prompted for the secret env vars marked `sync: false`.
+services:
+  - type: web
+    name: aussieblock-api
+    runtime: python
+    plan: starter                 # always-on (~$7/mo); no cold starts, sync runs 24/7
+    region: ohio                  # pick the one nearest you
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    disk:
+      name: aussieblock-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data              # DB + qbo_tokens.json go on the persistent disk
+      - key: SEED_DEMO
+        value: "false"            # never re-create demo logins in production
+      - key: QBO_ENVIRONMENT
+        value: production
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+      # ── Secrets — paste these in the dashboard (not stored in git) ──
+      - key: SECRET_KEY
+        sync: false
+      - key: QBO_CLIENT_ID
+        sync: false
+      - key: QBO_CLIENT_SECRET
+        sync: false
+      - key: QBO_REFRESH_TOKEN
+        sync: false
+      - key: QBO_REALM_ID
+        sync: false
