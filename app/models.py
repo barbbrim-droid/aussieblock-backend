@@ -57,6 +57,7 @@ class Order(SQLModel, table=True):
     notes: Optional[str] = None                 # customer's delivery instructions (optional)
     slump: Optional[str] = None                 # e.g. '5"'
     admixtures: Optional[str] = None            # comma-joined, e.g. "Fiber, Color"
+    use_for: Optional[str] = None               # what the concrete is for (slab, curbs, …)
     # COD / prepay: when required, the order can't be dispatched until paid.
     prepay_required: bool = False
     prepay_amount: Optional[float] = None       # load total staff set

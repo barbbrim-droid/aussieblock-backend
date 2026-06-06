@@ -45,6 +45,7 @@ class OrderIn(BaseModel):
     notes: str = ""               # delivery instructions (optional)
     slump: str = ""
     admixtures: list[str] = []
+    use_for: str = ""
 
 
 class OrderRequestIn(BaseModel):
@@ -57,6 +58,7 @@ class OrderRequestIn(BaseModel):
     notes: str = ""
     slump: str = ""
     admixtures: list[str] = []
+    use_for: str = ""
 
 
 class TruckIn(BaseModel):
@@ -126,6 +128,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "notes": o.notes,
         "slump": o.slump,
         "admixtures": o.admixtures,
+        "use_for": o.use_for,
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
@@ -223,7 +226,7 @@ def create_order(
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
               truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None,
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
-              prepay_required=bool(customer.cod))
+              use_for=(body.use_for or "").strip() or None, prepay_required=bool(customer.cod))
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -248,7 +251,7 @@ def request_order(
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
               truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None,
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
-              prepay_required=bool(cust and cust.cod))
+              use_for=(body.use_for or "").strip() or None, prepay_required=bool(cust and cust.cod))
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
