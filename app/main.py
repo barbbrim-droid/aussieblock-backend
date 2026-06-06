@@ -42,6 +42,13 @@ class OrderIn(BaseModel):
     scheduled_for: str            # date the customer wants it (e.g. "2026-06-10")
     time: str = ""                # delivery time (e.g. "9:30 AM" or "08:00")
     truck: str | None = None      # optional truck label to assign now
+
+
+class TruckIn(BaseModel):
+    """Body for adding/updating a truck (staff action). `gps_device_id` is the
+    One Step GPS device id used to match live positions — optional for now."""
+    label: str
+    gps_device_id: str | None = None
 from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
@@ -220,6 +227,43 @@ def list_trucks(
          "heading": t.heading, "updated_at": t.updated_at}
         for t in s.exec(select(Truck)).all()
     ]
+
+
+@app.post("/trucks")
+def add_truck(body: TruckIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Add a truck, or update its GPS device id if the label already exists (staff
+    only). The device id is what live One Step GPS positions match on — leave it
+    blank for now and fill it in later to enable live tracking for this truck."""
+    label = body.label.strip()
+    if not label:
+        raise HTTPException(422, "Truck name is required")
+    device = (body.gps_device_id or "").strip() or None
+    truck = s.exec(select(Truck).where(Truck.label == label)).first()
+    if truck:
+        truck.gps_device_id = device
+        s.add(truck)
+        action = "updated"
+    else:
+        truck = Truck(label=label, gps_device_id=device)
+        s.add(truck)
+        action = "added"
+    s.commit(); s.refresh(truck)
+    return {"ok": True, "action": action, "label": truck.label, "device": truck.gps_device_id}
+
+
+@app.delete("/trucks/{label}")
+def delete_truck(label: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove a truck (staff only). It's first taken off any orders it's on, so
+    those orders simply become unassigned rather than pointing at a missing truck."""
+    truck = s.exec(select(Truck).where(Truck.label == label)).first()
+    if not truck:
+        raise HTTPException(404, f"No truck named '{label}'")
+    for o in s.exec(select(Order).where(Order.truck_id == truck.id)).all():
+        o.truck_id = None
+        s.add(o)
+    s.delete(truck)
+    s.commit()
+    return {"ok": True, "removed": True}
 
 
 @app.get("/billing/{customer_id}")
