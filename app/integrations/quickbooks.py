@@ -166,14 +166,17 @@ def create_cod_invoice(customer_id: int, amount: float, order_ref: str) -> dict:
             return {"ok": False, "reason": f"QuickBooks item '{_COD_ITEM_NAME}' not found."}
         payload = {
             "CustomerRef": {"value": qbo_id},
+            # ACH only — this company doesn't have credit-card payments enabled, and
+            # setting an unsupported option stops QuickBooks generating the pay link.
             "AllowOnlineACHPayment": True,
-            "AllowOnlineCreditCardPayment": True,
+            "AllowOnlineCreditCardPayment": False,
             "CustomerMemo": {"value": f"Prepayment for order {order_ref}"},
             "Line": [{
                 "DetailType": "SalesItemLineDetail",
                 "Amount": round(float(amount), 2),
                 "Description": f"COD ready-mix — order {order_ref}",
-                "SalesItemLineDetail": {"ItemRef": {"value": item_id}},
+                # Non-taxable so the invoice total equals the amount staff entered.
+                "SalesItemLineDetail": {"ItemRef": {"value": item_id}, "TaxCodeRef": {"value": "NON"}},
             }],
         }
         url = f"{config.QBO_API_BASE}/v3/company/{config.QBO_REALM_ID}/invoice"
