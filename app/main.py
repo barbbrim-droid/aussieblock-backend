@@ -43,6 +43,8 @@ class OrderIn(BaseModel):
     time: str = ""                # delivery time (e.g. "9:30 AM" or "08:00")
     truck: str | None = None      # optional truck label to assign now
     notes: str = ""               # delivery instructions (optional)
+    slump: str = ""
+    admixtures: list[str] = []
 
 
 class OrderRequestIn(BaseModel):
@@ -53,6 +55,8 @@ class OrderRequestIn(BaseModel):
     scheduled_for: str
     time: str = ""
     notes: str = ""
+    slump: str = ""
+    admixtures: list[str] = []
 
 
 class TruckIn(BaseModel):
@@ -111,6 +115,8 @@ def _order_json(o: Order, s: Session) -> dict:
         "truck": truck.label if truck else "—",
         "progress": round(o.progress, 3),
         "notes": o.notes,
+        "slump": o.slump,
+        "admixtures": o.admixtures,
         "truck_position": (
             {"lat": truck.lat, "lng": truck.lng, "heading": truck.heading}
             if truck and truck.lat is not None else None
@@ -203,7 +209,8 @@ def create_order(
 
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
-              truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None)
+              truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None,
+              slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None)
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -225,7 +232,8 @@ def request_order(
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
     o = Order(ref=_next_order_ref(s), customer_id=user.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
-              truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None)
+              truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None,
+              slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None)
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 

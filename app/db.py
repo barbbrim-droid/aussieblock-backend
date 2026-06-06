@@ -27,7 +27,7 @@ def init_db() -> None:
 _COLUMN_MIGRATIONS = {
     "customer": {"qbo_id": "VARCHAR"},
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
-    "order": {"notes": "VARCHAR"},              # customer order instructions
+    "order": {"notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR"},
 }
 
 

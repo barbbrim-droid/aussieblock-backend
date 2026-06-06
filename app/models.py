@@ -53,6 +53,8 @@ class Order(SQLModel, table=True):
     truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")
     progress: float = 0.0                       # 0..1 along the route
     notes: Optional[str] = None                 # customer's delivery instructions (optional)
+    slump: Optional[str] = None                 # e.g. '5"'
+    admixtures: Optional[str] = None            # comma-joined, e.g. "Fiber, Color"
 
 
 class Invoice(SQLModel, table=True):
