@@ -354,7 +354,7 @@ def list_customers(_: User = Depends(require_staff), s: Session = Depends(get_se
     }
     return [
         {"id": c.id, "name": c.name, "acct_no": c.acct_no, "terms": c.terms,
-         "login_email": logins.get(c.id)}
+         "contact": c.contact, "login_email": logins.get(c.id)}
         for c in customers
     ]
 
