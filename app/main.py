@@ -188,6 +188,20 @@ def create_order(
     return _order_json(o, s)
 
 
+@app.delete("/orders/{ref}")
+def cancel_order(ref: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Cancel (delete) an order (staff only). Also clears any plus-load requests
+    tied to it so nothing is left pointing at a missing order."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    for r in s.exec(select(PlusLoadRequest).where(PlusLoadRequest.order_id == o.id)).all():
+        s.delete(r)
+    s.delete(o)
+    s.commit()
+    return {"ok": True, "cancelled": True, "ref": ref}
+
+
 @app.get("/orders")
 def list_orders(
     customer_id: int | None = None,
