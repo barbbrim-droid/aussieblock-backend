@@ -30,6 +30,18 @@ class CustomerLoginIn(BaseModel):
     """Body for creating/resetting a customer's login (staff action)."""
     email: str
     password: str
+
+
+class OrderIn(BaseModel):
+    """Body for scheduling a new order (staff action). `truck` is optional — an
+    order starts 'scheduled' and a truck can be assigned later from the board."""
+    customer_id: int
+    site: str
+    mix: str
+    qty: str
+    scheduled_for: str            # date the customer wants it (e.g. "2026-06-10")
+    time: str = ""                # delivery time (e.g. "9:30 AM" or "08:00")
+    truck: str | None = None      # optional truck label to assign now
 from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
@@ -121,6 +133,52 @@ def login(form: OAuth2PasswordRequestForm = Depends(), s: Session = Depends(get_
 def me(user: User = Depends(get_current_user)):
     """Who am I? Handy for the front-end to render the right screen."""
     return {"email": user.email, "role": user.role, "customer_id": user.customer_id}
+
+
+def _next_order_ref(s: Session) -> str:
+    """Generate the next order reference, e.g. 'AB-10042'. Continues from the
+    highest existing numeric ref so refs stay unique and roughly sequential."""
+    nums = []
+    for o in s.exec(select(Order)).all():
+        tail = o.ref.split("-")[-1]
+        if tail.isdigit():
+            nums.append(int(tail))
+    return f"AB-{(max(nums) + 1) if nums else 10001}"
+
+
+@app.post("/orders")
+def create_order(
+    body: OrderIn,
+    _: User = Depends(require_staff),
+    s: Session = Depends(get_session),
+):
+    """Schedule a new order for a customer (staff only).
+
+    Requires a customer, site, mix, quantity, and date; time and truck are
+    optional. The order starts in the 'scheduled' stage — assign a truck and
+    advance it from the dispatch board. Returns the new order in the same shape
+    as /orders, so the board can drop it straight into the list."""
+    customer = s.get(Customer, body.customer_id)
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    site, mix, qty = body.site.strip(), body.mix.strip(), body.qty.strip()
+    when = body.scheduled_for.strip()
+    if not all([site, mix, qty, when]):
+        raise HTTPException(422, "Site, mix, quantity, and date are all required")
+
+    truck_id = None
+    label = (body.truck or "").strip()
+    if label and label not in ("—", "-"):
+        t = s.exec(select(Truck).where(Truck.label == label)).first()
+        if not t:
+            raise HTTPException(404, f"No truck labelled '{label}'")
+        truck_id = t.id
+
+    o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
+              qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
+              truck_id=truck_id, progress=0.0)
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
 
 
 @app.get("/orders")
