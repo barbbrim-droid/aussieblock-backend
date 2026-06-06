@@ -27,16 +27,18 @@ def init_db() -> None:
 _COLUMN_MIGRATIONS = {
     "customer": {"qbo_id": "VARCHAR"},
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
+    "order": {"notes": "VARCHAR"},              # customer order instructions
 }
 
 
 def _run_migrations() -> None:
+    # Identifiers are quoted because some table names ("order") are SQL keywords.
     with engine.connect() as conn:
         for table, columns in _COLUMN_MIGRATIONS.items():
-            existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            existing = {row[1] for row in conn.execute(text(f'PRAGMA table_info("{table}")'))}
             for col, coltype in columns.items():
                 if col not in existing:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
+                    conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {coltype}'))
         conn.commit()
 
 

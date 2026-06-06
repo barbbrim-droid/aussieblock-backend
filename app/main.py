@@ -42,6 +42,17 @@ class OrderIn(BaseModel):
     scheduled_for: str            # date the customer wants it (e.g. "2026-06-10")
     time: str = ""                # delivery time (e.g. "9:30 AM" or "08:00")
     truck: str | None = None      # optional truck label to assign now
+    notes: str = ""               # delivery instructions (optional)
+
+
+class OrderRequestIn(BaseModel):
+    """Body for a customer placing an order from the app (becomes 'requested')."""
+    site: str
+    mix: str
+    qty: str
+    scheduled_for: str
+    time: str = ""
+    notes: str = ""
 
 
 class TruckIn(BaseModel):
@@ -99,6 +110,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "status": o.status,
         "truck": truck.label if truck else "—",
         "progress": round(o.progress, 3),
+        "notes": o.notes,
         "truck_position": (
             {"lat": truck.lat, "lng": truck.lng, "heading": truck.heading}
             if truck and truck.lat is not None else None
@@ -109,8 +121,9 @@ def _order_json(o: Order, s: Session) -> dict:
 # The delivery stages an order moves through, in order. Staff drive these from
 # the dispatch board. The progress snap keeps the map + progress bar coherent
 # with whatever stage was just set (e.g. "onsite" => full bar, not 40%).
-ORDER_STATUSES = ["scheduled", "batched", "enroute", "onsite", "complete"]
-_STATUS_PROGRESS = {"scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "complete": 1.0}
+# "requested" = placed by a customer in the app, awaiting staff confirmation.
+ORDER_STATUSES = ["requested", "scheduled", "batched", "enroute", "onsite", "complete"]
+_STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "complete": 1.0}
 # Stages that mean a truck is carrying the load — you can't enter them unassigned.
 _STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite"}
 
@@ -190,7 +203,29 @@ def create_order(
 
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
-              truck_id=truck_id, progress=0.0)
+              truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None)
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+@app.post("/orders/request")
+def request_order(
+    body: OrderRequestIn,
+    user: User = Depends(get_current_user),
+    s: Session = Depends(get_session),
+):
+    """A customer places a concrete order from the app. It lands as 'requested'
+    on the dispatch board for staff to confirm. Always tied to the caller's own
+    customer account — the customer_id can't be spoofed."""
+    if user.customer_id is None:
+        raise HTTPException(403, "Only customer accounts can place orders")
+    site, mix, qty = body.site.strip(), body.mix.strip(), body.qty.strip()
+    when = body.scheduled_for.strip()
+    if not all([site, mix, qty, when]):
+        raise HTTPException(422, "Site, mix, quantity, and date are all required")
+    o = Order(ref=_next_order_ref(s), customer_id=user.customer_id, site=site, mix=mix,
+              qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
+              truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None)
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 

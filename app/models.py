@@ -49,9 +49,10 @@ class Order(SQLModel, table=True):
     qty: str
     scheduled_for: str                          # "today" / "tomorrow" / a date
     time: str
-    status: str = "scheduled"                   # scheduled|batched|enroute|onsite|complete
+    status: str = "scheduled"                   # requested|scheduled|batched|enroute|onsite|complete
     truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")
     progress: float = 0.0                       # 0..1 along the route
+    notes: Optional[str] = None                 # customer's delivery instructions (optional)
 
 
 class Invoice(SQLModel, table=True):
