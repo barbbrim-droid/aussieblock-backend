@@ -190,12 +190,23 @@ def create_cod_invoice(customer_id: int, amount: float, order_ref: str) -> dict:
                 reason = resp.text
             return {"ok": False, "reason": reason}
         inv = resp.json().get("Invoice", {})
-        full = _get_invoice(client, token, inv.get("Id"), with_link=True)
+        inv_id = inv.get("Id")
+        # A freshly created invoice may not expose a pay link until online ACH is
+        # explicitly enabled; force it with a sparse update, then read the link.
+        try:
+            up = client.post(url, params={"minorversion": config.QBO_MINOR_VERSION},
+                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                             json={"Id": inv_id, "SyncToken": inv.get("SyncToken", "0"), "sparse": True,
+                                   "AllowOnlineACHPayment": True, "AllowOnlineCreditCardPayment": False})
+            up.raise_for_status()
+        except httpx.HTTPError:
+            pass
+        full = _get_invoice(client, token, inv_id, with_link=True)
 
-    link = full.get("InvoiceLink")
-    if not link:
-        return {"ok": False, "reason": "Invoice created but no pay link — enable online payments in QuickBooks."}
-    return {"ok": True, "invoice_id": str(inv.get("Id")), "doc_number": inv.get("DocNumber"), "link": link}
+    # The invoice is created/tracked either way — the link is best-effort. COD
+    # gating + paid-detection work off the invoice balance regardless.
+    return {"ok": True, "invoice_id": str(inv_id), "doc_number": inv.get("DocNumber"),
+            "link": full.get("InvoiceLink")}
 
 
 def cod_invoice_status(qbo_invoice_id: str) -> dict:
