@@ -256,18 +256,46 @@ def request_order(
     return _order_json(o, s)
 
 
+_EDITABLE_STATUSES = ("requested", "scheduled")   # before the load is on a truck
+
+
 @app.delete("/orders/{ref}")
-def cancel_order(ref: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Cancel (delete) an order (staff only). Also clears any plus-load requests
-    tied to it so nothing is left pointing at a missing order."""
+def cancel_order(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Cancel (delete) an order. Staff can cancel any order; a customer can cancel
+    their own only while it's still requested/scheduled (not yet dispatched).
+    Also clears any plus-load requests tied to it."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o:
+    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
+    if user.role == "customer" and o.status not in _EDITABLE_STATUSES:
+        raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
     for r in s.exec(select(PlusLoadRequest).where(PlusLoadRequest.order_id == o.id)).all():
         s.delete(r)
     s.delete(o)
     s.commit()
     return {"ok": True, "cancelled": True, "ref": ref}
+
+
+@app.patch("/orders/{ref}")
+def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_user),
+               s: Session = Depends(get_session)):
+    """Modify an order's details. Staff or the owning customer, only while the
+    order is still requested/scheduled (not yet on a truck)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+        raise HTTPException(404, "Order not found")
+    if o.status not in _EDITABLE_STATUSES:
+        raise HTTPException(409, "This delivery is already in progress and can't be changed here.")
+    site, mix, qty, when = body.site.strip(), body.mix.strip(), body.qty.strip(), body.scheduled_for.strip()
+    if not all([site, mix, qty, when]):
+        raise HTTPException(422, "Site, mix, quantity, and date are all required")
+    o.site, o.mix, o.qty, o.scheduled_for, o.time = site, mix, qty, when, body.time.strip()
+    o.slump = (body.slump or "").strip() or None
+    o.admixtures = ", ".join(body.admixtures) or None
+    o.use_for = (body.use_for or "").strip() or None
+    o.notes = (body.notes or "").strip() or None
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
 
 
 @app.post("/orders/{ref}/charge")
