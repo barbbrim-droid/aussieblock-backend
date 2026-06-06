@@ -285,6 +285,24 @@ def set_customer_login(
     return {"ok": True, "action": action, "customer": customer.name, "email": email}
 
 
+@app.delete("/customers/{customer_id}/login")
+def remove_customer_login(
+    customer_id: int,
+    _: User = Depends(require_staff),
+    s: Session = Depends(get_session),
+):
+    """Revoke a customer's login (staff only). They can no longer sign in; their
+    orders/billing are untouched and a new login can be created later."""
+    user = s.exec(
+        select(User).where(User.customer_id == customer_id).where(User.role == "customer")
+    ).first()
+    if not user:
+        raise HTTPException(404, "This customer has no login")
+    s.delete(user)
+    s.commit()
+    return {"ok": True, "removed": True}
+
+
 # ── Dispatch — order control (staff only) ────────────────────────────────────
 # These are the two things staff do from the dispatch board: move an order along
 # its delivery stages, and put a truck on a job.
