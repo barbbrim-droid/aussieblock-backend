@@ -66,6 +66,7 @@ class TruckIn(BaseModel):
     One Step GPS device id used to match live positions — optional for now."""
     label: str
     gps_device_id: str | None = None
+    notes: str = ""
 
 
 class TextInviteIn(BaseModel):
@@ -384,7 +385,7 @@ def list_trucks(
     """Live truck positions (updated by the GPS poller in the background)."""
     return [
         {"label": t.label, "device": t.gps_device_id, "lat": t.lat, "lng": t.lng,
-         "heading": t.heading, "updated_at": t.updated_at}
+         "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes}
         for t in s.exec(select(Truck)).all()
     ]
 
@@ -398,13 +399,15 @@ def add_truck(body: TruckIn, _: User = Depends(require_staff), s: Session = Depe
     if not label:
         raise HTTPException(422, "Truck name is required")
     device = (body.gps_device_id or "").strip() or None
+    notes = (body.notes or "").strip() or None
     truck = s.exec(select(Truck).where(Truck.label == label)).first()
     if truck:
         truck.gps_device_id = device
+        truck.notes = notes
         s.add(truck)
         action = "updated"
     else:
-        truck = Truck(label=label, gps_device_id=device)
+        truck = Truck(label=label, gps_device_id=device, notes=notes)
         s.add(truck)
         action = "added"
     s.commit(); s.refresh(truck)

@@ -38,6 +38,7 @@ class Truck(SQLModel, table=True):
     lng: Optional[float] = None
     heading: Optional[float] = None             # degrees, 0 = north
     updated_at: Optional[datetime] = None
+    notes: Optional[str] = None                 # free-form (driver, capacity, maintenance…)
     # internal: phase used only by the mock simulator
     mock_phase: float = 0.0
 
