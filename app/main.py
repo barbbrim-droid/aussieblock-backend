@@ -49,12 +49,19 @@ class TruckIn(BaseModel):
     One Step GPS device id used to match live positions — optional for now."""
     label: str
     gps_device_id: str | None = None
+
+
+class TextInviteIn(BaseModel):
+    """Body for sending a customer an invite text via the texting service."""
+    message: str
 from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
     import_customers_from_quickbooks, get_invoice_pay_link,
 )
+from .integrations.sms import send_sms
+from . import config
 
 
 @asynccontextmanager
@@ -417,6 +424,38 @@ def remove_customer_login(
     s.delete(user)
     s.commit()
     return {"ok": True, "removed": True}
+
+
+@app.get("/sms/enabled")
+def sms_enabled(_: User = Depends(get_current_user)):
+    """Whether the app can send texts itself (Twilio configured). The board uses
+    this to choose between auto-send and opening the staff phone's messaging app."""
+    return {"enabled": config.USE_TWILIO}
+
+
+@app.post("/customers/{customer_id}/text-invite")
+def text_invite(
+    customer_id: int,
+    body: TextInviteIn,
+    _: User = Depends(require_staff),
+    s: Session = Depends(get_session),
+):
+    """Send a customer their invite text via the texting service (staff only).
+
+    Texts the customer's phone on file. Returns 503 if texting isn't set up yet
+    (the board then falls back to the phone's messaging app), or 400 with the
+    provider's reason if the send fails (e.g. no valid number, not yet
+    registered)."""
+    cust = s.get(Customer, customer_id)
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    if not (body.message or "").strip():
+        raise HTTPException(422, "Message is empty")
+    result = send_sms(cust.contact, body.message)
+    if not result.get("ok"):
+        code = 503 if result.get("configured") is False else 400
+        raise HTTPException(code, result.get("reason", "Could not send text"))
+    return {"ok": True, "to": result["to"], "customer": cust.name}
 
 
 # ── Dispatch — order control (staff only) ────────────────────────────────────

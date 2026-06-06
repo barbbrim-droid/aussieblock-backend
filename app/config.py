@@ -65,6 +65,16 @@ QBO_API_BASE = (
     else "https://quickbooks.api.intuit.com"
 )
 
+# ── Twilio SMS (automated customer texting) ──
+# Set all three to enable the app to SEND texts itself (the "Send text" button).
+# Leave any blank and the app falls back to opening the staff phone's messaging
+# app via an sms: link. Get these from https://console.twilio.com after signing
+# up, buying a number, and completing A2P 10DLC registration.
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "").strip()   # e.g. +13255551234
+USE_TWILIO = all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER])
+
 # Aussieblock plant location (San Angelo, TX) — used as the origin for mock truck routes.
 PLANT_LAT = 31.4421
 PLANT_LNG = -100.4503
