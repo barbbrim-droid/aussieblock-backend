@@ -15,14 +15,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
 from .models import Customer, Truck, Order, PlusLoadRequest, User
 from .auth import (
-    verify_password, create_access_token, get_current_user, require_staff,
+    verify_password, hash_password, create_access_token, get_current_user, require_staff,
 )
+
+
+class CustomerLoginIn(BaseModel):
+    """Body for creating/resetting a customer's login (staff action)."""
+    email: str
+    password: str
 from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
@@ -212,6 +219,70 @@ def import_customers(_: User = Depends(require_staff)):
     so it's safe to re-run.
     """
     return import_customers_from_quickbooks()
+
+
+# ── Customer logins (staff only) ─────────────────────────────────────────────
+# Lets the office create/reset the login a customer uses to see their own
+# orders & billing — without any server shell access.
+@app.get("/customers")
+def list_customers(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """All customers with whether they already have a login (staff only).
+
+    Powers the dispatch board's "Customer logins" picker. `login_email` is the
+    email a customer signs in with, or null if no login exists yet."""
+    customers = s.exec(select(Customer).order_by(Customer.name)).all()
+    logins = {
+        u.customer_id: u.email
+        for u in s.exec(select(User).where(User.role == "customer")).all()
+        if u.customer_id is not None
+    }
+    return [
+        {"id": c.id, "name": c.name, "acct_no": c.acct_no, "terms": c.terms,
+         "login_email": logins.get(c.id)}
+        for c in customers
+    ]
+
+
+@app.post("/customers/{customer_id}/login")
+def set_customer_login(
+    customer_id: int,
+    body: CustomerLoginIn,
+    _: User = Depends(require_staff),
+    s: Session = Depends(get_session),
+):
+    """Create or reset a customer's login (staff only).
+
+    Give it the email + password the customer will sign in with. If the customer
+    already has a login, this updates that one (email + password); otherwise it
+    creates one. The email must not already belong to a different login."""
+    customer = s.get(Customer, customer_id)
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    email = body.email.strip().lower()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(422, "Enter a valid email address")
+    if len(body.password) < 6:
+        raise HTTPException(422, "Password must be at least 6 characters")
+
+    # The email can't collide with a different user's login.
+    clash = s.exec(select(User).where(User.email == email)).first()
+    if clash and clash.customer_id != customer_id:
+        raise HTTPException(409, "That email is already used by another login")
+
+    user = s.exec(
+        select(User).where(User.customer_id == customer_id).where(User.role == "customer")
+    ).first()
+    if user:
+        user.email = email
+        user.password_hash = hash_password(body.password)
+        s.add(user)
+        action = "reset"
+    else:
+        s.add(User(email=email, password_hash=hash_password(body.password),
+                   role="customer", customer_id=customer_id))
+        action = "created"
+    s.commit()
+    return {"ok": True, "action": action, "customer": customer.name, "email": email}
 
 
 # ── Dispatch — order control (staff only) ────────────────────────────────────
