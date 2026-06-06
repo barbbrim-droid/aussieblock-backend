@@ -26,6 +26,8 @@ class Customer(SQLModel, table=True):
     # QuickBooks Customer Id — the stable join key the A/R sync matches on.
     # Stable across renames/punctuation; set by the customer importer.
     qbo_id: Optional[str] = Field(default=None, index=True)
+    # COD: this customer must pay before delivery; their orders require prepayment.
+    cod: bool = False
 
 
 class Truck(SQLModel, table=True):
@@ -55,6 +57,11 @@ class Order(SQLModel, table=True):
     notes: Optional[str] = None                 # customer's delivery instructions (optional)
     slump: Optional[str] = None                 # e.g. '5"'
     admixtures: Optional[str] = None            # comma-joined, e.g. "Fiber, Color"
+    # COD / prepay: when required, the order can't be dispatched until paid.
+    prepay_required: bool = False
+    prepay_amount: Optional[float] = None       # load total staff set
+    prepay_invoice_id: Optional[str] = None     # QuickBooks invoice created for the prepayment
+    prepaid: bool = False
 
 
 class Invoice(SQLModel, table=True):

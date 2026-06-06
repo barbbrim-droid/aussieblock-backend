@@ -25,9 +25,13 @@ def init_db() -> None:
 # but never alters existing ones, so a database created before a column was added
 # needs the column backfilled. Each step is idempotent and safe to re-run.
 _COLUMN_MIGRATIONS = {
-    "customer": {"qbo_id": "VARCHAR"},
+    "customer": {"qbo_id": "VARCHAR", "cod": "BOOLEAN DEFAULT 0"},
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
-    "order": {"notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR"},
+    "order": {
+        "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR",
+        "prepay_required": "BOOLEAN DEFAULT 0", "prepay_amount": "FLOAT",
+        "prepay_invoice_id": "VARCHAR", "prepaid": "BOOLEAN DEFAULT 0",
+    },
 }
 
 

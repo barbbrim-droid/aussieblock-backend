@@ -125,6 +125,87 @@ def get_invoice_pay_link(customer_id: int, invoice_number: str) -> dict:
             "amount": amount, "status": inv_status}
 
 
+# ── COD / prepay: create an invoice + read its pay link & balance ────────────
+_COD_ITEM_NAME = "Ready Mix"   # QuickBooks item COD loads are billed under
+
+
+def _find_item_id(client: httpx.Client, token: str, name: str) -> str | None:
+    safe = name.replace("'", "''")
+    rows = _query(client, token, f"select Id from Item where Name = '{safe}'", "Item")
+    return str(rows[0]["Id"]) if rows else None
+
+
+def _get_invoice(client: httpx.Client, token: str, qbo_invoice_id: str, with_link: bool = False) -> dict:
+    url = f"{config.QBO_API_BASE}/v3/company/{config.QBO_REALM_ID}/invoice/{qbo_invoice_id}"
+    params = {"minorversion": config.QBO_MINOR_VERSION}
+    if with_link:
+        params["include"] = "invoiceLink"
+    resp = client.get(url, params=params,
+                      headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    resp.raise_for_status()
+    return resp.json().get("Invoice", {})
+
+
+def create_cod_invoice(customer_id: int, amount: float, order_ref: str) -> dict:
+    """Create a QuickBooks invoice for a COD load and return its hosted pay link.
+
+    Returns {ok, invoice_id, doc_number, link} or {ok: False, reason}.
+    """
+    if config.USE_MOCK_QBO:
+        return {"ok": False, "reason": "QuickBooks isn't connected."}
+    with Session(engine) as s:
+        customer = s.get(Customer, customer_id)
+        if not customer or not customer.qbo_id:
+            return {"ok": False, "reason": "Customer isn't linked to QuickBooks."}
+        qbo_id = customer.qbo_id
+
+    with httpx.Client(timeout=30) as client:
+        token = _access_token(client)
+        item_id = _find_item_id(client, token, _COD_ITEM_NAME)
+        if not item_id:
+            return {"ok": False, "reason": f"QuickBooks item '{_COD_ITEM_NAME}' not found."}
+        payload = {
+            "CustomerRef": {"value": qbo_id},
+            "AllowOnlineACHPayment": True,
+            "AllowOnlineCreditCardPayment": True,
+            "CustomerMemo": {"value": f"Prepayment for order {order_ref}"},
+            "Line": [{
+                "DetailType": "SalesItemLineDetail",
+                "Amount": round(float(amount), 2),
+                "Description": f"COD ready-mix — order {order_ref}",
+                "SalesItemLineDetail": {"ItemRef": {"value": item_id}},
+            }],
+        }
+        url = f"{config.QBO_API_BASE}/v3/company/{config.QBO_REALM_ID}/invoice"
+        resp = client.post(url, params={"minorversion": config.QBO_MINOR_VERSION},
+                           headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                           json=payload)
+        if resp.status_code >= 400:
+            try:
+                reason = resp.json().get("Fault", {}).get("Error", [{}])[0].get("Detail", resp.text)
+            except ValueError:
+                reason = resp.text
+            return {"ok": False, "reason": reason}
+        inv = resp.json().get("Invoice", {})
+        full = _get_invoice(client, token, inv.get("Id"), with_link=True)
+
+    link = full.get("InvoiceLink")
+    if not link:
+        return {"ok": False, "reason": "Invoice created but no pay link — enable online payments in QuickBooks."}
+    return {"ok": True, "invoice_id": str(inv.get("Id")), "doc_number": inv.get("DocNumber"), "link": link}
+
+
+def cod_invoice_status(qbo_invoice_id: str) -> dict:
+    """Return {paid, balance, link} for a COD invoice. Paid when balance <= 0."""
+    if config.USE_MOCK_QBO:
+        return {"paid": False, "balance": None, "link": None}
+    with httpx.Client(timeout=30) as client:
+        token = _access_token(client)
+        full = _get_invoice(client, token, qbo_invoice_id, with_link=True)
+    balance = float(full.get("Balance", 0) or 0)
+    return {"paid": balance <= 0, "balance": balance, "link": full.get("InvoiceLink")}
+
+
 # ── OAuth 2.0 token handling ─────────────────────────────────────────────────
 # Intuit rotates the refresh token on (most) refreshes and invalidates the old
 # one, so we persist the latest to a small file and prefer it over .env — that's

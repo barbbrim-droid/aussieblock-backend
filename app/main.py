@@ -69,11 +69,20 @@ class TruckIn(BaseModel):
 class TextInviteIn(BaseModel):
     """Body for sending a customer an invite text via the texting service."""
     message: str
+
+
+class CodIn(BaseModel):
+    cod: bool
+
+
+class ChargeIn(BaseModel):
+    amount: float
 from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
     import_customers_from_quickbooks, get_invoice_pay_link,
+    create_cod_invoice, cod_invoice_status,
 )
 from .integrations.sms import send_sms
 from . import config
@@ -117,6 +126,9 @@ def _order_json(o: Order, s: Session) -> dict:
         "notes": o.notes,
         "slump": o.slump,
         "admixtures": o.admixtures,
+        "prepay_required": o.prepay_required,
+        "prepaid": o.prepaid,
+        "prepay_amount": o.prepay_amount,
         "truck_position": (
             {"lat": truck.lat, "lng": truck.lng, "heading": truck.heading}
             if truck and truck.lat is not None else None
@@ -210,7 +222,8 @@ def create_order(
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
               truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None,
-              slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None)
+              slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
+              prepay_required=bool(customer.cod))
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -230,10 +243,12 @@ def request_order(
     when = body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
+    cust = s.get(Customer, user.customer_id)
     o = Order(ref=_next_order_ref(s), customer_id=user.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
               truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None,
-              slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None)
+              slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
+              prepay_required=bool(cust and cust.cod))
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -250,6 +265,56 @@ def cancel_order(ref: str, _: User = Depends(require_staff), s: Session = Depend
     s.delete(o)
     s.commit()
     return {"ok": True, "cancelled": True, "ref": ref}
+
+
+@app.post("/orders/{ref}/charge")
+def charge_order(
+    ref: str,
+    body: ChargeIn,
+    _: User = Depends(require_staff),
+    s: Session = Depends(get_session),
+):
+    """Create a QuickBooks invoice for a COD load and return its hosted pay link
+    (staff only). Marks the order prepay-required and awaiting payment."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if body.amount <= 0:
+        raise HTTPException(422, "Enter an amount greater than 0")
+    res = create_cod_invoice(o.customer_id, body.amount, o.ref)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("reason", "Could not create the charge"))
+    o.prepay_required = True
+    o.prepay_amount = round(float(body.amount), 2)
+    o.prepay_invoice_id = res["invoice_id"]
+    o.prepaid = False
+    s.add(o); s.commit()
+    return {"ok": True, "ref": o.ref, "amount": o.prepay_amount,
+            "link": res["link"], "doc_number": res.get("doc_number")}
+
+
+@app.get("/orders/{ref}/payment-status")
+def order_payment_status(
+    ref: str,
+    user: User = Depends(get_current_user),
+    s: Session = Depends(get_session),
+):
+    """COD payment status for an order. The owning customer or staff can read it;
+    when the QuickBooks invoice shows paid, the order flips to prepaid (unlocks
+    dispatch). Returns the hosted pay link while still unpaid."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+        raise HTTPException(404, "Order not found")
+    link = balance = None
+    if o.prepay_invoice_id and not o.prepaid:
+        st = cod_invoice_status(o.prepay_invoice_id)
+        link, balance = st.get("link"), st.get("balance")
+        if st.get("paid"):
+            o.prepaid = True
+            s.add(o); s.commit()
+    return {"ref": o.ref, "prepay_required": o.prepay_required, "prepaid": o.prepaid,
+            "amount": o.prepay_amount, "charged": o.prepay_invoice_id is not None,
+            "link": link, "balance": balance}
 
 
 @app.get("/orders")
@@ -404,9 +469,22 @@ def list_customers(_: User = Depends(require_staff), s: Session = Depends(get_se
     }
     return [
         {"id": c.id, "name": c.name, "acct_no": c.acct_no, "terms": c.terms,
-         "contact": c.contact, "login_email": logins.get(c.id)}
+         "contact": c.contact, "login_email": logins.get(c.id), "cod": c.cod}
         for c in customers
     ]
+
+
+@app.post("/customers/{customer_id}/cod")
+def set_customer_cod(customer_id: int, body: CodIn,
+                     _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Mark a customer COD (pay before delivery) on/off (staff only). New orders
+    for a COD customer require prepayment before they can be dispatched."""
+    c = s.get(Customer, customer_id)
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    c.cod = bool(body.cod)
+    s.add(c); s.commit()
+    return {"ok": True, "customer": c.name, "cod": c.cod}
 
 
 @app.post("/customers/{customer_id}/login")
@@ -534,6 +612,12 @@ def set_order_status(
     o = _staff_order_or_404(ref, s)
     if status in _STATUSES_NEEDING_TRUCK and o.truck_id is None:
         raise HTTPException(409, f"Assign a truck before setting status to '{status}'")
+    # COD: can't dispatch until paid. Re-check the invoice live in case they just paid.
+    if status in _STATUSES_NEEDING_TRUCK and o.prepay_required and not o.prepaid:
+        if o.prepay_invoice_id and cod_invoice_status(o.prepay_invoice_id).get("paid"):
+            o.prepaid = True
+        else:
+            raise HTTPException(409, "Payment required before dispatch — this COD order is awaiting payment.")
     o.status = status
     if status in _STATUS_PROGRESS:
         o.progress = _STATUS_PROGRESS[status]
