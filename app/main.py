@@ -31,7 +31,7 @@ from .db import init_db, get_session
 from .seed import seed_if_empty
 from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice
 from .auth import (
-    verify_password, hash_password, create_access_token, get_current_user, require_staff,
+    verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
 )
 
 
@@ -39,6 +39,14 @@ class CustomerLoginIn(BaseModel):
     """Body for creating/resetting a customer's login (staff action)."""
     email: str
     password: str
+
+
+class StaffLoginIn(BaseModel):
+    """Body for creating/resetting an office login. role: 'staff' (full access)
+    or 'worker' (orders/tracking, no financials)."""
+    email: str
+    password: str
+    role: str = "worker"
 
 
 class OrderIn(BaseModel):
@@ -429,7 +437,7 @@ def archive_order(ref: str, archived: bool = True, _: User = Depends(require_sta
 def charge_order(
     ref: str,
     body: ChargeIn,
-    _: User = Depends(require_staff),
+    _: User = Depends(require_finance),
     s: Session = Depends(get_session),
 ):
     """Create a QuickBooks invoice for a COD load and return its hosted pay link
@@ -460,6 +468,8 @@ def order_payment_status(
     """COD payment status for an order. The owning customer or staff can read it;
     when the QuickBooks invoice shows paid, the order flips to prepaid (unlocks
     dispatch). Returns the hosted pay link while still unpaid."""
+    if user.role == "worker":
+        raise HTTPException(403, "Financial access is restricted to approved staff")
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or (user.role == "customer" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
@@ -559,6 +569,8 @@ def delete_truck(label: str, _: User = Depends(require_staff), s: Session = Depe
 def billing(customer_id: int, user: User = Depends(get_current_user)):
     """Customer balance + invoices — the data behind the app's Account screen.
     A customer may only view their own account; staff may view anyone's."""
+    if user.role == "worker":
+        raise HTTPException(403, "Financial access is restricted to approved staff")
     if user.role == "customer" and customer_id != user.customer_id:
         raise HTTPException(403, "Not your account")
     data = get_billing_for_customer(customer_id)
@@ -580,6 +592,8 @@ def invoice_pay_link(
     staff may pull a link for anyone. Returns 409 (with a plain-language reason)
     when no link is available — already paid, demo mode, or online payment not
     enabled on the invoice in QuickBooks."""
+    if user.role == "worker":
+        raise HTTPException(403, "Financial access is restricted to approved staff")
     if user.role == "customer" and customer_id != user.customer_id:
         raise HTTPException(403, "Not your account")
     result = get_invoice_pay_link(customer_id, invoice_number)
@@ -592,7 +606,7 @@ def invoice_pay_link(
 
 
 @app.post("/billing/sync")
-def sync_billing(_: User = Depends(require_staff)):
+def sync_billing(_: User = Depends(require_finance)):
     """Pull the latest A/R from QuickBooks into the local invoice table (staff only).
 
     Runs the same job as the background loop, on demand. No-ops with a reason if
@@ -602,7 +616,7 @@ def sync_billing(_: User = Depends(require_staff)):
 
 
 @app.post("/import/customers")
-def import_customers(_: User = Depends(require_staff)):
+def import_customers(_: User = Depends(require_finance)):
     """Import the QuickBooks customer roster into the local Customer table (staff only).
 
     Run this once (then as needed) so the A/R sync can match invoices to customers
@@ -616,12 +630,13 @@ def import_customers(_: User = Depends(require_staff)):
 # Lets the office create/reset the login a customer uses to see their own
 # orders & billing — without any server shell access.
 @app.get("/customers")
-def list_customers(_: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """All customers with whether they already have a login (staff only).
-
-    Powers the dispatch board's "Customer logins" picker. `login_email` is the
-    email a customer signs in with, or null if no login exists yet."""
+def list_customers(user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """All customers. Full staff get account info (login, contact, terms, COD) for
+    the Customers panel. Workers get only id + name — enough for the New Order
+    picker, without exposing account/financial details."""
     customers = s.exec(select(Customer).order_by(Customer.name)).all()
+    if user.role == "worker":
+        return [{"id": c.id, "name": c.name} for c in customers]
     logins = {
         u.customer_id: u.email
         for u in s.exec(select(User).where(User.role == "customer")).all()
@@ -634,9 +649,31 @@ def list_customers(_: User = Depends(require_staff), s: Session = Depends(get_se
     ]
 
 
+@app.post("/staff")
+def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
+                       s: Session = Depends(get_session)):
+    """Create or reset an office login (full staff only). role 'staff' = full
+    access incl. financials; 'worker' = concrete crew / TxDOT engineers
+    (orders + tracking, no financials/account info)."""
+    role = body.role if body.role in ("staff", "worker") else "worker"
+    email = (body.email or "").strip().lower()
+    if not email or len(body.password or "") < 6:
+        raise HTTPException(422, "Email and a 6+ character password are required")
+    u = s.exec(select(User).where(User.email == email)).first()
+    if u:
+        u.password_hash = hash_password(body.password)
+        u.role = role
+        u.customer_id = None
+        s.add(u); s.commit()
+        return {"ok": True, "action": "updated", "email": email, "role": role}
+    u = User(email=email, password_hash=hash_password(body.password), role=role, customer_id=None)
+    s.add(u); s.commit()
+    return {"ok": True, "action": "created", "email": email, "role": role}
+
+
 @app.post("/customers/{customer_id}/cod")
 def set_customer_cod(customer_id: int, body: CodIn,
-                     _: User = Depends(require_staff), s: Session = Depends(get_session)):
+                     _: User = Depends(require_finance), s: Session = Depends(get_session)):
     """Mark a customer COD (pay before delivery) on/off (staff only). New orders
     for a COD customer require prepayment before they can be dispatched."""
     c = s.get(Customer, customer_id)
@@ -658,7 +695,7 @@ def _invoice_age_days(date_str: str) -> int | None:
 
 
 @app.post("/customers/cod-from-aging")
-def cod_from_aging(days: int = 30, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+def cod_from_aging(days: int = 30, _: User = Depends(require_finance), s: Session = Depends(get_session)):
     """Flag every customer who has an unpaid invoice at least `days` days old as COD
     (staff only). Only sets COD on (never clears it), so manual flags are preserved
     and a customer doesn't flip off COD just because they paid — re-run any time."""
@@ -685,7 +722,7 @@ def cod_from_aging(days: int = 30, _: User = Depends(require_staff), s: Session 
 def set_customer_login(
     customer_id: int,
     body: CustomerLoginIn,
-    _: User = Depends(require_staff),
+    _: User = Depends(require_finance),
     s: Session = Depends(get_session),
 ):
     """Create or reset a customer's login (staff only).
@@ -726,7 +763,7 @@ def set_customer_login(
 @app.delete("/customers/{customer_id}/login")
 def remove_customer_login(
     customer_id: int,
-    _: User = Depends(require_staff),
+    _: User = Depends(require_finance),
     s: Session = Depends(get_session),
 ):
     """Revoke a customer's login (staff only). They can no longer sign in; their
@@ -752,7 +789,7 @@ def sms_enabled(_: User = Depends(get_current_user)):
 def text_invite(
     customer_id: int,
     body: TextInviteIn,
-    _: User = Depends(require_staff),
+    _: User = Depends(require_finance),
     s: Session = Depends(get_session),
 ):
     """Send a customer their invite text via the texting service (staff only).

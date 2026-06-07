@@ -92,8 +92,21 @@ def get_current_user(
     return user
 
 
+# Office roles that get the dispatch board. "worker" = concrete crew / TxDOT
+# engineers: everything EXCEPT financials & account info. "staff" = full access.
+_OFFICE_ROLES = ("staff", "worker")
+
+
 def require_staff(user: User = Depends(get_current_user)) -> User:
-    """For office/dispatch-only endpoints."""
-    if user.role != "staff":
+    """Office/dispatch access — full staff OR a limited worker."""
+    if user.role not in _OFFICE_ROLES:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Staff access required")
+    return user
+
+
+def require_finance(user: User = Depends(get_current_user)) -> User:
+    """Endpoints that expose money / customer account info — full staff only.
+    Workers (concrete crew, TxDOT engineers) are blocked."""
+    if user.role != "staff":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Financial access is restricted to approved staff")
     return user
