@@ -15,6 +15,8 @@ class User(SQLModel, table=True):
     role: str = "customer"                       # "customer" | "staff" | "worker"
     customer_id: Optional[int] = Field(default=None, foreign_key="customer.id")
     phone: Optional[str] = None                  # for worker logins, so they can be texted their login
+    company: Optional[str] = None                # worker's employer / who they work for (label only, not access)
+    project: Optional[str] = None                # worker's current project/job (label only)
 
 
 class Customer(SQLModel, table=True):

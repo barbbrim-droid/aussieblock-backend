@@ -48,6 +48,8 @@ class StaffLoginIn(BaseModel):
     password: str
     role: str = "worker"
     phone: str = ""               # worker's cell, so they can be texted their login
+    company: str = ""             # who they work for (label only — doesn't limit what they see)
+    project: str = ""             # their current project/job (label only)
 
 
 class OrderIn(BaseModel):
@@ -668,23 +670,31 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     if not email or len(body.password or "") < 6:
         raise HTTPException(422, "Email and a 6+ character password are required")
     phone = (body.phone or "").strip() or None
+    company = (body.company or "").strip() or None
+    project = (body.project or "").strip() or None
     u = s.exec(select(User).where(User.email == email)).first()
     if u:
         u.password_hash = hash_password(body.password)
         u.role = role
         u.customer_id = None
         u.phone = phone
+        u.company = company
+        u.project = project
         s.add(u); s.commit()
-        return {"ok": True, "action": "updated", "email": email, "role": role, "phone": phone}
-    u = User(email=email, password_hash=hash_password(body.password), role=role, customer_id=None, phone=phone)
+        return {"ok": True, "action": "updated", "email": email, "role": role,
+                "phone": phone, "company": company, "project": project}
+    u = User(email=email, password_hash=hash_password(body.password), role=role,
+             customer_id=None, phone=phone, company=company, project=project)
     s.add(u); s.commit()
-    return {"ok": True, "action": "created", "email": email, "role": role, "phone": phone}
+    return {"ok": True, "action": "created", "email": email, "role": role,
+            "phone": phone, "company": company, "project": project}
 
 
 @app.get("/staff")
 def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_session)):
     """All office logins (full staff only)."""
-    return [{"email": u.email, "role": u.role, "phone": u.phone}
+    return [{"email": u.email, "role": u.role, "phone": u.phone,
+             "company": u.company, "project": u.project}
             for u in s.exec(select(User).where(User.role.in_(("staff", "worker")))).all()]
 
 

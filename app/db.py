@@ -26,7 +26,7 @@ def init_db() -> None:
 # needs the column backfilled. Each step is idempotent and safe to re-run.
 _COLUMN_MIGRATIONS = {
     "customer": {"qbo_id": "VARCHAR", "cod": "BOOLEAN DEFAULT 0", "email": "VARCHAR"},
-    "user": {"phone": "VARCHAR"},
+    "user": {"phone": "VARCHAR", "company": "VARCHAR", "project": "VARCHAR"},
     "truck": {"notes": "VARCHAR"},
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
     "order": {
