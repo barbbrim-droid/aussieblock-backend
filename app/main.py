@@ -201,18 +201,22 @@ def login(form: OAuth2PasswordRequestForm = Depends(), s: Session = Depends(get_
             "Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    company = s.get(Customer, user.customer_id).name if user.customer_id else None
     return {
         "access_token": create_access_token(user),
         "token_type": "bearer",
         "role": user.role,
         "customer_id": user.customer_id,
+        "company": company,
     }
 
 
 @app.get("/auth/me")
-def me(user: User = Depends(get_current_user)):
-    """Who am I? Handy for the front-end to render the right screen."""
-    return {"email": user.email, "role": user.role, "customer_id": user.customer_id}
+def me(user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Who am I? Handy for the front-end to render the right screen. `company` is
+    the customer name for company-scoped users (customer/worker), else None."""
+    company = s.get(Customer, user.customer_id).name if user.customer_id else None
+    return {"email": user.email, "role": user.role, "customer_id": user.customer_id, "company": company}
 
 
 def _next_order_ref(s: Session) -> str:
