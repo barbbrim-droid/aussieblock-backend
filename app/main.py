@@ -45,7 +45,7 @@ class StaffLoginIn(BaseModel):
     """Body for creating/resetting an office login. role: 'staff' (full access)
     or 'worker' (orders/tracking, no financials)."""
     email: str
-    password: str
+    password: str = ""            # required for a NEW login; blank when editing = keep current password
     role: str = "worker"
     phone: str = ""               # worker's cell, so they can be texted their login
     company: str = ""             # who they work for (label only — doesn't limit what they see)
@@ -662,19 +662,27 @@ def backfill_emails(_: User = Depends(require_finance)):
 @app.post("/staff")
 def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
                        s: Session = Depends(get_session)):
-    """Create or reset an office login (full staff only). role 'staff' = full
+    """Create or update an office login (full staff only). role 'staff' = full
     access incl. financials; 'worker' = concrete crew / TxDOT engineers
-    (orders + tracking, no financials/account info)."""
+    (orders + tracking, no financials/account info).
+
+    For an EXISTING login, a blank password leaves the current one in place —
+    so phone/company/project/role can be updated without resetting the password.
+    A new login always requires a 6+ character password."""
     role = body.role if body.role in ("staff", "worker") else "worker"
     email = (body.email or "").strip().lower()
-    if not email or len(body.password or "") < 6:
-        raise HTTPException(422, "Email and a 6+ character password are required")
+    if not email:
+        raise HTTPException(422, "Email is required")
+    pw = body.password or ""
     phone = (body.phone or "").strip() or None
     company = (body.company or "").strip() or None
     project = (body.project or "").strip() or None
     u = s.exec(select(User).where(User.email == email)).first()
     if u:
-        u.password_hash = hash_password(body.password)
+        if pw:                                   # only reset the password when one is supplied
+            if len(pw) < 6:
+                raise HTTPException(422, "Password must be at least 6 characters")
+            u.password_hash = hash_password(pw)
         u.role = role
         u.customer_id = None
         u.phone = phone
@@ -682,12 +690,16 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
         u.project = project
         s.add(u); s.commit()
         return {"ok": True, "action": "updated", "email": email, "role": role,
-                "phone": phone, "company": company, "project": project}
-    u = User(email=email, password_hash=hash_password(body.password), role=role,
+                "phone": phone, "company": company, "project": project,
+                "password_changed": bool(pw)}
+    if len(pw) < 6:
+        raise HTTPException(422, "A 6+ character password is required for a new login")
+    u = User(email=email, password_hash=hash_password(pw), role=role,
              customer_id=None, phone=phone, company=company, project=project)
     s.add(u); s.commit()
     return {"ok": True, "action": "created", "email": email, "role": role,
-            "phone": phone, "company": company, "project": project}
+            "phone": phone, "company": company, "project": project,
+            "password_changed": True}
 
 
 @app.get("/staff")
