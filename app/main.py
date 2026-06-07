@@ -18,9 +18,11 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from datetime import date, datetime
+
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff,
 )
@@ -519,6 +521,40 @@ def set_customer_cod(customer_id: int, body: CodIn,
     c.cod = bool(body.cod)
     s.add(c); s.commit()
     return {"ok": True, "customer": c.name, "cod": c.cod}
+
+
+def _invoice_age_days(date_str: str) -> int | None:
+    """Age in days of an invoice from its stored date string, or None if unparseable."""
+    for fmt in ("%b %d, %Y", "%Y-%m-%d"):
+        try:
+            return (date.today() - datetime.strptime(date_str, fmt).date()).days
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+@app.post("/customers/cod-from-aging")
+def cod_from_aging(days: int = 30, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Flag every customer who has an unpaid invoice at least `days` days old as COD
+    (staff only). Only sets COD on (never clears it), so manual flags are preserved
+    and a customer doesn't flip off COD just because they paid — re-run any time."""
+    aged: set[int] = set()
+    for inv in s.exec(select(Invoice)).all():
+        if inv.status == "paid":
+            continue
+        age = _invoice_age_days(inv.date)
+        if age is not None and age >= days:
+            aged.add(inv.customer_id)
+    newly_flagged = []
+    for cid in aged:
+        c = s.get(Customer, cid)
+        if c and not c.cod:
+            c.cod = True
+            s.add(c)
+            newly_flagged.append(c.name)
+    s.commit()
+    return {"ok": True, "days": days, "aged_customers": len(aged),
+            "newly_flagged": sorted(newly_flagged)}
 
 
 @app.post("/customers/{customer_id}/login")
