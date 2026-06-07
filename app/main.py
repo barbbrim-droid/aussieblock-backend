@@ -14,7 +14,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -158,6 +158,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "use_for": o.use_for,
         "project": o.project,
         "has_batch_ticket": bool(o.batch_ticket),
+        "has_print_ticket": bool(o.batch_ticket_print),
         "batch_data": json.loads(o.batch_data) if o.batch_data else None,
         "archived": bool(o.archived),
         "prepay_required": o.prepay_required,
@@ -290,11 +291,11 @@ def request_order(
     user: User = Depends(get_current_user),
     s: Session = Depends(get_session),
 ):
-    """A customer places a concrete order from the app. It lands as 'requested'
-    on the dispatch board for staff to confirm. Always tied to the caller's own
-    customer account — the customer_id can't be spoofed."""
-    if user.role != "customer" or user.customer_id is None:
-        raise HTTPException(403, "Only customer accounts can place orders")
+    """A customer (or their worker) places a concrete order from the app. It lands
+    as 'requested' on the dispatch board for staff to confirm. Always tied to the
+    caller's own company — the customer_id can't be spoofed."""
+    if user.customer_id is None:   # company-scoped users only (customer or worker); staff use /orders
+        raise HTTPException(403, "Only a company account can place orders here")
     site, mix, qty = body.site.strip(), body.mix.strip(), body.qty.strip()
     when = body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
@@ -398,8 +399,12 @@ def save_batch_data(ref: str, body: BatchDataIn,
 
 @app.post("/orders/{ref}/batch-ticket")
 async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
+                              variant: str = Query("view"),
                               _: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Attach a batch-ticket PDF to an order (staff only, once it's batched)."""
+    """Attach a batch-ticket PDF to an order (staff only, once it's batched).
+
+    variant='view' = the on-screen (dark) ticket; variant='print' = the light,
+    printer-friendly copy the app's Print button serves."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o:
         raise HTTPException(404, "Order not found")
@@ -411,23 +416,30 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
     data = await file.read()
     if len(data) > 15 * 1024 * 1024:
         raise HTTPException(413, "That PDF is too large (15 MB max).")
-    fname = f"{ref}.pdf"
+    is_print = variant == "print"
+    fname = f"{ref}_print.pdf" if is_print else f"{ref}.pdf"
     with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
         fh.write(data)
-    o.batch_ticket = fname
+    if is_print:
+        o.batch_ticket_print = fname
+    else:
+        o.batch_ticket = fname
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
 
 @app.get("/orders/{ref}/batch-ticket")
-def get_batch_ticket(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
-    """Download an order's batch-ticket PDF (staff, or anyone on that company)."""
+def get_batch_ticket(ref: str, variant: str = Query("view"),
+                     user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Download an order's batch-ticket PDF (staff, or anyone on that company).
+    variant='print' serves the light copy if one exists (else falls back)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or (user.role != "staff" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
-    if not o.batch_ticket:
+    fileref = (o.batch_ticket_print or o.batch_ticket) if variant == "print" else o.batch_ticket
+    if not fileref:
         raise HTTPException(404, "No batch ticket for this order yet.")
-    path = os.path.join(_batch_ticket_dir(), o.batch_ticket)
+    path = os.path.join(_batch_ticket_dir(), fileref)
     if not os.path.exists(path):
         raise HTTPException(404, "The batch ticket file is missing.")
     return FileResponse(path, media_type="application/pdf", filename=f"batch-ticket-{ref}.pdf")
@@ -439,12 +451,15 @@ def delete_batch_ticket(ref: str, _: User = Depends(require_staff), s: Session =
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o:
         raise HTTPException(404, "Order not found")
-    if o.batch_ticket:
-        try:
-            os.remove(os.path.join(_batch_ticket_dir(), o.batch_ticket))
-        except OSError:
-            pass   # file already gone — still clear the reference
+    for fileref in (o.batch_ticket, o.batch_ticket_print):
+        if fileref:
+            try:
+                os.remove(os.path.join(_batch_ticket_dir(), fileref))
+            except OSError:
+                pass   # file already gone — still clear the reference
+    if o.batch_ticket or o.batch_ticket_print:
         o.batch_ticket = None
+        o.batch_ticket_print = None
         s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 

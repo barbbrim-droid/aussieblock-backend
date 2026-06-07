@@ -71,6 +71,9 @@ class Order(SQLModel, table=True):
     # four times, inspector, the Rock/Sand/Cement/Air/Water mix-design grid,
     # pricing, received-by). Lets the app hold a complete digital copy.
     batch_data: Optional[str] = None
+    # Light/print-friendly version of the batch ticket (the on-screen one is dark
+    # to match the app; this is what the "Print" button serves).
+    batch_ticket_print: Optional[str] = None
     archived: bool = False                       # staff hid this completed order from the default lists
     # COD / prepay: when required, the order can't be dispatched until paid.
     prepay_required: bool = False
