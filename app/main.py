@@ -234,6 +234,14 @@ def create_order(
     return _order_json(o, s)
 
 
+def _is_past_date(s: str) -> bool:
+    """True if a YYYY-MM-DD string is before today. Non-ISO strings → False (allowed)."""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date() < date.today()
+    except ValueError:
+        return False
+
+
 @app.post("/orders/request")
 def request_order(
     body: OrderRequestIn,
@@ -250,6 +258,8 @@ def request_order(
     when = body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
+    if _is_past_date(when):
+        raise HTTPException(422, "Delivery date can't be in the past.")
     cust = s.get(Customer, user.customer_id)
     o = Order(ref=_next_order_ref(s), customer_id=user.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
@@ -297,6 +307,8 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
     site, mix, qty, when = body.site.strip(), body.mix.strip(), body.qty.strip(), body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
+    if user.role == "customer" and _is_past_date(when):
+        raise HTTPException(422, "Delivery date can't be in the past.")
     o.site, o.mix, o.qty, o.scheduled_for, o.time = site, mix, qty, when, body.time.strip()
     o.slump = (body.slump or "").strip() or None
     o.admixtures = ", ".join(body.admixtures) or None
