@@ -671,6 +671,26 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     return {"ok": True, "action": "created", "email": email, "role": role}
 
 
+@app.get("/staff")
+def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """All office logins (full staff only)."""
+    return [{"email": u.email, "role": u.role}
+            for u in s.exec(select(User).where(User.role.in_(("staff", "worker")))).all()]
+
+
+@app.delete("/staff/{email}")
+def delete_staff(email: str, user: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Remove an office login (full staff only). Can't delete your own account."""
+    target = (email or "").strip().lower()
+    u = s.exec(select(User).where(User.email == target)).first()
+    if not u or u.role not in ("staff", "worker"):
+        raise HTTPException(404, "Office login not found")
+    if u.id == user.id:
+        raise HTTPException(409, "You can't remove your own login")
+    s.delete(u); s.commit()
+    return {"ok": True, "removed": target}
+
+
 @app.post("/customers/{customer_id}/cod")
 def set_customer_cod(customer_id: int, body: CodIn,
                      _: User = Depends(require_finance), s: Session = Depends(get_session)):
