@@ -10,10 +10,12 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -140,6 +142,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "admixtures": o.admixtures,
         "use_for": o.use_for,
         "project": o.project,
+        "has_batch_ticket": bool(o.batch_ticket),
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
@@ -338,6 +341,53 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
     o.notes = (body.notes or "").strip() or None
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
+
+
+# ── Batch tickets (the plant's PDF, attached by staff once an order is batched) ──
+_BATCHABLE_STATUSES = {"batched", "enroute", "onsite", "complete"}
+
+
+def _batch_ticket_dir() -> str:
+    d = config.data_path("batch_tickets")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@app.post("/orders/{ref}/batch-ticket")
+async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
+                              _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Attach a batch-ticket PDF to an order (staff only, once it's batched)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if o.status not in _BATCHABLE_STATUSES:
+        raise HTTPException(409, "You can add a batch ticket once the order is batched.")
+    name = (file.filename or "").lower()
+    if not (name.endswith(".pdf") or (file.content_type or "").lower() == "application/pdf"):
+        raise HTTPException(422, "The batch ticket must be a PDF.")
+    data = await file.read()
+    if len(data) > 15 * 1024 * 1024:
+        raise HTTPException(413, "That PDF is too large (15 MB max).")
+    fname = f"{ref}.pdf"
+    with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
+        fh.write(data)
+    o.batch_ticket = fname
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+@app.get("/orders/{ref}/batch-ticket")
+def get_batch_ticket(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Download an order's batch-ticket PDF (staff, or the owning customer)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+        raise HTTPException(404, "Order not found")
+    if not o.batch_ticket:
+        raise HTTPException(404, "No batch ticket for this order yet.")
+    path = os.path.join(_batch_ticket_dir(), o.batch_ticket)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The batch ticket file is missing.")
+    return FileResponse(path, media_type="application/pdf", filename=f"batch-ticket-{ref}.pdf")
 
 
 @app.post("/orders/{ref}/charge")

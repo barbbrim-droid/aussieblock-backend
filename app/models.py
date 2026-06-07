@@ -60,6 +60,7 @@ class Order(SQLModel, table=True):
     admixtures: Optional[str] = None            # comma-joined, e.g. "Fiber, Color"
     use_for: Optional[str] = None               # what the concrete is for (slab, curbs, …)
     project: Optional[str] = None               # optional project / job name or reference
+    batch_ticket: Optional[str] = None          # stored PDF filename once a batch ticket is uploaded
     # COD / prepay: when required, the order can't be dispatched until paid.
     prepay_required: bool = False
     prepay_amount: Optional[float] = None       # load total staff set
