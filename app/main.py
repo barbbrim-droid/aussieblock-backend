@@ -840,6 +840,34 @@ def text_invite(
     return {"ok": True, "to": result["to"], "customer": cust.name}
 
 
+@app.post("/staff/{email}/text-invite")
+def staff_text_invite(
+    email: str,
+    body: TextInviteIn,
+    _: User = Depends(require_finance),
+    s: Session = Depends(get_session),
+):
+    """Text a worker/staffer their login invite (full staff only).
+
+    Texts the phone on file for that office login. Returns 404 if there's no such
+    login, 422 if they have no phone number on file, 503 if texting isn't set up
+    yet (the board then falls back to the phone's messaging app), or 400 with the
+    provider's reason if the send fails."""
+    target = (email or "").strip().lower()
+    u = s.exec(select(User).where(User.email == target)).first()
+    if not u or u.role not in ("staff", "worker"):
+        raise HTTPException(404, "Office login not found")
+    if not (u.phone or "").strip():
+        raise HTTPException(422, "No phone number on file for this login")
+    if not (body.message or "").strip():
+        raise HTTPException(422, "Message is empty")
+    result = send_sms(u.phone, body.message)
+    if not result.get("ok"):
+        code = 503 if result.get("configured") is False else 400
+        raise HTTPException(code, result.get("reason", "Could not send text"))
+    return {"ok": True, "to": result["to"], "email": target}
+
+
 # ── Dispatch — order control (staff only) ────────────────────────────────────
 # These are the two things staff do from the dispatch board: move an order along
 # its delivery stages, and put a truck on a job.
