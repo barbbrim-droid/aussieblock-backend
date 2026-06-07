@@ -143,6 +143,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "use_for": o.use_for,
         "project": o.project,
         "has_batch_ticket": bool(o.batch_ticket),
+        "archived": bool(o.archived),
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
@@ -388,6 +389,21 @@ def get_batch_ticket(ref: str, user: User = Depends(get_current_user), s: Sessio
     if not os.path.exists(path):
         raise HTTPException(404, "The batch ticket file is missing.")
     return FileResponse(path, media_type="application/pdf", filename=f"batch-ticket-{ref}.pdf")
+
+
+@app.post("/orders/{ref}/archive")
+def archive_order(ref: str, archived: bool = True, _: User = Depends(require_staff),
+                  s: Session = Depends(get_session)):
+    """Archive (or unarchive) a completed order so it drops out of the default
+    past-orders lists. Staff only; only completed orders can be archived."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if archived and o.status != "complete":
+        raise HTTPException(409, "Only completed orders can be archived.")
+    o.archived = archived
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
 
 
 @app.post("/orders/{ref}/charge")

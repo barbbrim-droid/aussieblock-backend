@@ -61,6 +61,7 @@ class Order(SQLModel, table=True):
     use_for: Optional[str] = None               # what the concrete is for (slab, curbs, …)
     project: Optional[str] = None               # optional project / job name or reference
     batch_ticket: Optional[str] = None          # stored PDF filename once a batch ticket is uploaded
+    archived: bool = False                       # staff hid this completed order from the default lists
     # COD / prepay: when required, the order can't be dispatched until paid.
     prepay_required: bool = False
     prepay_amount: Optional[float] = None       # load total staff set
