@@ -325,12 +325,10 @@ def cancel_order(ref: str, user: User = Depends(get_current_user), s: Session = 
     """Cancel (delete) an order. Staff can cancel any order; a customer can cancel
     their own only while it's still requested/scheduled (not yet dispatched).
     Also clears any plus-load requests tied to it."""
-    if user.role == "worker":
-        raise HTTPException(403, "Workers can view orders but not change them")
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
-    if user.role == "customer" and o.status not in _EDITABLE_STATUSES:
+    if user.role != "staff" and o.status not in _EDITABLE_STATUSES:
         raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
     for r in s.exec(select(PlusLoadRequest).where(PlusLoadRequest.order_id == o.id)).all():
         s.delete(r)
@@ -344,17 +342,15 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
                s: Session = Depends(get_session)):
     """Modify an order's details. Staff or the owning customer, only while the
     order is still requested/scheduled (not yet on a truck)."""
-    if user.role == "worker":
-        raise HTTPException(403, "Workers can view orders but not change them")
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
-    if user.role == "customer" and o.status not in _EDITABLE_STATUSES:
+    if user.role != "staff" and o.status not in _EDITABLE_STATUSES:
         raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
     site, mix, qty, when = body.site.strip(), body.mix.strip(), body.qty.strip(), body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
-    if user.role == "customer" and _is_past_date(when):
+    if user.role != "staff" and _is_past_date(when):
         raise HTTPException(422, "Delivery date can't be in the past.")
     o.site, o.mix, o.qty, o.scheduled_for, o.time = site, mix, qty, when, body.time.strip()
     o.slump = (body.slump or "").strip() or None
