@@ -221,6 +221,8 @@ def create_order(
     when = body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
+    if _is_past_date(when):
+        raise HTTPException(422, "Delivery date can't be in the past.")
 
     truck_id = None
     label = (body.truck or "").strip()
