@@ -12,7 +12,7 @@ so wiring the front-end to it later is a drop-in.
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -237,6 +237,7 @@ def create_order(
 @app.post("/orders/request")
 def request_order(
     body: OrderRequestIn,
+    background: BackgroundTasks,
     user: User = Depends(get_current_user),
     s: Session = Depends(get_session),
 ):
@@ -256,7 +257,11 @@ def request_order(
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
               use_for=(body.use_for or "").strip() or None, prepay_required=bool(cust and cust.cod))
     s.add(o); s.commit(); s.refresh(o)
-    return _order_json(o, s)
+    data = _order_json(o, s)
+    # Alert staff (text/email) in the background — never blocks or fails the order.
+    from .integrations.notify import notify_new_order
+    background.add_task(notify_new_order, data, cust.name if cust else "Customer")
+    return data
 
 
 _EDITABLE_STATUSES = ("requested", "scheduled")   # before the load is on a truck

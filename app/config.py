@@ -75,6 +75,24 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "").strip()   # e.g. +13255551234
 USE_TWILIO = all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER])
 
+# ── New-order staff alerts ──
+# When a customer places an order, alert staff by text and/or email. Set these to
+# the staff phone number(s) / email(s) (comma-separated). SMS uses the Twilio
+# creds above; email uses the SMTP settings below. Leave blank to disable.
+NOTIFY_SMS = [s.strip() for s in os.getenv("NOTIFY_SMS", "").split(",") if s.strip()]
+NOTIFY_EMAIL = [s.strip() for s in os.getenv("NOTIFY_EMAIL", "").split(",") if s.strip()]
+
+# ── Outbound email (SMTP) ──
+# Enable order-alert emails (and any future email). Works with any SMTP provider,
+# e.g. SendGrid (host smtp.sendgrid.net, user "apikey", pass = the API key) or
+# Gmail (host smtp.gmail.com, user the address, pass an app password).
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
+USE_EMAIL = all([SMTP_HOST, SMTP_USER, SMTP_PASS])
+
 # Aussieblock yard: 2951 E FM 2105, San Angelo, TX (exact pin) — origin for mock
 # truck routes and the map's yard marker / geofence center.
 PLANT_LAT = 31.523310
