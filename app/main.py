@@ -10,6 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -156,6 +157,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "use_for": o.use_for,
         "project": o.project,
         "has_batch_ticket": bool(o.batch_ticket),
+        "batch_data": json.loads(o.batch_data) if o.batch_data else None,
         "archived": bool(o.archived),
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
@@ -366,6 +368,27 @@ def _batch_ticket_dir() -> str:
     d = config.data_path("batch_tickets")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+class BatchDataIn(BaseModel):
+    """The full set of paper batch-ticket fields, saved against an order.
+    Free-form so the form can grow without an API change; the front-end owns
+    the field layout (plant, air, load, ordered/delivered, water reducer,
+    retarder, the four times, inspector, the mix-design grid, pricing,
+    received-by)."""
+    data: dict
+
+
+@app.put("/orders/{ref}/batch-data")
+def save_batch_data(ref: str, body: BatchDataIn,
+                    _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Save the complete delivered batch-ticket fields for an order (staff)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    o.batch_data = json.dumps(body.data)
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
 
 
 @app.post("/orders/{ref}/batch-ticket")

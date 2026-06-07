@@ -66,6 +66,11 @@ class Order(SQLModel, table=True):
     use_for: Optional[str] = None               # what the concrete is for (slab, curbs, …)
     project: Optional[str] = None               # optional project / job name or reference
     batch_ticket: Optional[str] = None          # stored PDF filename once a batch ticket is uploaded
+    # Full delivered batch-ticket, as a JSON string: every field on the paper
+    # ticket (plant, air, load, ordered/delivered, water reducer, retarder, the
+    # four times, inspector, the Rock/Sand/Cement/Air/Water mix-design grid,
+    # pricing, received-by). Lets the app hold a complete digital copy.
+    batch_data: Optional[str] = None
     archived: bool = False                       # staff hid this completed order from the default lists
     # COD / prepay: when required, the order can't be dispatched until paid.
     prepay_required: bool = False
