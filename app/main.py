@@ -323,8 +323,8 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or (user.role == "customer" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
-    if o.status not in _EDITABLE_STATUSES:
-        raise HTTPException(409, "This delivery is already in progress and can't be changed here.")
+    if user.role == "customer" and o.status not in _EDITABLE_STATUSES:
+        raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
     site, mix, qty, when = body.site.strip(), body.mix.strip(), body.qty.strip(), body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
