@@ -43,13 +43,14 @@ class CustomerLoginIn(BaseModel):
 
 
 class StaffLoginIn(BaseModel):
-    """Body for creating/resetting an office login. role: 'staff' (full access)
-    or 'worker' (orders/tracking, no financials)."""
+    """Body for creating/resetting a login. role: 'staff' = the dispatch operator
+    (full board); 'worker' = a customer's field person, scoped to ONE company
+    (their orders + tracking only, no billing, no board)."""
     email: str
     password: str = ""            # required for a NEW login; blank when editing = keep current password
     role: str = "worker"
     phone: str = ""               # worker's cell, so they can be texted their login
-    company: str = ""             # who they work for (label only — doesn't limit what they see)
+    customer_id: int | None = None  # REQUIRED for a worker — the company they work for (scopes what they see)
     project: str = ""             # their current project/job (label only)
 
 
@@ -292,7 +293,7 @@ def request_order(
     """A customer places a concrete order from the app. It lands as 'requested'
     on the dispatch board for staff to confirm. Always tied to the caller's own
     customer account — the customer_id can't be spoofed."""
-    if user.customer_id is None:
+    if user.role != "customer" or user.customer_id is None:
         raise HTTPException(403, "Only customer accounts can place orders")
     site, mix, qty = body.site.strip(), body.mix.strip(), body.qty.strip()
     when = body.scheduled_for.strip()
@@ -323,6 +324,8 @@ def cancel_order(ref: str, user: User = Depends(get_current_user), s: Session = 
     """Cancel (delete) an order. Staff can cancel any order; a customer can cancel
     their own only while it's still requested/scheduled (not yet dispatched).
     Also clears any plus-load requests tied to it."""
+    if user.role == "worker":
+        raise HTTPException(403, "Workers can view orders but not change them")
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or (user.role == "customer" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
@@ -340,6 +343,8 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
                s: Session = Depends(get_session)):
     """Modify an order's details. Staff or the owning customer, only while the
     order is still requested/scheduled (not yet on a truck)."""
+    if user.role == "worker":
+        raise HTTPException(403, "Workers can view orders but not change them")
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or (user.role == "customer" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
@@ -416,9 +421,9 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
 
 @app.get("/orders/{ref}/batch-ticket")
 def get_batch_ticket(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
-    """Download an order's batch-ticket PDF (staff, or the owning customer)."""
+    """Download an order's batch-ticket PDF (staff, or anyone on that company)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
     if not o.batch_ticket:
         raise HTTPException(404, "No batch ticket for this order yet.")
@@ -518,11 +523,16 @@ def list_orders(
     s: Session = Depends(get_session),
 ):
     q = select(Order)
-    if user.role == "customer":
-        # customers are locked to their own orders, ignoring any customer_id arg
+    if user.role == "staff":
+        # The dispatch operator sees everything (optionally filtered to one company).
+        if customer_id is not None:
+            q = q.where(Order.customer_id == customer_id)
+    elif user.customer_id is not None:
+        # Company-scoped (customer or worker): locked to their own company.
         q = q.where(Order.customer_id == user.customer_id)
-    elif customer_id is not None:
-        q = q.where(Order.customer_id == customer_id)
+    else:
+        # Non-staff with no company → nothing (defensive; shouldn't happen).
+        return []
     return [_order_json(o, s) for o in s.exec(q).all()]
 
 
@@ -533,8 +543,9 @@ def get_order(
     s: Session = Depends(get_session),
 ):
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    # Customers can't even tell whether someone else's order exists -> 404, not 403.
-    if not o or (user.role == "customer" and o.customer_id != user.customer_id):
+    # Company-scoped users (customer/worker) can't even tell whether another
+    # company's order exists -> 404, not 403. Only staff see any.
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
     return _order_json(o, s)
 
@@ -685,21 +696,31 @@ def backfill_emails(_: User = Depends(require_finance)):
 @app.post("/staff")
 def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
                        s: Session = Depends(get_session)):
-    """Create or update an office login (full staff only). role 'staff' = full
-    access incl. financials; 'worker' = concrete crew / TxDOT engineers
-    (orders + tracking, no financials/account info).
+    """Create or update a login (full staff only).
 
-    For an EXISTING login, a blank password leaves the current one in place —
-    so phone/company/project/role can be updated without resetting the password.
-    A new login always requires a 6+ character password."""
+    role 'staff' = the dispatch operator (full board, financials). role 'worker' =
+    a customer's field person tied to ONE company (customer_id, REQUIRED) — they
+    see only that company's orders + tracking, never billing or the board.
+
+    For an EXISTING login, a blank password leaves the current one in place — so
+    company/phone/project/role can be updated without resetting the password. A
+    new login always requires a 6+ character password."""
     role = body.role if body.role in ("staff", "worker") else "worker"
     email = (body.email or "").strip().lower()
     if not email:
         raise HTTPException(422, "Email is required")
     pw = body.password or ""
     phone = (body.phone or "").strip() or None
-    company = (body.company or "").strip() or None
     project = (body.project or "").strip() or None
+    # A worker MUST belong to a real company (that's what scopes their view).
+    cust_id = None
+    company = None
+    if role == "worker":
+        cust = s.get(Customer, body.customer_id) if body.customer_id else None
+        if not cust:
+            raise HTTPException(422, "Pick the company this worker belongs to")
+        cust_id = cust.id
+        company = cust.name            # stored for easy display in the list
     u = s.exec(select(User).where(User.email == email)).first()
     if u:
         if pw:                                   # only reset the password when one is supplied
@@ -707,29 +728,29 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
                 raise HTTPException(422, "Password must be at least 6 characters")
             u.password_hash = hash_password(pw)
         u.role = role
-        u.customer_id = None
+        u.customer_id = cust_id
         u.phone = phone
         u.company = company
         u.project = project
         s.add(u); s.commit()
         return {"ok": True, "action": "updated", "email": email, "role": role,
-                "phone": phone, "company": company, "project": project,
-                "password_changed": bool(pw)}
+                "phone": phone, "customer_id": cust_id, "company": company,
+                "project": project, "password_changed": bool(pw)}
     if len(pw) < 6:
         raise HTTPException(422, "A 6+ character password is required for a new login")
     u = User(email=email, password_hash=hash_password(pw), role=role,
-             customer_id=None, phone=phone, company=company, project=project)
+             customer_id=cust_id, phone=phone, company=company, project=project)
     s.add(u); s.commit()
     return {"ok": True, "action": "created", "email": email, "role": role,
-            "phone": phone, "company": company, "project": project,
-            "password_changed": True}
+            "phone": phone, "customer_id": cust_id, "company": company,
+            "project": project, "password_changed": True}
 
 
 @app.get("/staff")
 def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_session)):
-    """All office logins (full staff only)."""
+    """All office/worker logins (full staff only)."""
     return [{"email": u.email, "role": u.role, "phone": u.phone,
-             "company": u.company, "project": u.project}
+             "customer_id": u.customer_id, "company": u.company, "project": u.project}
             for u in s.exec(select(User).where(User.role.in_(("staff", "worker")))).all()]
 
 
