@@ -54,6 +54,7 @@ class Order(SQLModel, table=True):
     time: str
     status: str = "scheduled"                   # requested|scheduled|batched|enroute|onsite|complete
     truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")
+    driver: Optional[str] = None                 # assigned driver name (Rodney/Brandon/Henry)
     progress: float = 0.0                       # 0..1 along the route
     notes: Optional[str] = None                 # customer's delivery instructions (optional)
     slump: Optional[str] = None                 # e.g. '5"'

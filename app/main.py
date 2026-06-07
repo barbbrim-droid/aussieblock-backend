@@ -51,6 +51,7 @@ class OrderIn(BaseModel):
     scheduled_for: str            # date the customer wants it (e.g. "2026-06-10")
     time: str = ""                # delivery time (e.g. "9:30 AM" or "08:00")
     truck: str | None = None      # optional truck label to assign now
+    driver: str = ""              # optional driver name to assign now
     notes: str = ""               # delivery instructions (optional)
     slump: str = ""
     admixtures: list[str] = []
@@ -136,6 +137,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "time": o.time,
         "status": o.status,
         "truck": truck.label if truck else "—",
+        "driver": o.driver or "—",
         "progress": round(o.progress, 3),
         "notes": o.notes,
         "slump": o.slump,
@@ -241,7 +243,8 @@ def create_order(
 
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
-              truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None,
+              truck_id=truck_id, driver=(body.driver or "").strip() or None, progress=0.0,
+              notes=(body.notes or "").strip() or None,
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
               use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
               prepay_required=bool(customer.cod))
@@ -842,6 +845,17 @@ def assign_truck(
         if not t:
             raise HTTPException(404, f"No truck labelled '{label}'")
         o.truck_id = t.id
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+@app.post("/orders/{ref}/driver")
+def assign_driver(ref: str, driver: str = "", _: User = Depends(require_staff),
+                  s: Session = Depends(get_session)):
+    """Set (or clear) the driver on an order. Pass `?driver=Rodney`, or empty/"—" to clear."""
+    o = _staff_order_or_404(ref, s)
+    name = driver.strip()
+    o.driver = None if name in ("", "—", "-") else name
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
