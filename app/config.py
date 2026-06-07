@@ -77,5 +77,5 @@ USE_TWILIO = all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER])
 
 # Aussieblock yard: 2951 E FM 2105, San Angelo, TX (exact pin) — origin for mock
 # truck routes and the map's yard marker / geofence center.
-PLANT_LAT = 31.522751
-PLANT_LNG = -100.394607
+PLANT_LAT = 31.523310
+PLANT_LNG = -100.394094
