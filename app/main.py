@@ -18,7 +18,12 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+    _BIZ_TZ = ZoneInfo("America/Chicago")   # San Angelo is US Central
+except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to slack below
+    _BIZ_TZ = None
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
@@ -234,10 +239,19 @@ def create_order(
     return _order_json(o, s)
 
 
+def _business_today() -> date:
+    """Today in the business's timezone (Central). Falls back to UTC minus a day of
+    slack so an evening order is never wrongly flagged as 'past' when the server
+    clock (UTC) has already rolled to tomorrow."""
+    if _BIZ_TZ is not None:
+        return datetime.now(_BIZ_TZ).date()
+    return date.today() - timedelta(days=1)
+
+
 def _is_past_date(s: str) -> bool:
-    """True if a YYYY-MM-DD string is before today. Non-ISO strings → False (allowed)."""
+    """True if a YYYY-MM-DD string is before today (business tz). Non-ISO → False."""
     try:
-        return datetime.strptime(s, "%Y-%m-%d").date() < date.today()
+        return datetime.strptime(s, "%Y-%m-%d").date() < _business_today()
     except ValueError:
         return False
 
