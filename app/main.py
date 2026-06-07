@@ -391,6 +391,22 @@ def get_batch_ticket(ref: str, user: User = Depends(get_current_user), s: Sessio
     return FileResponse(path, media_type="application/pdf", filename=f"batch-ticket-{ref}.pdf")
 
 
+@app.delete("/orders/{ref}/batch-ticket")
+def delete_batch_ticket(ref: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove an order's batch-ticket PDF (staff)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if o.batch_ticket:
+        try:
+            os.remove(os.path.join(_batch_ticket_dir(), o.batch_ticket))
+        except OSError:
+            pass   # file already gone — still clear the reference
+        o.batch_ticket = None
+        s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
 @app.post("/orders/{ref}/archive")
 def archive_order(ref: str, archived: bool = True, _: User = Depends(require_staff),
                   s: Session = Depends(get_session)):
