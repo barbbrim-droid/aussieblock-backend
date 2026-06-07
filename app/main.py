@@ -53,6 +53,7 @@ class OrderIn(BaseModel):
     slump: str = ""
     admixtures: list[str] = []
     use_for: str = ""
+    project: str = ""             # optional project / job name
 
 
 class OrderRequestIn(BaseModel):
@@ -66,6 +67,7 @@ class OrderRequestIn(BaseModel):
     slump: str = ""
     admixtures: list[str] = []
     use_for: str = ""
+    project: str = ""             # optional project / job name
 
 
 class TruckIn(BaseModel):
@@ -137,6 +139,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "slump": o.slump,
         "admixtures": o.admixtures,
         "use_for": o.use_for,
+        "project": o.project,
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
@@ -236,7 +239,8 @@ def create_order(
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
               truck_id=truck_id, progress=0.0, notes=(body.notes or "").strip() or None,
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
-              use_for=(body.use_for or "").strip() or None, prepay_required=bool(customer.cod))
+              use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
+              prepay_required=bool(customer.cod))
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -281,7 +285,8 @@ def request_order(
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
               truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None,
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
-              use_for=(body.use_for or "").strip() or None, prepay_required=bool(cust and cust.cod))
+              use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
+              prepay_required=bool(cust and cust.cod))
     s.add(o); s.commit(); s.refresh(o)
     data = _order_json(o, s)
     # Alert staff (text/email) in the background — never blocks or fails the order.
@@ -329,6 +334,7 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
     o.slump = (body.slump or "").strip() or None
     o.admixtures = ", ".join(body.admixtures) or None
     o.use_for = (body.use_for or "").strip() or None
+    o.project = (body.project or "").strip() or None
     o.notes = (body.notes or "").strip() or None
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
