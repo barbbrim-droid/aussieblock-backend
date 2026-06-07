@@ -75,6 +75,7 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "").strip()   # e.g. +13255551234
 USE_TWILIO = all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER])
 
-# Aussieblock plant location (San Angelo, TX) — used as the origin for mock truck routes.
-PLANT_LAT = 31.4421
-PLANT_LNG = -100.4503
+# Aussieblock yard: 2951 E FM 2105, San Angelo, TX — origin for mock truck routes
+# and the map's yard marker / geofence center.
+PLANT_LAT = 31.420597
+PLANT_LNG = -100.393333
