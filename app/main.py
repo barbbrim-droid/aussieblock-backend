@@ -158,10 +158,10 @@ def _order_json(o: Order, s: Session) -> dict:
 # the dispatch board. The progress snap keeps the map + progress bar coherent
 # with whatever stage was just set (e.g. "onsite" => full bar, not 40%).
 # "requested" = placed by a customer in the app, awaiting staff confirmation.
-ORDER_STATUSES = ["requested", "scheduled", "batched", "enroute", "onsite", "complete"]
-_STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "complete": 1.0}
+ORDER_STATUSES = ["requested", "scheduled", "batched", "enroute", "onsite", "pouring", "complete"]
+_STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "pouring": 1.0, "complete": 1.0}
 # Stages that mean a truck is carrying the load — you can't enter them unassigned.
-_STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite"}
+_STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite", "pouring"}
 
 
 @app.get("/health")
