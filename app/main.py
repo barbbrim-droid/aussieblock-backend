@@ -47,6 +47,7 @@ class StaffLoginIn(BaseModel):
     email: str
     password: str
     role: str = "worker"
+    phone: str = ""               # worker's cell, so they can be texted their login
 
 
 class OrderIn(BaseModel):
@@ -104,7 +105,7 @@ from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
-    import_customers_from_quickbooks, get_invoice_pay_link,
+    import_customers_from_quickbooks, backfill_customer_emails, get_invoice_pay_link,
     create_cod_invoice, cod_invoice_status,
 )
 from .integrations.sms import send_sms
@@ -644,9 +645,16 @@ def list_customers(user: User = Depends(require_staff), s: Session = Depends(get
     }
     return [
         {"id": c.id, "name": c.name, "acct_no": c.acct_no, "terms": c.terms,
-         "contact": c.contact, "login_email": logins.get(c.id), "cod": c.cod}
+         "contact": c.contact, "email": c.email, "login_email": logins.get(c.id), "cod": c.cod}
         for c in customers
     ]
+
+
+@app.post("/customers/backfill-emails")
+def backfill_emails(_: User = Depends(require_finance)):
+    """Fill existing customers' email from QuickBooks (staff only). Safe to re-run;
+    only updates rows already present, never re-adds removed customers."""
+    return backfill_customer_emails()
 
 
 @app.post("/staff")
@@ -659,22 +667,24 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     email = (body.email or "").strip().lower()
     if not email or len(body.password or "") < 6:
         raise HTTPException(422, "Email and a 6+ character password are required")
+    phone = (body.phone or "").strip() or None
     u = s.exec(select(User).where(User.email == email)).first()
     if u:
         u.password_hash = hash_password(body.password)
         u.role = role
         u.customer_id = None
+        u.phone = phone
         s.add(u); s.commit()
-        return {"ok": True, "action": "updated", "email": email, "role": role}
-    u = User(email=email, password_hash=hash_password(body.password), role=role, customer_id=None)
+        return {"ok": True, "action": "updated", "email": email, "role": role, "phone": phone}
+    u = User(email=email, password_hash=hash_password(body.password), role=role, customer_id=None, phone=phone)
     s.add(u); s.commit()
-    return {"ok": True, "action": "created", "email": email, "role": role}
+    return {"ok": True, "action": "created", "email": email, "role": role, "phone": phone}
 
 
 @app.get("/staff")
 def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_session)):
     """All office logins (full staff only)."""
-    return [{"email": u.email, "role": u.role}
+    return [{"email": u.email, "role": u.role, "phone": u.phone}
             for u in s.exec(select(User).where(User.role.in_(("staff", "worker")))).all()]
 
 

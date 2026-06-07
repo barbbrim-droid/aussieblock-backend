@@ -382,6 +382,31 @@ def _customer_contact(c: dict) -> str:
             or (c.get("PrimaryEmailAddr") or {}).get("Address") or "")
 
 
+def backfill_customer_emails() -> dict:
+    """Fill each EXISTING local customer's `email` from QuickBooks (matched by
+    qbo_id). Only updates rows already in the table — never adds customers — so
+    it's safe to run without re-introducing ones you removed. Mock-mode no-ops."""
+    if config.USE_MOCK_QBO:
+        return {"ok": False, "mode": "mock",
+                "reason": "QuickBooks not configured — set QBO_* in .env."}
+    with httpx.Client(timeout=30) as client:
+        raw = _query_customers(client, _access_token(client))
+    emails = {
+        str(c.get("Id")): (c.get("PrimaryEmailAddr") or {}).get("Address")
+        for c in raw
+    }
+    filled = 0
+    with Session(engine) as s:
+        for cust in s.exec(select(Customer)).all():
+            addr = emails.get(cust.qbo_id) if cust.qbo_id else None
+            if addr and cust.email != addr:
+                cust.email = addr
+                s.add(cust)
+                filled += 1
+        s.commit()
+    return {"ok": True, "mode": "live", "filled": filled}
+
+
 def import_customers_from_quickbooks() -> dict:
     """Pull the QuickBooks customer roster into the local Customer table.
 

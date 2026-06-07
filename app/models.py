@@ -12,8 +12,9 @@ class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(index=True, unique=True)
     password_hash: str
-    role: str = "customer"                       # "customer" | "staff"
+    role: str = "customer"                       # "customer" | "staff" | "worker"
     customer_id: Optional[int] = Field(default=None, foreign_key="customer.id")
+    phone: Optional[str] = None                  # for worker logins, so they can be texted their login
 
 
 class Customer(SQLModel, table=True):
@@ -23,6 +24,7 @@ class Customer(SQLModel, table=True):
     terms: str = "Net 10"
     credit_limit: float = 0.0
     contact: str = ""
+    email: Optional[str] = None                  # billing email (from QuickBooks); pre-fills the login form
     # QuickBooks Customer Id — the stable join key the A/R sync matches on.
     # Stable across renames/punctuation; set by the customer importer.
     qbo_id: Optional[str] = Field(default=None, index=True)
