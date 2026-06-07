@@ -713,27 +713,30 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
                        s: Session = Depends(get_session)):
     """Create or update a login (full staff only).
 
-    role 'staff' = the dispatch operator (full board, financials). role 'worker' =
-    a customer's field person tied to ONE company (customer_id, REQUIRED) — they
-    see only that company's orders + tracking, never billing or the board.
+    Roles (all created here):
+      • 'staff'    = the dispatch operator — full board + all companies + billing.
+      • 'customer' = a company ADMIN — tied to ONE company (customer_id, REQUIRED),
+                     sees that company's orders + tracking + billing.
+      • 'worker'   = a company field person — ONE company, orders + tracking, NO billing.
 
     For an EXISTING login, a blank password leaves the current one in place — so
     company/phone/project/role can be updated without resetting the password. A
     new login always requires a 6+ character password."""
-    role = body.role if body.role in ("staff", "worker") else "worker"
+    role = body.role if body.role in ("staff", "worker", "customer") else "worker"
     email = (body.email or "").strip().lower()
     if not email:
         raise HTTPException(422, "Email is required")
     pw = body.password or ""
     phone = (body.phone or "").strip() or None
     project = (body.project or "").strip() or None
-    # A worker MUST belong to a real company (that's what scopes their view).
+    # Workers AND company admins (customer) MUST belong to a real company — that's
+    # what scopes their view. Only the full operator (staff) has no company.
     cust_id = None
     company = None
-    if role == "worker":
+    if role in ("worker", "customer"):
         cust = s.get(Customer, body.customer_id) if body.customer_id else None
         if not cust:
-            raise HTTPException(422, "Pick the company this worker belongs to")
+            raise HTTPException(422, "Pick the company this person belongs to")
         cust_id = cust.id
         company = cust.name            # stored for easy display in the list
     u = s.exec(select(User).where(User.email == email)).first()
@@ -763,19 +766,27 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
 
 @app.get("/staff")
 def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_session)):
-    """All office/worker logins (full staff only)."""
-    return [{"email": u.email, "role": u.role, "phone": u.phone,
-             "customer_id": u.customer_id, "company": u.company, "project": u.project}
-            for u in s.exec(select(User).where(User.role.in_(("staff", "worker")))).all()]
+    """All logins — operators (staff), company admins (customer), and workers
+    (full staff only). For company-scoped logins, `company` is their customer name."""
+    out = []
+    for u in s.exec(select(User).where(User.role.in_(("staff", "worker", "customer")))).all():
+        company = u.company
+        if u.customer_id and not company:   # customer logins made via the Customers tab have no stored company name
+            c = s.get(Customer, u.customer_id)
+            company = c.name if c else None
+        out.append({"email": u.email, "role": u.role, "phone": u.phone,
+                    "customer_id": u.customer_id, "company": company, "project": u.project})
+    return out
 
 
 @app.delete("/staff/{email}")
 def delete_staff(email: str, user: User = Depends(require_finance), s: Session = Depends(get_session)):
-    """Remove an office login (full staff only). Can't delete your own account."""
+    """Remove a login — operator, company admin, or worker (full staff only).
+    Can't delete your own account."""
     target = (email or "").strip().lower()
     u = s.exec(select(User).where(User.email == target)).first()
-    if not u or u.role not in ("staff", "worker"):
-        raise HTTPException(404, "Office login not found")
+    if not u or u.role not in ("staff", "worker", "customer"):
+        raise HTTPException(404, "Login not found")
     if u.id == user.id:
         raise HTTPException(409, "You can't remove your own login")
     s.delete(u); s.commit()
