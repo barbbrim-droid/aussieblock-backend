@@ -79,8 +79,9 @@ USE_TWILIO = all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER])
 # When a customer places an order, alert staff by text and/or email. Set these to
 # the staff phone number(s) / email(s) (comma-separated). SMS uses the Twilio
 # creds above; email uses the SMTP settings below. Leave blank to disable.
-NOTIFY_SMS = [s.strip() for s in os.getenv("NOTIFY_SMS", "").split(",") if s.strip()]
-NOTIFY_EMAIL = [s.strip() for s in os.getenv("NOTIFY_EMAIL", "").split(",") if s.strip()]
+# Dispatch recipients are baked in as defaults; override with env vars if needed.
+NOTIFY_SMS = [s.strip() for s in os.getenv("NOTIFY_SMS", "+19405777475").split(",") if s.strip()]
+NOTIFY_EMAIL = [s.strip() for s in os.getenv("NOTIFY_EMAIL", "dispatch@aussie-block.com").split(",") if s.strip()]
 
 # ── Outbound email (SMTP) ──
 # Enable order-alert emails (and any future email). Works with any SMTP provider,
