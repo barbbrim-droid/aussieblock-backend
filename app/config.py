@@ -102,3 +102,9 @@ PLANT_LNG = -100.394094
 # loading-at-the-yard until its truck crosses this fence, then it auto-flips to
 # "enroute". Parked trucks sit ~120–165 m out, so the default leaves margin.
 YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "500"))
+# Arrival detection: an en-route truck that sits within ARRIVAL_MOVE_M of one spot
+# for ARRIVAL_DWELL_SECONDS (and away from the yard) is flagged as "looks parked at
+# the job" so dispatch can confirm "On site". This ignores the (imprecise) delivery
+# address entirely — it keys off the truck actually stopping.
+ARRIVAL_DWELL_SECONDS = int(os.getenv("ARRIVAL_DWELL_SECONDS", "300"))   # 5 minutes parked
+ARRIVAL_MOVE_M = float(os.getenv("ARRIVAL_MOVE_M", "75"))                # movement under this = "stopped"

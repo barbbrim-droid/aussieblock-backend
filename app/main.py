@@ -107,7 +107,7 @@ class CodIn(BaseModel):
 
 class ChargeIn(BaseModel):
     amount: float | None = None
-from .integrations.onestep_gps import gps_poll_loop
+from .integrations.onestep_gps import gps_poll_loop, arrival_pending
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
@@ -170,6 +170,8 @@ def _order_json(o: Order, s: Session) -> dict:
             {"lat": truck.lat, "lng": truck.lng, "heading": truck.heading}
             if truck and truck.lat is not None else None
         ),
+        # True when an en-route truck looks parked at the job — dispatch confirms On site.
+        "arrival_pending": (o.status == "enroute" and arrival_pending(truck)),
     }
 
 

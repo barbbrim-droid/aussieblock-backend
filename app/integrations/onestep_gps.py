@@ -84,6 +84,39 @@ def _advance_on_yard_exit(s: Session, truck: Truck) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# ARRIVAL (STOP) DETECTION — a concrete truck parks at the pour, so instead of
+# trusting an (imprecise) geocoded job address, we watch for the assigned truck
+# sitting still. After it's been parked long enough away from the yard, the order
+# is FLAGGED as "looks arrived" (arrival_pending) for dispatch to confirm "On
+# site" — we do NOT auto-change status. State is in-memory (single uvicorn worker).
+# ──────────────────────────────────────────────────────────────────────────
+_stop_state: dict = {}   # truck_id -> {"lat", "lng", "since": datetime}
+
+
+def _update_stop_state(truck: Truck) -> None:
+    """Track the spot a truck has been parked at, and since when. Resets the anchor
+    (and the clock) whenever the truck moves more than ARRIVAL_MOVE_M."""
+    if truck.id is None or truck.lat is None or truck.lng is None:
+        return
+    st = _stop_state.get(truck.id)
+    if st is None or _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.ARRIVAL_MOVE_M:
+        _stop_state[truck.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+
+
+def arrival_pending(truck: Truck) -> bool:
+    """True when `truck` looks parked at a job: stopped >= the dwell time and away
+    from the yard. Read by the API to flag en-route orders for an On-site confirm."""
+    if truck is None or truck.id is None or truck.lat is None or truck.lng is None:
+        return False
+    if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
+        return False  # sitting at the yard isn't "arrived at a job"
+    st = _stop_state.get(truck.id)
+    if not st:
+        return False
+    return (datetime.utcnow() - st["since"]).total_seconds() >= config.ARRIVAL_DWELL_SECONDS
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # LIVE MODE — calls the One Step GPS API. The exact endpoint/response shape
 # may differ slightly from what's below; adjust to match the docs they send.
 # ──────────────────────────────────────────────────────────────────────────
@@ -113,6 +146,7 @@ async def _poll_real() -> None:
                 truck.heading = float(heading)
                 truck.updated_at = datetime.utcnow()
                 s.add(truck)
+                _update_stop_state(truck)         # track how long it's been parked (arrival detection)
                 _advance_on_yard_exit(s, truck)   # batched -> enroute when it leaves the yard
         s.commit()
 
