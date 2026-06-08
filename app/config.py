@@ -98,3 +98,7 @@ USE_EMAIL = all([SMTP_HOST, SMTP_USER, SMTP_PASS])
 # truck routes and the map's yard marker / geofence center.
 PLANT_LAT = 31.523310
 PLANT_LNG = -100.394094
+# Yard geofence radius (meters) around PLANT_LAT/LNG. A "batched" order stays
+# loading-at-the-yard until its truck crosses this fence, then it auto-flips to
+# "enroute". Parked trucks sit ~120–165 m out, so the default leaves margin.
+YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "300"))

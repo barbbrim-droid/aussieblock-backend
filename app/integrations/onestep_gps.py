@@ -50,6 +50,40 @@ def _mock_step() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# YARD GEOFENCE — keep "en route" honest. The plant operator sets an order to
+# "batched" while it loads at the yard; it only becomes "enroute" once the truck
+# physically crosses the yard geofence (so customers see "en route" when the
+# truck is actually on the road, not the moment it's batched).
+# ──────────────────────────────────────────────────────────────────────────
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance between two lat/lng points, in meters."""
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _advance_on_yard_exit(s: Session, truck: Truck) -> None:
+    """If `truck` has left the yard geofence, promote any of its 'batched' orders
+    to 'enroute'. Only moves batched→enroute; never flips an order back."""
+    if truck.lat is None or truck.lng is None or truck.id is None:
+        return
+    dist = _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG)
+    if dist <= config.YARD_GEOFENCE_M:
+        return  # still inside the yard — keep it "batched" (loading)
+    orders = s.exec(
+        select(Order).where(Order.truck_id == truck.id, Order.status == "batched")
+    ).all()
+    for o in orders:
+        o.status = "enroute"
+        o.progress = max(o.progress, 0.05)   # nudge off 0 so the route bar shows movement
+        s.add(o)
+        print(f"Yard exit: {truck.label} left the yard ({dist:.0f}m) -> order {o.ref} now en route.")
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # LIVE MODE — calls the One Step GPS API. The exact endpoint/response shape
 # may differ slightly from what's below; adjust to match the docs they send.
 # ──────────────────────────────────────────────────────────────────────────
@@ -79,6 +113,7 @@ async def _poll_real() -> None:
                 truck.heading = float(heading)
                 truck.updated_at = datetime.utcnow()
                 s.add(truck)
+                _advance_on_yard_exit(s, truck)   # batched -> enroute when it leaves the yard
         s.commit()
 
 
