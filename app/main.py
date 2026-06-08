@@ -10,6 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
+import glob
 import json
 import os
 import time
@@ -115,6 +116,7 @@ from .integrations.quickbooks import (
     create_cod_invoice, cod_link_from_existing, cod_invoice_status,
 )
 from .integrations.sms import send_sms
+from .ticketgen import convert as ticket_convert
 from . import config
 
 
@@ -161,6 +163,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "project": o.project,
         "has_batch_ticket": bool(o.batch_ticket),
         "has_print_ticket": bool(o.batch_ticket_print),
+        "has_original": _has_original(o.ref, o.batch_ticket),
         "batch_data": json.loads(o.batch_data) if o.batch_data else None,
         "archived": bool(o.archived),
         "prepay_required": o.prepay_required,
@@ -380,6 +383,19 @@ def _batch_ticket_dir() -> str:
     return d
 
 
+def _media_type(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    return {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(ext, "application/octet-stream")
+
+
+def _has_original(ref: str, batch_ticket: str | None) -> bool:
+    """An 'Original' upload exists alongside a branded ticket (so it's worth showing)."""
+    if not batch_ticket or batch_ticket != f"{ref}.pdf":
+        return False
+    return bool(glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*")))
+
+
 # ── Knowledge Center ─────────────────────────────────────────────────────────
 # A shared library of PDFs (spec sheets, safety, how-tos). The office uploads
 # them; every logged-in user (workers, admins, customers) can list & view.
@@ -473,29 +489,64 @@ def save_batch_data(ref: str, body: BatchDataIn,
 async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
                               variant: str = Query("view"),
                               _: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Attach a batch-ticket PDF to an order (staff only, once it's batched).
+    """Attach a batch ticket to an order (staff only, once it's batched).
 
-    variant='view' = the on-screen (dark) ticket; variant='print' = the light,
-    printer-friendly copy the app's Print button serves."""
+    A scan or photo of the paper ticket is auto-converted to the branded
+    Aussieblock ticket (via Claude vision), and the original upload is kept too.
+    A PDF that can't be branded (or when no vision key is set) is stored as-is.
+    variant='print' stores a light PDF as-is (legacy)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o:
         raise HTTPException(404, "Order not found")
     if o.status not in _BATCHABLE_STATUSES:
         raise HTTPException(409, "You can add a batch ticket once the order is batched.")
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(413, "That file is too large (15 MB max).")
     name = (file.filename or "").lower()
-    if not (name.endswith(".pdf") or (file.content_type or "").lower() == "application/pdf"):
-        raise HTTPException(422, "The batch ticket must be a PDF.")
-    data = await file.read()
-    if len(data) > 15 * 1024 * 1024:
-        raise HTTPException(413, "That PDF is too large (15 MB max).")
-    is_print = variant == "print"
-    fname = f"{ref}_print.pdf" if is_print else f"{ref}.pdf"
-    with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
-        fh.write(data)
-    if is_print:
+    ctype = (file.content_type or "").lower()
+    is_pdf = name.endswith(".pdf") or ctype == "application/pdf" or raw[:5] == b"%PDF-"
+    is_img = ctype.startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".heic", ".webp"))
+    if not (is_pdf or is_img):
+        raise HTTPException(422, "The batch ticket must be a PDF or a photo (JPG/PNG).")
+    bdir = _batch_ticket_dir()
+
+    # Legacy 'print' variant: store the light PDF as-is.
+    if variant == "print":
+        fname = f"{ref}_print.pdf"
+        with open(os.path.join(bdir, fname), "wb") as fh:
+            fh.write(raw)
         o.batch_ticket_print = fname
-    else:
+        s.add(o); s.commit(); s.refresh(o)
+        return _order_json(o, s)
+
+    # Keep the original upload so staff can verify a field against the paper.
+    for old in glob.glob(os.path.join(bdir, f"{ref}_original.*")):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    ext = ".pdf" if is_pdf else (os.path.splitext(name)[1] or ".jpg")
+    orig_name = f"{ref}_original{ext}"
+    with open(os.path.join(bdir, orig_name), "wb") as fh:
+        fh.write(raw)
+
+    # Brand it; fall back to the original if reading/rendering fails (nothing lost).
+    branded = None
+    if ticket_convert.available():
+        try:
+            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site)
+        except Exception as e:
+            print("batch-ticket branding failed:", e)
+    if branded:
+        fname = f"{ref}.pdf"
+        with open(os.path.join(bdir, fname), "wb") as fh:
+            fh.write(branded)
         o.batch_ticket = fname
+    else:
+        o.batch_ticket = orig_name
+    o.batch_ticket_print = None   # branded ticket prints fine on its own
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -508,13 +559,18 @@ def get_batch_ticket(ref: str, variant: str = Query("view"),
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or (user.role != "staff" and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
-    fileref = (o.batch_ticket_print or o.batch_ticket) if variant == "print" else o.batch_ticket
-    if not fileref:
+    if variant == "original":
+        matches = glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*"))
+        path = matches[0] if matches else None
+    else:
+        fileref = (o.batch_ticket_print or o.batch_ticket) if variant == "print" else o.batch_ticket
+        path = os.path.join(_batch_ticket_dir(), fileref) if fileref else None
+    if not path:
         raise HTTPException(404, "No batch ticket for this order yet.")
-    path = os.path.join(_batch_ticket_dir(), fileref)
     if not os.path.exists(path):
         raise HTTPException(404, "The batch ticket file is missing.")
-    return FileResponse(path, media_type="application/pdf", filename=f"batch-ticket-{ref}.pdf")
+    return FileResponse(path, media_type=_media_type(path),
+                        filename=f"batch-ticket-{ref}{os.path.splitext(path)[1]}")
 
 
 @app.delete("/orders/{ref}/batch-ticket")
@@ -529,6 +585,11 @@ def delete_batch_ticket(ref: str, _: User = Depends(require_staff), s: Session =
                 os.remove(os.path.join(_batch_ticket_dir(), fileref))
             except OSError:
                 pass   # file already gone — still clear the reference
+    for orig in glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*")):
+        try:
+            os.remove(orig)
+        except OSError:
+            pass
     if o.batch_ticket or o.batch_ticket_print:
         o.batch_ticket = None
         o.batch_ticket_print = None

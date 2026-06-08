@@ -1,0 +1,49 @@
+{
+  "company": {
+    "name": "Aussieblock Ready Mix",
+    "addr": "4264 S. Jackson St",
+    "city": "San Angelo, TX 76903",
+    "phone": "(325) 213-5315",
+    "emails": "dispatch@aussie-block.com  |  accounting@aussie-block.com"
+  },
+  "plants": {
+    "2105": "2951 East FM 2105, San Angelo, Texas 76905"
+  },
+  "sites": {
+    "Ocean Water Pools": {
+      "phone": "-",
+      "sales_rep": "Roy Acosta",
+      "mileage": "6 miles (cached)",
+      "drive_time": "12 min (cached)",
+      "driver": "Armando"
+    },
+    "AB Builders": {
+      "phone": "-",
+      "sales_rep": "Roy Acosta",
+      "mileage": "7 miles (cached)",
+      "drive_time": "14 min (cached)",
+      "driver": "-"
+    }
+  },
+  "sales_tax_pct": 8.25,
+  "vision_model": "claude-opus-4-8",
+  "default_max_wc": 0.6,
+  "max_wc_by_recipe": {
+    "3500 PSI": 0.6,
+    "4000 PSI": 0.55,
+    "3000 PSI": 0.6
+  },
+  "density_override": {
+    "Concrete Gravel": 162.3,
+    "River Sand": 174.8,
+    "E5 LFA": 64.3,
+    "Master X-Seed": 67.3
+  },
+  "astm_tolerance_pct": {
+    "aggregate": 2,
+    "cement": 1,
+    "water": 1,
+    "admixture": 3
+  },
+  "photo_rotate": 0
+}
