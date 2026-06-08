@@ -371,7 +371,7 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
 
 
 # ── Batch tickets (the plant's PDF, attached by staff once an order is batched) ──
-_BATCHABLE_STATUSES = {"batched", "enroute", "onsite", "complete"}
+_BATCHABLE_STATUSES = {"batched", "enroute", "onsite", "pouring", "returning", "complete"}
 
 
 def _batch_ticket_dir() -> str:
