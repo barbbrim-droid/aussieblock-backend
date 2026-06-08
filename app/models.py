@@ -103,3 +103,12 @@ class PlusLoadRequest(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     note: str = ""
     handled: bool = False
+
+
+class Doc(SQLModel, table=True):
+    """A Knowledge Center document — a shared-library PDF the office uploads.
+    Every logged-in user (workers, admins, customers) can list and view them."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    filename: str = ""                 # stored file on the persistent disk (knowledge/{id}.pdf)
+    uploaded_at: str = ""              # ISO date for display/sort

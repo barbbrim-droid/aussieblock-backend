@@ -30,7 +30,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
 )
@@ -374,6 +374,73 @@ def _batch_ticket_dir() -> str:
     d = config.data_path("batch_tickets")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+# ── Knowledge Center ─────────────────────────────────────────────────────────
+# A shared library of PDFs (spec sheets, safety, how-tos). The office uploads
+# them; every logged-in user (workers, admins, customers) can list & view.
+def _docs_dir() -> str:
+    d = config.data_path("knowledge")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@app.get("/docs")
+def list_docs(_: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """The Knowledge Center library — any logged-in user can list it."""
+    return [{"id": d.id, "title": d.title, "uploaded_at": d.uploaded_at}
+            for d in s.exec(select(Doc).order_by(Doc.title)).all()]
+
+
+@app.post("/docs")
+async def upload_doc(title: str = Query(...), file: UploadFile = File(...),
+                     _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Add a Knowledge Center PDF (operator/office only)."""
+    t = (title or "").strip()
+    if not t:
+        raise HTTPException(422, "Give the document a title.")
+    name = (file.filename or "").lower()
+    if not (name.endswith(".pdf") or (file.content_type or "").lower() == "application/pdf"):
+        raise HTTPException(422, "The document must be a PDF.")
+    data = await file.read()
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(413, "That PDF is too large (25 MB max).")
+    d = Doc(title=t, filename="", uploaded_at=date.today().isoformat())
+    s.add(d); s.commit(); s.refresh(d)          # need the id to name the file
+    fname = f"{d.id}.pdf"
+    with open(os.path.join(_docs_dir(), fname), "wb") as fh:
+        fh.write(data)
+    d.filename = fname
+    s.add(d); s.commit(); s.refresh(d)
+    return {"id": d.id, "title": d.title, "uploaded_at": d.uploaded_at}
+
+
+@app.get("/docs/{doc_id}")
+def get_doc(doc_id: int, _: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """View/download a Knowledge Center PDF (any logged-in user)."""
+    d = s.get(Doc, doc_id)
+    if not d or not d.filename:
+        raise HTTPException(404, "Document not found")
+    path = os.path.join(_docs_dir(), d.filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The document file is missing.")
+    safe = "".join(c for c in d.title if c.isalnum() or c in " -_").strip() or "document"
+    return FileResponse(path, media_type="application/pdf", filename=f"{safe}.pdf")
+
+
+@app.delete("/docs/{doc_id}")
+def delete_doc(doc_id: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove a Knowledge Center PDF (operator/office only)."""
+    d = s.get(Doc, doc_id)
+    if not d:
+        raise HTTPException(404, "Document not found")
+    if d.filename:
+        try:
+            os.remove(os.path.join(_docs_dir(), d.filename))
+        except OSError:
+            pass
+    s.delete(d); s.commit()
+    return {"ok": True, "removed": doc_id}
 
 
 class BatchDataIn(BaseModel):
