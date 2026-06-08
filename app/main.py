@@ -40,6 +40,7 @@ class CustomerLoginIn(BaseModel):
     """Body for creating/resetting a customer's login (staff action)."""
     email: str
     password: str
+    phone: str = ""               # optional — updates the customer's contact phone (used for the invite text)
 
 
 class StaffLoginIn(BaseModel):
@@ -928,6 +929,11 @@ def set_customer_login(
         raise HTTPException(422, "Enter a valid email address")
     if len(body.password) < 6:
         raise HTTPException(422, "Password must be at least 6 characters")
+    # Persist an edited phone to the customer's contact (used for the invite text).
+    phone = (body.phone or "").strip()
+    if phone and phone != (customer.contact or ""):
+        customer.contact = phone
+        s.add(customer)
 
     # The email can't collide with a different user's login.
     clash = s.exec(select(User).where(User.email == email)).first()
