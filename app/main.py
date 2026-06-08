@@ -12,6 +12,7 @@ so wiring the front-end to it later is a drop-in.
 import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Query
@@ -111,7 +112,7 @@ from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
     import_customers_from_quickbooks, backfill_customer_emails, get_invoice_pay_link,
-    create_cod_invoice, cod_invoice_status,
+    create_cod_invoice, cod_link_from_existing, cod_invoice_status,
 )
 from .integrations.sms import send_sms
 from . import config
@@ -555,16 +556,17 @@ def charge_order(
     _: User = Depends(require_finance),
     s: Session = Depends(get_session),
 ):
-    """Create a QuickBooks invoice for a COD load and return its hosted pay link
-    (staff only). Marks the order prepay-required and awaiting payment."""
+    """Take payment on a COD load using the invoice the office already made in
+    QuickBooks — the app no longer creates invoices (that duplicated). Finds the
+    customer's open QuickBooks invoice and returns its hosted pay link. Staff only."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o:
         raise HTTPException(404, "Order not found")
     if body.amount <= 0:
         raise HTTPException(422, "Enter an amount greater than 0")
-    res = create_cod_invoice(o.customer_id, body.amount, o.ref)
+    res = cod_link_from_existing(o.customer_id, body.amount)
     if not res.get("ok"):
-        raise HTTPException(400, res.get("reason", "Could not create the charge"))
+        raise HTTPException(400, res.get("reason", "Could not find a QuickBooks invoice to charge"))
     o.prepay_required = True
     o.prepay_amount = round(float(body.amount), 2)
     o.prepay_invoice_id = res["invoice_id"]
@@ -686,14 +688,31 @@ def delete_truck(label: str, _: User = Depends(require_staff), s: Session = Depe
     return {"ok": True, "removed": True}
 
 
+# Keep billing fresh without depending on the background loop: opening billing
+# kicks off a QuickBooks sync in the background, at most once every few minutes.
+_LAST_AUTO_SYNC = {"t": 0.0}
+_AUTO_SYNC_EVERY = 180   # seconds
+
+
+def _maybe_auto_sync(background: BackgroundTasks):
+    if config.USE_MOCK_QBO:
+        return
+    now = time.monotonic()
+    if now - _LAST_AUTO_SYNC["t"] >= _AUTO_SYNC_EVERY:
+        _LAST_AUTO_SYNC["t"] = now
+        background.add_task(sync_ar_from_quickbooks)
+
+
 @app.get("/billing/{customer_id}")
-def billing(customer_id: int, user: User = Depends(get_current_user)):
+def billing(customer_id: int, background: BackgroundTasks,
+            user: User = Depends(get_current_user)):
     """Customer balance + invoices — the data behind the app's Account screen.
     A customer may only view their own account; staff may view anyone's."""
     if user.role == "worker":
         raise HTTPException(403, "Financial access is restricted to approved staff")
     if user.role == "customer" and customer_id != user.customer_id:
         raise HTTPException(403, "Not your account")
+    _maybe_auto_sync(background)
     data = get_billing_for_customer(customer_id)
     if not data:
         raise HTTPException(404, "Customer not found")
@@ -751,10 +770,13 @@ def import_customers(_: User = Depends(require_finance)):
 # Lets the office create/reset the login a customer uses to see their own
 # orders & billing — without any server shell access.
 @app.get("/customers")
-def list_customers(user: User = Depends(require_staff), s: Session = Depends(get_session)):
+def list_customers(background: BackgroundTasks, user: User = Depends(require_staff),
+                   s: Session = Depends(get_session)):
     """All customers. Full staff get account info (login, contact, terms, COD) for
     the Customers panel. Workers get only id + name — enough for the New Order
     picker, without exposing account/financial details."""
+    if user.role == "staff":
+        _maybe_auto_sync(background)
     customers = s.exec(select(Customer).order_by(Customer.name)).all()
     if user.role == "worker":
         return [{"id": c.id, "name": c.name} for c in customers]

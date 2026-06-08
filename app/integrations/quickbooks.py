@@ -54,7 +54,9 @@ def get_billing_for_customer(customer_id: int) -> dict | None:
         return {
             "company": customer.name,
             "acctNo": customer.acct_no,
-            "terms": customer.terms,
+            # COD overrides net terms — a COD customer pays before delivery, so
+            # show "COD" rather than their stored Net term (kept for if COD is off).
+            "terms": "COD" if customer.cod else customer.terms,
             "contact": customer.contact,
             "creditLimit": customer.credit_limit,
             "balance": round(outstanding, 2),
@@ -123,6 +125,33 @@ def get_invoice_pay_link(customer_id: int, invoice_number: str) -> dict:
                           "Turn on online payments for it in QuickBooks, then retry."}
     return {"ok": True, "link": link, "number": number,
             "amount": amount, "status": inv_status}
+
+
+def cod_link_from_existing(customer_id: int, amount: float | None = None) -> dict:
+    """COD payment WITHOUT creating an invoice. The office makes the invoice in
+    QuickBooks; this finds that customer's open invoice (closest amount if one is
+    given, else most recent) and returns its hosted pay link. Never creates an
+    invoice, so it can't duplicate."""
+    with Session(engine) as s:
+        opens = s.exec(
+            select(Invoice)
+            .where(Invoice.customer_id == customer_id)
+            .where(Invoice.status != "paid")
+        ).all()
+        if not opens:
+            return {"ok": False, "reason": "No open QuickBooks invoice for this "
+                    "customer. Create the invoice in QuickBooks, run a billing sync, "
+                    "then take the payment."}
+        if amount:
+            inv = min(opens, key=lambda i: abs((i.amount or 0) - amount))
+        else:
+            inv = sorted(opens, key=lambda i: str(i.date), reverse=True)[0]
+        number, qbo_id, amt = inv.number, inv.qbo_invoice_id, inv.amount
+    res = get_invoice_pay_link(customer_id, number)
+    if not res.get("ok"):
+        return res
+    return {"ok": True, "invoice_id": qbo_id, "link": res["link"],
+            "amount": amt, "doc_number": number}
 
 
 # ── COD / prepay: create an invoice + read its pay link & balance ────────────
