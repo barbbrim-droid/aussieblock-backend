@@ -108,3 +108,7 @@ YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "500"))
 # address entirely — it keys off the truck actually stopping.
 ARRIVAL_DWELL_SECONDS = int(os.getenv("ARRIVAL_DWELL_SECONDS", "300"))   # 5 minutes parked
 ARRIVAL_MOVE_M = float(os.getenv("ARRIVAL_MOVE_M", "75"))                # movement under this = "stopped"
+# Once an order is On site, the job location is pinned (the truck's spot). When the
+# truck then moves more than this from the job, the order flips to "returning"; when
+# it re-enters the yard geofence it auto-completes.
+RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "250"))

@@ -103,6 +103,41 @@ def _update_stop_state(truck: Truck) -> None:
         _stop_state[truck.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# RETURN TRIP — once an order is On site, we pin the job location (the truck's
+# GPS spot at that moment — no address geocoding needed). When the truck then
+# pulls away from the job it flips to "returning"; back inside the yard fence it
+# auto-completes. State is in-memory (single uvicorn worker).
+# ──────────────────────────────────────────────────────────────────────────
+_job_loc: dict = {}   # order_id -> (lat, lng) where the truck was when it went On site
+
+
+def _advance_return(s: Session, truck: Truck) -> None:
+    if truck.id is None or truck.lat is None or truck.lng is None:
+        return
+    orders = s.exec(
+        select(Order).where(Order.truck_id == truck.id,
+                            Order.status.in_(["onsite", "pouring", "returning"]))
+    ).all()
+    for o in orders:
+        if o.status in ("onsite", "pouring"):
+            if o.id not in _job_loc:
+                _job_loc[o.id] = (truck.lat, truck.lng)   # pin the job the first poll after On site
+            else:
+                jlat, jlng = _job_loc[o.id]
+                if _haversine_m(truck.lat, truck.lng, jlat, jlng) > config.RETURN_LEAVE_SITE_M:
+                    o.status = "returning"
+                    s.add(o)
+                    print(f"Left job: {truck.label} -> order {o.ref} returning to yard.")
+        elif o.status == "returning":
+            if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
+                o.status = "complete"
+                o.progress = 1.0
+                _job_loc.pop(o.id, None)
+                s.add(o)
+                print(f"Back at yard: {truck.label} -> order {o.ref} complete.")
+
+
 def arrival_pending(truck: Truck) -> bool:
     """True when `truck` looks parked at a job: stopped >= the dwell time and away
     from the yard. Read by the API to flag en-route orders for an On-site confirm."""
@@ -148,6 +183,7 @@ async def _poll_real() -> None:
                 s.add(truck)
                 _update_stop_state(truck)         # track how long it's been parked (arrival detection)
                 _advance_on_yard_exit(s, truck)   # batched -> enroute when it leaves the yard
+                _advance_return(s, truck)         # onsite -> returning -> complete on the way back
         s.commit()
 
 
