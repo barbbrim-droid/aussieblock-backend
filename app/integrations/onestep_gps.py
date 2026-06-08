@@ -109,7 +109,7 @@ def _update_stop_state(truck: Truck) -> None:
 # pulls away from the job it flips to "returning"; back inside the yard fence it
 # auto-completes. State is in-memory (single uvicorn worker).
 # ──────────────────────────────────────────────────────────────────────────
-_job_loc: dict = {}   # order_id -> (lat, lng) where the truck was when it went On site
+_job_loc: dict = {}   # order_id -> {"lat","lng","since"} pinned when it went On site
 
 
 def _advance_return(s: Session, truck: Truck) -> None:
@@ -121,14 +121,18 @@ def _advance_return(s: Session, truck: Truck) -> None:
     ).all()
     for o in orders:
         if o.status in ("onsite", "pouring"):
-            if o.id not in _job_loc:
-                _job_loc[o.id] = (truck.lat, truck.lng)   # pin the job the first poll after On site
-            else:
-                jlat, jlng = _job_loc[o.id]
-                if _haversine_m(truck.lat, truck.lng, jlat, jlng) > config.RETURN_LEAVE_SITE_M:
-                    o.status = "returning"
-                    s.add(o)
-                    print(f"Left job: {truck.label} -> order {o.ref} returning to yard.")
+            st = _job_loc.get(o.id)
+            if st is None:
+                _job_loc[o.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+                continue
+            if _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.RETURN_LEAVE_SITE_M:
+                o.status = "returning"             # pulled away from the job
+                s.add(o)
+                print(f"Left job: {truck.label} -> order {o.ref} returning to yard.")
+            elif o.status == "onsite" and (datetime.utcnow() - st["since"]).total_seconds() >= config.POUR_DELAY_SECONDS:
+                o.status = "pouring"               # on site long enough -> pouring
+                s.add(o)
+                print(f"On site {config.POUR_DELAY_SECONDS // 60}m: {truck.label} -> order {o.ref} now pouring.")
         elif o.status == "returning":
             if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
                 o.status = "complete"

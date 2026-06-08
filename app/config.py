@@ -112,3 +112,5 @@ ARRIVAL_MOVE_M = float(os.getenv("ARRIVAL_MOVE_M", "75"))                # movem
 # truck then moves more than this from the job, the order flips to "returning"; when
 # it re-enters the yard geofence it auto-completes.
 RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "250"))
+# Once On site this long (and still at the job), the order auto-advances to "pouring".
+POUR_DELAY_SECONDS = int(os.getenv("POUR_DELAY_SECONDS", "300"))   # 5 minutes on site
