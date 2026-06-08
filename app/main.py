@@ -385,14 +385,15 @@ def _docs_dir() -> str:
     return d
 
 
-@app.get("/docs")
+@app.get("/knowledge")
 def list_docs(_: User = Depends(get_current_user), s: Session = Depends(get_session)):
-    """The Knowledge Center library — any logged-in user can list it."""
+    """The Knowledge Center library — any logged-in user can list it.
+    (Path is /knowledge, not /docs — FastAPI reserves /docs for Swagger UI.)"""
     return [{"id": d.id, "title": d.title, "uploaded_at": d.uploaded_at}
             for d in s.exec(select(Doc).order_by(Doc.title)).all()]
 
 
-@app.post("/docs")
+@app.post("/knowledge")
 async def upload_doc(title: str = Query(...), file: UploadFile = File(...),
                      _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Add a Knowledge Center PDF (operator/office only)."""
@@ -415,7 +416,7 @@ async def upload_doc(title: str = Query(...), file: UploadFile = File(...),
     return {"id": d.id, "title": d.title, "uploaded_at": d.uploaded_at}
 
 
-@app.get("/docs/{doc_id}")
+@app.get("/knowledge/{doc_id}")
 def get_doc(doc_id: int, _: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """View/download a Knowledge Center PDF (any logged-in user)."""
     d = s.get(Doc, doc_id)
@@ -428,7 +429,7 @@ def get_doc(doc_id: int, _: User = Depends(get_current_user), s: Session = Depen
     return FileResponse(path, media_type="application/pdf", filename=f"{safe}.pdf")
 
 
-@app.delete("/docs/{doc_id}")
+@app.delete("/knowledge/{doc_id}")
 def delete_doc(doc_id: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Remove a Knowledge Center PDF (operator/office only)."""
     d = s.get(Doc, doc_id)
