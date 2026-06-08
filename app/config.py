@@ -101,4 +101,4 @@ PLANT_LNG = -100.394094
 # Yard geofence radius (meters) around PLANT_LAT/LNG. A "batched" order stays
 # loading-at-the-yard until its truck crosses this fence, then it auto-flips to
 # "enroute". Parked trucks sit ~120–165 m out, so the default leaves margin.
-YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "300"))
+YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "500"))
