@@ -106,7 +106,7 @@ class CodIn(BaseModel):
 
 
 class ChargeIn(BaseModel):
-    amount: float
+    amount: float | None = None
 from .integrations.onestep_gps import gps_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
@@ -558,17 +558,16 @@ def charge_order(
 ):
     """Take payment on a COD load using the invoice the office already made in
     QuickBooks — the app no longer creates invoices (that duplicated). Finds the
-    customer's open QuickBooks invoice and returns its hosted pay link. Staff only."""
+    customer's open QuickBooks invoice and returns its hosted pay link; the amount
+    comes straight from that invoice, so staff don't enter one. Staff only."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o:
         raise HTTPException(404, "Order not found")
-    if body.amount <= 0:
-        raise HTTPException(422, "Enter an amount greater than 0")
     res = cod_link_from_existing(o.customer_id, body.amount)
     if not res.get("ok"):
         raise HTTPException(400, res.get("reason", "Could not find a QuickBooks invoice to charge"))
     o.prepay_required = True
-    o.prepay_amount = round(float(body.amount), 2)
+    o.prepay_amount = round(float(res.get("amount") or 0), 2)
     o.prepay_invoice_id = res["invoice_id"]
     o.prepaid = False
     s.add(o); s.commit()
