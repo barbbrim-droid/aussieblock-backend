@@ -191,6 +191,60 @@ async def _poll_real() -> None:
         s.commit()
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# LIVE ROUTE PROGRESS — fill the "% to site" bar from the truck's real distance
+# to the job. Geocode each site address once (cached) and set progress =
+# 1 - (truck→site)/(yard→site). No-op if GEOCODE_API_KEY isn't set.
+# ──────────────────────────────────────────────────────────────────────────
+_geo_cache: dict = {}   # address -> (lat, lng) or None (failed/looked up)
+
+
+async def _geocode(address: str):
+    if not address or not config.GEOCODE_API_KEY:
+        return None
+    if address in _geo_cache:
+        return _geo_cache[address]
+    result = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://maps.googleapis.com/maps/api/geocode/json",
+                                  params={"address": address, "key": config.GEOCODE_API_KEY})
+            j = r.json()
+        if j.get("status") == "OK" and j.get("results"):
+            loc = j["results"][0]["geometry"]["location"]
+            result = (loc["lat"], loc["lng"])
+    except Exception as e:
+        print("geocode error:", e)
+    _geo_cache[address] = result   # cache hits AND misses so we don't re-hammer
+    return result
+
+
+async def _update_enroute_progress() -> None:
+    with Session(engine) as s:
+        orders = s.exec(select(Order).where(Order.status == "enroute")).all()
+        changed = False
+        for o in orders:
+            if not o.truck_id:
+                continue
+            truck = s.get(Truck, o.truck_id)
+            if not truck or truck.lat is None:
+                continue
+            site = await _geocode(o.site)
+            if not site:
+                continue
+            total = _haversine_m(config.PLANT_LAT, config.PLANT_LNG, site[0], site[1])
+            if total <= 1:
+                continue
+            remaining = _haversine_m(truck.lat, truck.lng, site[0], site[1])
+            prog = max(0.05, min(0.99, 1 - remaining / total))
+            if abs(prog - (o.progress or 0)) > 0.005:
+                o.progress = prog
+                s.add(o)
+                changed = True
+        if changed:
+            s.commit()
+
+
 async def gps_poll_loop() -> None:
     mode = "MOCK" if config.USE_MOCK_GPS else "LIVE"
     print(f"GPS poller started in {mode} mode (every {config.GPS_POLL_SECONDS}s).")
@@ -200,6 +254,7 @@ async def gps_poll_loop() -> None:
                 _mock_step()
             else:
                 await _poll_real()
+                await _update_enroute_progress()   # fill the "% to site" bar from real distance
         except Exception as e:  # never let a hiccup kill the loop
             print("GPS poll error:", e)
         await asyncio.sleep(config.GPS_POLL_SECONDS)

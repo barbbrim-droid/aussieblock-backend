@@ -20,6 +20,10 @@ def data_path(filename: str) -> str:
 ONESTEP_API_KEY = os.getenv("ONESTEP_API_KEY", "").strip()
 ONESTEP_API_BASE = os.getenv("ONESTEP_API_BASE", "https://track.onestepgps.com/v3/api/public").strip()
 GPS_POLL_SECONDS = int(os.getenv("GPS_POLL_SECONDS", "10"))
+# Google key used server-side to geocode job-site addresses, so live route progress
+# (truck's distance to the site) can be computed. Same key the app already uses.
+# Without it, enroute progress just stays at its initial value.
+GEOCODE_API_KEY = os.getenv("GEOCODE_API_KEY", "").strip()
 
 # When there's no API key, run in mock mode so the app still works end-to-end.
 USE_MOCK_GPS = not bool(ONESTEP_API_KEY)
