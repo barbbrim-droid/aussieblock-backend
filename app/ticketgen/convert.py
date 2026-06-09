@@ -1,9 +1,12 @@
-"""Turn an uploaded scan/photo of a paper batch ticket into the branded
-Aussieblock delivery ticket.
+"""Turn an uploaded batch ticket into the branded Aussieblock ticket.
 
-Pipeline: rasterize (if PDF) -> Claude vision reads the fields (read_ticket) ->
-render the branded PDF (delivery_ticket). Needs ANTHROPIC_API_KEY in the env;
-if it's absent, available() is False and the caller keeps the original as-is.
+Routing:
+  • PDF  -> dornerBatch "Total batch protocol" -> read_protocol (AI, full data) ->
+            generator.render_ticket  (the complete branded Total Batch Protocol)
+  • image (photo) -> handwritten field ticket -> read_ticket -> delivery_ticket
+
+Needs ANTHROPIC_API_KEY in the env; if it's absent, available() is False and the
+caller keeps the original upload as-is.
 """
 import os
 import io
@@ -24,13 +27,15 @@ def _cfg() -> dict:
     return cfg
 
 
+def _is_pdf(data: bytes, filename: str) -> bool:
+    return (filename or "").lower().endswith(".pdf") or data[:5] == b"%PDF-"
+
+
 def _to_image_file(data: bytes, filename: str) -> str:
     """Write the ticket out as a PNG the vision reader can take. Page 1 only if PDF."""
-    name = (filename or "").lower()
-    is_pdf = name.endswith(".pdf") or data[:5] == b"%PDF-"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     tmp.close()
-    if is_pdf:
+    if _is_pdf(data, filename):
         import fitz  # PyMuPDF
         doc = fitz.open(stream=data, filetype="pdf")
         doc[0].get_pixmap(dpi=200).save(tmp.name)
@@ -42,31 +47,34 @@ def _to_image_file(data: bytes, filename: str) -> str:
 
 
 def convert(data: bytes, filename: str, customer_name: str = None, site: str = None) -> bytes:
-    """Read the uploaded ticket and render the branded delivery ticket.
-    Returns the branded PDF bytes. Raises on any failure (caller falls back)."""
-    from . import read_ticket, delivery_ticket
+    """Read the uploaded ticket and render the branded PDF. Returns PDF bytes.
+    Raises on any failure (the caller falls back to the original)."""
     cfg = _cfg()
     img = _to_image_file(data, filename)
-    try:
-        fields = read_ticket.read_ticket(img, cfg)
-    finally:
-        try:
-            os.remove(img)
-        except OSError:
-            pass
-    # The order is authoritative for who/where — never let a misread change them.
-    if customer_name:
-        fields["customer"] = customer_name
-    if site and not (fields.get("job_address") or fields.get("site")):
-        fields["site"] = site
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     out.close()
     try:
-        delivery_ticket.render_delivery_ticket(fields, out.name)
+        if _is_pdf(data, filename):
+            # Typed dornerBatch "Total batch protocol" — full materials/batches/water.
+            from . import read_protocol, generator
+            d = read_protocol.read_protocol(img, cfg)
+            if customer_name and isinstance(d.get("order"), dict):
+                d["order"]["customer"] = customer_name   # order is authoritative for who it's for
+            generator.render_ticket(d, out.name)
+        else:
+            # Handwritten field-ticket photo — summary delivery ticket.
+            from . import read_ticket, delivery_ticket
+            d = read_ticket.read_ticket(img, cfg)
+            if customer_name:
+                d["customer"] = customer_name
+            if site and not (d.get("job_address") or d.get("site")):
+                d["site"] = site
+            delivery_ticket.render_delivery_ticket(d, out.name)
         with open(out.name, "rb") as fh:
             return fh.read()
     finally:
-        try:
-            os.remove(out.name)
-        except OSError:
-            pass
+        for p in (img, out.name):
+            try:
+                os.remove(p)
+            except OSError:
+                pass

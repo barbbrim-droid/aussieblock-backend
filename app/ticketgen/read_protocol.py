@@ -1,0 +1,213 @@
+"""
+read_protocol.py -- AI vision reader for a photographed dornerBatch
+"Total batch protocol" (the TYPED plant printout). Returns the full data dict
+that generator.render_ticket() renders into the branded Total Batch Protocol.
+
+Typed text => reliable reads (unlike the handwritten field tickets).
+"""
+import os, io, re, base64, json
+import anthropic
+from PIL import Image, ImageOps
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MAX_DIM = 1568
+
+
+def _b64(path):
+    im = Image.open(path)
+    im = ImageOps.exif_transpose(im).convert("RGB")
+    im.thumbnail((MAX_DIM, MAX_DIM))
+    buf = io.BytesIO(); im.save(buf, "JPEG", quality=88)
+    return base64.standard_b64encode(buf.getvalue()).decode()
+
+
+def _num(s):
+    """'17,753.10 lb' -> 17753.10 ; '+32.97' -> 32.97 ; '' -> 0.0"""
+    if s is None:
+        return 0.0
+    m = re.search(r"-?\d[\d,]*\.?\d*", str(s).replace(",", ""))
+    return float(m.group()) if m else 0.0
+
+
+def _lim(s):
+    """'+/-2%' -> 2.0 ; '+1%' -> 1.0"""
+    m = re.search(r"\d+\.?\d*", str(s or ""))
+    return float(m.group()) if m else 0.0
+
+
+def _astm(name, unit, cfg):
+    """ASTM C94 batching tolerance by material type (the protocol leaves this
+    column blank, so derive it like the example sheet). Returns (pct, label)."""
+    t = cfg.get("astm_tolerance_pct", {})
+    n = (name or "").lower(); u = (unit or "").lower()
+    if "water" in n:
+        pct = t.get("water", 1)
+    elif any(k in n for k in ["cem", "slag", "portland", "binder", "fly ash", "ash"]):
+        pct = t.get("cement", 1)
+    elif "fl" in u or "oz" in u or any(k in n for k in ["add", "lfa", "seed", "admix",
+                                                        "plast", "retard", "reduc", "fiber"]):
+        pct = t.get("admixture", 3)
+    else:
+        pct = t.get("aggregate", 2)   # gravel / sand / aggregate
+    return float(pct), f"+/-{pct:g}%"
+
+
+TOOL = {
+    "name": "emit_protocol",
+    "description": "Return every field read off the Total Batch Protocol.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "report_date": {"type": "string"},
+            "order": {"type": "object", "properties": {
+                "plant": {"type": "string"}, "recipe": {"type": "string"},
+                "customer": {"type": "string"}, "site_no": {"type": "string"},
+                "site_addr": {"type": "string"}, "vrn": {"type": "string"},
+                "qty": {"type": "string"}, "load_no": {"type": "string"},
+            }},
+            "batches": {"type": "array", "items": {"type": "object", "properties": {
+                "no": {"type": "string"}, "time": {"type": "string"}, "qty": {"type": "string"}}}},
+            "materials": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "unit": {"type": "string"},
+                "density": {"type": "string"}, "recipe_sv": {"type": "string"},
+                "set_value": {"type": "string"}, "actual_value": {"type": "string"},
+                "allowable": {"type": "string"}}}},
+            "totals": {"type": "object", "properties": {
+                "water_sum": {"type": "string"}, "water_per": {"type": "string"},
+                "binder_sum": {"type": "string"}, "binder_per": {"type": "string"},
+                "agg_sum": {"type": "string"}, "agg_per": {"type": "string"},
+                "total_sum": {"type": "string"}, "total_per": {"type": "string"}}},
+            "process": {"type": "object", "properties": {
+                "total_mixing_time": {"type": "string"}, "avg_mixing_time": {"type": "string"},
+                "avg_mixer_load": {"type": "string"}, "slump": {"type": "string"},
+                "slump_set": {"type": "string"},
+                "water_correction": {"type": "string"}, "wc": {"type": "string"},
+                "wc_eq": {"type": "string"}, "max_wc": {"type": "string"}}},
+        },
+        "required": ["order", "materials"],
+    },
+}
+
+PROMPT = (
+    "This is a photo of a dornerBatch 'Total batch protocol' (a machine-PRINTED "
+    "concrete batch report, not handwritten). Transcribe it exactly via "
+    "emit_protocol.\n"
+    "- ORDER INFORMATION: plant, recipe no./name, customer no./name, construction "
+    "site no./name and address, vehicle no./VRN, quantity, load/delivery number.\n"
+    "- BATCHES: each row's protocol no., production time, batch quantity.\n"
+    "- BATCH INFORMATION: each material row — material/silo name, unit, density, "
+    "Recipe(SV), Set value(SV), Actual value(AV), and the Allowable ASTM C94 "
+    "column (e.g. '+/-2%'). Copy numbers exactly including decimals.\n"
+    "- The Σ totals block: Water / Binder / Aggregate / Total weight (sum and per-yd³).\n"
+    "- The process block: total & average mixing time, mixer load, concrete slump, "
+    "water correction, w/c, w/c eq., max w/c.\n"
+    "- In the Consistency block the 'Set value' is the REQUESTED/target slump — "
+    "return it as slump_set (just the number, e.g. '5'). The 'Actual value' is slump.\n"
+    "Leave anything not present blank."
+)
+
+
+def read_protocol(path, cfg):
+    key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("No Anthropic API key in config.json.")
+    client = anthropic.Anthropic(api_key=key)
+    msg = client.messages.create(
+        model=cfg.get("vision_model", "claude-opus-4-8"),
+        max_tokens=2048, tools=[TOOL],
+        tool_choice={"type": "tool", "name": "emit_protocol"},
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _b64(path)}},
+            {"type": "text", "text": PROMPT}]}],
+    )
+    out = {}
+    for b in msg.content:
+        if b.type == "tool_use":
+            out = b.input
+            break
+    return _to_generator_data(out, cfg)
+
+
+def _to_generator_data(p, cfg):
+    o = p.get("order", {}) or {}
+    batches = [(b.get("no", ""), b.get("time", ""), b.get("qty", "")) for b in (p.get("batches") or [])]
+    # Report date should match the PRODUCTION date (the batch prod time), not the
+    # header text the read sometimes garbles.
+    prod_date = batches[0][1].split()[0] if (batches and batches[0][1]) else ""
+    mats = []
+    for m in (p.get("materials") or []):
+        nm = m.get("name", ""); un = m.get("unit", "lb")
+        lim, lab = _astm(nm, un, cfg)        # ASTM tolerance by material type
+        mats.append((
+            nm, un, _num(m.get("density")), _num(m.get("recipe_sv")),
+            _num(m.get("set_value")), _num(m.get("actual_value")), lim, lab,
+        ))
+    t = p.get("totals", {}) or {}
+    pr = p.get("process", {}) or {}
+    binder_lb = _num(t.get("binder_sum"))
+    # Concrete slump shown on the ticket = REQUESTED (set) slump +/- 1.5", not the
+    # measured actual value.
+    _ss = re.search(r"[\d.]+", pr.get("slump_set") or "")
+    req = _ss.group() if _ss else ""
+    req_slump = f"{req} in" if req else (pr.get("slump", "") or "")
+    concrete_slump = f"{req} in (+/- 1.5 in)" if req else (pr.get("slump", "") or "-")
+    qty = o.get("qty", "") or ""
+    yards = _num(qty) or 0
+    data = {
+        "report_date": prod_date or p.get("report_date", "") or "",
+        "sales_tax_pct": cfg.get("sales_tax_pct", 8.25),
+        "company": cfg["company"],
+        "weather": {"time": "-", "cond": "-", "temp": "-", "humidity": "-", "wind": "-", "pressure": "-", "vis": "-"},
+        "order": {
+            "plant": o.get("plant", "") or "-",
+            "recipe": o.get("recipe", "") or "-",
+            "customer": o.get("customer", "") or "-",
+            "cust_phone": "-",
+            "site_no": o.get("site_no", "") or "-",
+            "site_addr": o.get("site_addr", "") or "-",
+            "mileage": "-", "drive_time": "-",
+            "vrn": o.get("vrn", "") or "-",
+            "driver": "-",
+            "qty": qty or "-",
+            "ordered": qty or "-",
+            "load_no": o.get("load_no", "") or "-",
+            "user": "-", "sales_rep": "-",
+        },
+        "batches": batches,
+        "materials": mats,
+        "totals": {
+            "Water": (_num(t.get("water_sum")), _num(t.get("water_per"))),
+            "Binder": (binder_lb, _num(t.get("binder_per"))),
+            "Aggregate (Dry weight)": (_num(t.get("agg_sum")), _num(t.get("agg_per"))),
+            "Total weight": (_num(t.get("total_sum")), _num(t.get("total_per"))),
+        },
+        "process": {
+            "Total mixing time": pr.get("total_mixing_time", "") or "-",
+            "Ø Mixing time": pr.get("avg_mixing_time", "") or "-",
+            "Ø Mixer load": pr.get("avg_mixer_load", "") or "-",
+            "Concrete slump": concrete_slump,
+            "Water correction": pr.get("water_correction", "") or "-",
+            "w/c": pr.get("wc", "") or "-",
+            "w/c eq.": pr.get("wc_eq", "") or "-",
+            "max w/c": pr.get("max_wc", "") or "-",
+        },
+        "binder_lb": binder_lb,
+        "wc_eq": _num(pr.get("wc_eq")) or _num(pr.get("wc")),
+        "max_wc": _num(pr.get("max_wc")) or cfg.get("default_max_wc", 0.60),
+        "yards": yards,
+        "req_slump": req_slump,
+    }
+    return data
+
+
+if __name__ == "__main__":
+    import sys, generator
+    cfg = json.load(open(os.path.join(HERE, "config.json"), encoding="utf-8"))
+    data = read_protocol(sys.argv[1], cfg)
+    out = os.path.join(HERE, "PROTOCOL_out.pdf")
+    generator.render_ticket(data, out)
+    print("customer:", data["order"]["customer"])
+    print("recipe  :", data["order"]["recipe"])
+    print("load    :", data["order"]["load_no"], "| qty:", data["order"]["qty"])
+    print("materials:", len(data["materials"]), "| batches:", len(data["batches"]))
+    print("wrote", out)
