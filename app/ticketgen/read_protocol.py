@@ -128,6 +128,19 @@ def read_protocol(path, cfg):
     return _to_generator_data(out, cfg)
 
 
+def _with_gallons(s: str) -> str:
+    """Append the gallon equivalent to a water value in pounds (water: 8.345 lb/gal).
+    '392.5 lb' -> '392.5 lb (47.0 gal)'. Left as-is if there's no number."""
+    m = re.search(r"-?[\d,]*\.?\d+", s or "")
+    if not m:
+        return (s or "-")
+    try:
+        lb = float(m.group().replace(",", ""))
+    except ValueError:
+        return (s or "-")
+    return f"{(s or '').strip()} ({lb / 8.345:.1f} gal)"
+
+
 def _rule_max_wc(recipe: str) -> float:
     """Locked maximum water/cement ratio by mix design:
     TxDOT Class A & B = 0.60, Class C = 0.45, every other (non-TxDOT) mix = 0.70.
@@ -147,12 +160,20 @@ def _to_generator_data(p, cfg):
     # Report date should match the PRODUCTION date (the batch prod time), not the
     # header text the read sometimes garbles.
     prod_date = batches[0][1].split()[0] if (batches and batches[0][1]) else ""
+    dens_over = cfg.get("density_override") or {}
     mats = []
     for m in (p.get("materials") or []):
         nm = m.get("name", ""); un = m.get("unit", "lb")
         lim, lab = _astm(nm, un, cfg)        # ASTM tolerance by material type
+        # dornerBatch prints aggregate density in kg/m³; use the correct lb/ft³
+        # value from density_override (matched by material name) when configured.
+        dens = _num(m.get("density"))
+        for key, val in dens_over.items():
+            if key.lower() in nm.lower():
+                dens = float(val)
+                break
         mats.append((
-            nm, un, _num(m.get("density")), _num(m.get("recipe_sv")),
+            nm, un, dens, _num(m.get("recipe_sv")),
             _num(m.get("set_value")), _num(m.get("actual_value")), lim, lab,
         ))
     t = p.get("totals", {}) or {}
@@ -199,7 +220,7 @@ def _to_generator_data(p, cfg):
             "Ø Mixing time": pr.get("avg_mixing_time", "") or "-",
             "Ø Mixer load": pr.get("avg_mixer_load", "") or "-",
             "Concrete slump": concrete_slump,
-            "Water correction": pr.get("water_correction", "") or "-",
+            "Water correction": _with_gallons(pr.get("water_correction", "")),
             "w/c": pr.get("wc", "") or "-",
             "w/c eq.": pr.get("wc_eq", "") or "-",
             "max w/c": f"{rule_wc:.2f}",
