@@ -128,6 +128,12 @@ def read_protocol(path, cfg):
     return _to_generator_data(out, cfg)
 
 
+def _uk_to_us_date(s: str) -> str:
+    """dornerBatch prints dates DD/MM/YYYY; rewrite them US-style MM/DD/YYYY.
+    Only swaps full DD/MM/YYYY patterns (times like 12:14:19 are untouched)."""
+    return re.sub(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lambda m: f"{m.group(2)}/{m.group(1)}/{m.group(3)}", s or "")
+
+
 def _with_gallons(s: str) -> str:
     """Append the gallon equivalent to a water value in pounds (water: 8.345 lb/gal).
     '392.5 lb' -> '392.5 lb (47.0 gal)'. Left as-is if there's no number."""
@@ -156,7 +162,8 @@ def _rule_max_wc(recipe: str) -> float:
 def _to_generator_data(p, cfg):
     o = p.get("order", {}) or {}
     rule_wc = _rule_max_wc(o.get("recipe", "") or "")
-    batches = [(b.get("no", ""), b.get("time", ""), b.get("qty", "")) for b in (p.get("batches") or [])]
+    # dornerBatch prints dates DD/MM/YYYY; show them US-style MM/DD/YYYY.
+    batches = [(b.get("no", ""), _uk_to_us_date(b.get("time", "")), b.get("qty", "")) for b in (p.get("batches") or [])]
     # Report date should match the PRODUCTION date (the batch prod time), not the
     # header text the read sometimes garbles.
     prod_date = batches[0][1].split()[0] if (batches and batches[0][1]) else ""
@@ -188,7 +195,7 @@ def _to_generator_data(p, cfg):
     qty = o.get("qty", "") or ""
     yards = _num(qty) or 0
     data = {
-        "report_date": prod_date or p.get("report_date", "") or "",
+        "report_date": prod_date or _uk_to_us_date(p.get("report_date", "")) or "",
         "sales_tax_pct": cfg.get("sales_tax_pct", 8.25),
         "company": cfg["company"],
         "weather": {"time": "-", "cond": "-", "temp": "-", "humidity": "-", "wind": "-", "pressure": "-", "vis": "-"},
