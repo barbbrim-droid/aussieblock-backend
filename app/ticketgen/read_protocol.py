@@ -128,8 +128,21 @@ def read_protocol(path, cfg):
     return _to_generator_data(out, cfg)
 
 
+def _rule_max_wc(recipe: str) -> float:
+    """Locked maximum water/cement ratio by mix design:
+    TxDOT Class A & B = 0.60, Class C = 0.45, every other (non-TxDOT) mix = 0.70.
+    Enforced here regardless of what the protocol prints."""
+    n = (recipe or "").lower()
+    if re.search(r"class\s*c\b", n):
+        return 0.45
+    if re.search(r"class\s*[ab]\b", n):
+        return 0.60
+    return 0.70
+
+
 def _to_generator_data(p, cfg):
     o = p.get("order", {}) or {}
+    rule_wc = _rule_max_wc(o.get("recipe", "") or "")
     batches = [(b.get("no", ""), b.get("time", ""), b.get("qty", "")) for b in (p.get("batches") or [])]
     # Report date should match the PRODUCTION date (the batch prod time), not the
     # header text the read sometimes garbles.
@@ -189,11 +202,11 @@ def _to_generator_data(p, cfg):
             "Water correction": pr.get("water_correction", "") or "-",
             "w/c": pr.get("wc", "") or "-",
             "w/c eq.": pr.get("wc_eq", "") or "-",
-            "max w/c": pr.get("max_wc", "") or "-",
+            "max w/c": f"{rule_wc:.2f}",
         },
         "binder_lb": binder_lb,
         "wc_eq": _num(pr.get("wc_eq")) or _num(pr.get("wc")),
-        "max_wc": _num(pr.get("max_wc")) or cfg.get("default_max_wc", 0.60),
+        "max_wc": rule_wc,
         "yards": yards,
         "req_slump": req_slump,
     }
