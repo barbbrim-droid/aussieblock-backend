@@ -531,23 +531,25 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
     with open(os.path.join(bdir, orig_name), "wb") as fh:
         fh.write(raw)
 
-    # Brand it; fall back to the original if reading/rendering fails (nothing lost).
-    branded = None
+    # Record the original NOW and commit, so the upload is never lost even if the
+    # (memory-heavy) branding step crashes the worker.
+    o.batch_ticket = orig_name
+    o.batch_ticket_print = None   # branded ticket prints fine on its own
+    s.add(o); s.commit(); s.refresh(o)
+
+    # Then brand it; on success swap the branded ticket in, else the original stays.
     if ticket_convert.available():
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
             branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site)
+            if branded:
+                fname = f"{ref}.pdf"
+                with open(os.path.join(bdir, fname), "wb") as fh:
+                    fh.write(branded)
+                o.batch_ticket = fname
+                s.add(o); s.commit(); s.refresh(o)
         except Exception as e:
             print("batch-ticket branding failed:", e)
-    if branded:
-        fname = f"{ref}.pdf"
-        with open(os.path.join(bdir, fname), "wb") as fh:
-            fh.write(branded)
-        o.batch_ticket = fname
-    else:
-        o.batch_ticket = orig_name
-    o.batch_ticket_print = None   # branded ticket prints fine on its own
-    s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
 

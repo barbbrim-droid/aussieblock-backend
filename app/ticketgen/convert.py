@@ -32,17 +32,28 @@ def _is_pdf(data: bytes, filename: str) -> bool:
 
 
 def _to_image_file(data: bytes, filename: str) -> str:
-    """Write the ticket out as a PNG the vision reader can take. Page 1 only if PDF."""
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    """Write the ticket out as a modest-resolution JPEG (page 1 if PDF) for the
+    vision reader. Kept small + freed promptly to keep memory low — typed
+    protocols still read reliably at this size."""
+    import gc
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
     tmp.close()
     if _is_pdf(data, filename):
         import fitz  # PyMuPDF
         doc = fitz.open(stream=data, filetype="pdf")
-        doc[0].get_pixmap(dpi=200).save(tmp.name)
+        pix = doc[0].get_pixmap(dpi=150)   # 150 DPI ~ 1275px wide; lower memory than 200
+        pix.save(tmp.name)
+        pix = None
         doc.close()
+        doc = None
     else:
         from PIL import Image
-        Image.open(io.BytesIO(data)).convert("RGB").save(tmp.name)
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        im.thumbnail((1500, 1500))
+        im.save(tmp.name, "JPEG", quality=85)
+        im.close()
+        im = None
+    gc.collect()
     return tmp.name
 
 
