@@ -570,7 +570,8 @@ def get_batch_ticket(ref: str, variant: str = Query("view"),
     if not os.path.exists(path):
         raise HTTPException(404, "The batch ticket file is missing.")
     return FileResponse(path, media_type=_media_type(path),
-                        filename=f"batch-ticket-{ref}{os.path.splitext(path)[1]}")
+                        filename=f"batch-ticket-{ref}{os.path.splitext(path)[1]}",
+                        headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 @app.delete("/orders/{ref}/batch-ticket")
