@@ -31,28 +31,56 @@ def _is_pdf(data: bytes, filename: str) -> bool:
     return (filename or "").lower().endswith(".pdf") or data[:5] == b"%PDF-"
 
 
+_MAX_PX = 1600   # longest side sent to the vision reader (plenty for typed text)
+
+
+def _downscale_to_jpeg(img_bytes: bytes, out_path: str) -> bool:
+    """Open an image's bytes and save a downscaled JPEG using PIL 'draft' mode,
+    which decodes large JPEGs at reduced resolution -> low memory. Returns False
+    if PIL can't open it."""
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(img_bytes))
+        im.draft("RGB", (_MAX_PX, _MAX_PX))   # cheap partial decode for big JPEGs
+        im = im.convert("RGB")
+        im.thumbnail((_MAX_PX, _MAX_PX))
+        im.save(out_path, "JPEG", quality=85)
+        im.close()
+        return True
+    except Exception:
+        return False
+
+
 def _to_image_file(data: bytes, filename: str) -> str:
-    """Write the ticket out as a modest-resolution JPEG (page 1 if PDF) for the
-    vision reader. Kept small + freed promptly to keep memory low — typed
-    protocols still read reliably at this size."""
+    """Write the ticket out as a modest JPEG (page 1 if PDF) for the vision reader,
+    using a low-memory path so big scans don't blow up the worker."""
     import gc
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
     tmp.close()
     if _is_pdf(data, filename):
         import fitz  # PyMuPDF
         doc = fitz.open(stream=data, filetype="pdf")
-        pix = doc[0].get_pixmap(dpi=150)   # 150 DPI ~ 1275px wide; lower memory than 200
-        pix.save(tmp.name)
-        pix = None
+        page = doc[0]
+        # A scanned protocol is usually ONE big embedded image — pull it out and
+        # downscale it cheaply, instead of rendering the whole page at high res.
+        done = False
+        try:
+            imgs = page.get_images(full=True)
+            if imgs:
+                xref = max(imgs, key=lambda im: (im[2] or 0) * (im[3] or 0))[0]
+                ext = doc.extract_image(xref)
+                if ext and ext.get("image"):
+                    done = _downscale_to_jpeg(ext["image"], tmp.name)
+        except Exception:
+            done = False
+        if not done:
+            pix = page.get_pixmap(dpi=120)   # vector/non-image PDF — low-DPI render
+            pix.save(tmp.name)
+            pix = None
         doc.close()
         doc = None
     else:
-        from PIL import Image
-        im = Image.open(io.BytesIO(data)).convert("RGB")
-        im.thumbnail((1500, 1500))
-        im.save(tmp.name, "JPEG", quality=85)
-        im.close()
-        im = None
+        _downscale_to_jpeg(data, tmp.name)
     gc.collect()
     return tmp.name
 
