@@ -17,6 +17,7 @@ DEFAULT_SHEET = {
     "mixes": [],        # [{"mix": "3000 PSI", "price": 0.0, "haul": 0.0}]
     "overrides": [],    # [{"customer": "...", "mix": "" (=any), "price": 0.0}]
     "admixtures": [],   # [{"name": "Fiber", "rate": 3.75, "per": "lb"|"yard"}]
+    "self_haul_customers": [],   # pickup customers (concrete only, no delivery/load fees)
 }
 
 
@@ -39,6 +40,7 @@ def save_sheet(sheet: dict) -> dict:
     merged["mixes"] = sheet.get("mixes", []) if sheet else []
     merged["overrides"] = sheet.get("overrides", []) if sheet else []
     merged["admixtures"] = sheet.get("admixtures", []) if sheet else []
+    merged["self_haul_customers"] = sheet.get("self_haul_customers", []) if sheet else []
     with open(_path(), "w", encoding="utf-8") as fh:
         json.dump(merged, fh, indent=2)
     return merged
@@ -122,9 +124,14 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
                 adx_lines.append({"label": f"{nm} ({lq:g} yd @ ${rate:.2f}/yd)", "amount": charge})
     adx_total = round(sum(a["amount"] for a in adx_lines), 2)
 
-    short = _num(sheet.get("short_load_fee")) if (oq and oq < _num(sheet.get("short_load_under_yd"))) else 0.0
-    backhaul = (round(_num(sheet.get("backhaul_per_yd")) * lq, 2)
-                if (lq and lq < _num(sheet.get("backhaul_under_yd")) and oq and oq > lq) else 0.0)
+    # self-haul / pickup customers buy concrete only — no delivery or load fees
+    self_haul = cust_n in {_norm(c) for c in sheet.get("self_haul_customers", []) if c}
+    if self_haul:
+        short = backhaul = 0.0
+    else:
+        short = _num(sheet.get("short_load_fee")) if (oq and oq < _num(sheet.get("short_load_under_yd"))) else 0.0
+        backhaul = (round(_num(sheet.get("backhaul_per_yd")) * lq, 2)
+                    if (lq and lq < _num(sheet.get("backhaul_under_yd")) and oq and oq > lq) else 0.0)
     subtotal = round(extended + adx_total + short + backhaul, 2)
     tax_pct = _num(sheet.get("tax_pct"))
     tax = round(subtotal * tax_pct / 100.0, 2)

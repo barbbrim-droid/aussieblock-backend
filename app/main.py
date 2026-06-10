@@ -566,6 +566,7 @@ class PriceSheetIn(BaseModel):
     mixes: list = []        # [{"mix","price","haul"}]
     overrides: list = []    # [{"customer","mix","price"}]
     admixtures: list = []   # [{"name","rate","per":"lb"|"yard"}]
+    self_haul_customers: list = []   # pickup customers — no delivery/load fees
 
 
 @app.get("/price-sheet")
