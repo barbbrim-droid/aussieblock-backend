@@ -133,7 +133,13 @@ def _advance_return(s: Session, truck: Truck) -> None:
         if o.status in ("onsite", "pouring"):
             st = _job_loc.get(o.id)
             if st is None:
-                _job_loc[o.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+                # Anchor the job location at the geocoded site centre (cached when the
+                # truck entered the geofence), NOT the truck's spot at the geofence
+                # edge — else the final drive-in to park reads as "leaving the site".
+                site = _geo_cache.get(o.site)
+                _job_loc[o.id] = {"lat": site[0] if site else truck.lat,
+                                  "lng": site[1] if site else truck.lng,
+                                  "since": datetime.utcnow()}
                 continue
             if _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.RETURN_LEAVE_SITE_M:
                 o.status = "returning"             # pulled away from the job
@@ -199,7 +205,13 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
         if ld.status in ("onsite", "pouring"):
             st = _load_job_loc.get(ld.id)
             if st is None:
-                _load_job_loc[ld.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+                # Anchor at the geocoded site centre, not the geofence-edge spot (see
+                # _advance_return) — so arriving and parking isn't read as leaving.
+                o = s.get(Order, ld.order_id)
+                site = _geo_cache.get(o.site) if o else None
+                _load_job_loc[ld.id] = {"lat": site[0] if site else truck.lat,
+                                        "lng": site[1] if site else truck.lng,
+                                        "since": datetime.utcnow()}
                 continue
             if _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.RETURN_LEAVE_SITE_M:
                 ld.status = "returning"

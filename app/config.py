@@ -112,10 +112,13 @@ YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "500"))
 # address entirely — it keys off the truck actually stopping.
 ARRIVAL_DWELL_SECONDS = int(os.getenv("ARRIVAL_DWELL_SECONDS", "300"))   # 5 minutes parked
 ARRIVAL_MOVE_M = float(os.getenv("ARRIVAL_MOVE_M", "75"))                # movement under this = "stopped"
-# Once an order is On site, the job location is pinned (the truck's spot). When the
-# truck then moves more than this from the job, the order flips to "returning"; when
-# it re-enters the yard geofence it auto-completes.
-RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "250"))
+# Once an order is On site, the job location is pinned (the geocoded site centre).
+# When the truck then moves more than this from the job, the order flips to
+# "returning"; when it re-enters the yard geofence it auto-completes. MUST be larger
+# than JOB_GEOFENCE_M so the truck's final drive-in to park (anywhere inside the
+# arrival geofence) is never mistaken for leaving — i.e. enter at 300 m, only count
+# as left once it's 400 m out (hysteresis).
+RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "400"))
 # Job-site geofence radius (meters). An en-route truck that comes within this
 # distance of the geocoded job address auto-advances the order to "On site". The
 # 300 m radius absorbs small address/geocode inaccuracies; stop-detection above
