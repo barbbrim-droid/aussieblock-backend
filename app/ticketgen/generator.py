@@ -18,7 +18,7 @@ RED   = (220, 38, 38)
 SHADE = (239, 237, 232)  # light label shading
 GREY  = (107, 114, 128)
 WATER_LB_PER_GAL = 8.345
-MIN_MATERIAL_ROWS = 9   # reserve blank rows so an added admixture has room
+MIN_MATERIAL_ROWS = 8   # reserve blank rows so an added admixture has room
 
 def _res(name):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -181,9 +181,9 @@ def render_ticket(data, out_path):
             pdf.set_text_color(*col); pdf.set_font("DejaVu", "B" if b else "", 6.9)
             pdf.cell(wd, RH, val, border=1, align=al)
         pdf.ln(RH)
-    # always leave a few blank rows under the last material for extra admixtures
+    # leave a blank row under the last material for an added admixture
     pdf.set_text_color(*INK); pdf.set_font("DejaVu", "", 6.9)
-    for _ in range(max(3, MIN_MATERIAL_ROWS - len(d["materials"]))):
+    for _ in range(max(1, MIN_MATERIAL_ROWS - len(d["materials"]))):
         for wd in cw:
             pdf.cell(wd, RH, "", border=1)
         pdf.ln(RH)
