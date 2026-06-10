@@ -249,10 +249,10 @@ def _order_json(o: Order, s: Session) -> dict:
         ),
         # True when an en-route truck looks parked at the job — dispatch confirms On site.
         "arrival_pending": (o.status == "enroute" and arrival_pending(truck)),
-        # A pour = either a big order (>10 yd) or any order that's started loading
-        # (has at least one load). Adding the first load turns any order into a
-        # load-tracked pour (per-load GPS, tickets, etc.).
-        "is_pour": pricing._num(o.qty) > LOAD_SIZE_YD or len(loads) > 0,
+        # Every order is load-tracked (a "pour"), regardless of volume — staff add
+        # one load per truck, each with its own GPS, status and batch ticket. Once
+        # a load goes in flight the pour shows in Current pours.
+        "is_pour": True,
         "loads_total": len(loads),
         "loads_done": sum(1 for ld in loads if ld.status == "complete"),
         "yards_loaded": round(sum(pricing._num(ld.qty) for ld in loads), 2),
