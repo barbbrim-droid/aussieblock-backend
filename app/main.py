@@ -759,7 +759,12 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
         raise HTTPException(404, "Order not found")
     sheet = pricing.load_sheet()
     cust = s.get(Customer, o.customer_id).name if o.customer_id else ""
-    cp = pricing.compute_pricing(sheet, o.mix, cust, o.qty, o.qty, order_admixtures=o.admixtures or "")
+    # bill the ACTUAL yards delivered: for a pour, the sum of its loads (e.g. ordered
+    # 15, loaded 18 -> bill 18); for a single order, the order quantity.
+    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+    loaded = round(sum(pricing._num(ld.qty) for ld in loads), 2)
+    billable = ("%g" % loaded) if (loads and loaded > 0) else o.qty
+    cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable, order_admixtures=o.admixtures or "")
     # mileage: use the stored value, else auto-compute once and cache it on the order
     mi = o.mileage
     if mi is None:
@@ -767,9 +772,9 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
         if mi is not None:
             o.mileage = mi
             s.add(o); s.commit()
-    dl = pricing.compute_delivery(sheet, mi, o.qty)
+    dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
-    return {"customer": cp, "delivery": dl}
+    return {"customer": cp, "delivery": dl, "billed_qty": billable, "ordered_qty": o.qty}
 
 
 class DeliveryIn(BaseModel):
