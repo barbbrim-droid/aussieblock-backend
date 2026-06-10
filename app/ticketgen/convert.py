@@ -103,8 +103,11 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
             # Typed dornerBatch "Total batch protocol" — full materials/batches/water.
             from . import read_protocol, generator
             d = read_protocol.read_protocol(img, cfg)
-            if customer_name and isinstance(d.get("order"), dict):
-                d["order"]["customer"] = customer_name   # order is authoritative for who it's for
+            if isinstance(d.get("order"), dict):
+                if customer_name:
+                    d["order"]["customer"] = customer_name   # order is authoritative for who it's for
+                if site:
+                    d["order"]["site_addr"] = site           # …and for the job-site address
             generator.render_ticket(d, out.name)
         else:
             # Handwritten field-ticket photo — summary delivery ticket.
@@ -112,7 +115,10 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
             d = read_ticket.read_ticket(img, cfg)
             if customer_name:
                 d["customer"] = customer_name
-            if site and not (d.get("job_address") or d.get("site")):
+            if site:
+                # The address on the order card is authoritative — override whatever
+                # was read off the paper (handwriting is easy to misread).
+                d["job_address"] = site
                 d["site"] = site
             delivery_ticket.render_delivery_ticket(d, out.name)
         with open(out.name, "rb") as fh:
