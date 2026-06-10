@@ -460,18 +460,26 @@ class LoadIn(BaseModel):
     truck: Optional[str] = None
     driver: Optional[str] = None
     status: Optional[str] = None
+    qty: Optional[str] = None
 
 
 @app.patch("/orders/{ref}/loads/{seq}")
 def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staff),
                 s: Session = Depends(get_session)):
-    """Assign a truck/driver or advance the status of one load within a pour."""
+    """Assign a truck/driver, advance the status, or correct the yards of one
+    load within a pour (the actual yards a truck poured drive what we bill)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o:
         raise HTTPException(404, "Order not found")
     ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
     if not ld:
         raise HTTPException(404, "Load not found")
+    if body.qty is not None:
+        q = body.qty.strip()
+        if q and pricing._num(q) > 0:
+            ld.qty = q
+        else:
+            raise HTTPException(422, "Load yards must be a positive number")
     if body.truck is not None:
         label = body.truck.strip()
         if label and label not in ("—", "-"):
