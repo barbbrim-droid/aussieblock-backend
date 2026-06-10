@@ -10,6 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
+from typing import Optional
 import glob
 import json
 import os
