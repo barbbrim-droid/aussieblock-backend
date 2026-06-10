@@ -245,6 +245,33 @@ async def _update_enroute_progress() -> None:
             s.commit()
 
 
+async def _advance_on_site_arrival() -> None:
+    """Auto-advance an en-route order to On site once its truck enters the job-site
+    geofence (JOB_GEOFENCE_M around the geocoded address). The 300 m radius absorbs
+    small address inaccuracies; stop-detection (arrival_pending) still backs up a
+    badly-wrong address that the truck never gets within range of."""
+    with Session(engine) as s:
+        orders = s.exec(select(Order).where(Order.status == "enroute")).all()
+        changed = False
+        for o in orders:
+            if not o.truck_id:
+                continue
+            truck = s.get(Truck, o.truck_id)
+            if not truck or truck.lat is None or truck.lng is None:
+                continue
+            site = await _geocode(o.site)
+            if not site:
+                continue
+            if _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M:
+                o.status = "onsite"
+                o.progress = 1.0
+                s.add(o)
+                changed = True
+                print(f"Geofence: {truck.label} within {config.JOB_GEOFENCE_M:.0f}m of {o.ref} site -> On site.")
+        if changed:
+            s.commit()
+
+
 async def gps_poll_loop() -> None:
     mode = "MOCK" if config.USE_MOCK_GPS else "LIVE"
     print(f"GPS poller started in {mode} mode (every {config.GPS_POLL_SECONDS}s).")
@@ -255,6 +282,7 @@ async def gps_poll_loop() -> None:
             else:
                 await _poll_real()
                 await _update_enroute_progress()   # fill the "% to site" bar from real distance
+                await _advance_on_site_arrival()   # within 300m of the job -> auto On site
         except Exception as e:  # never let a hiccup kill the loop
             print("GPS poll error:", e)
         await asyncio.sleep(config.GPS_POLL_SECONDS)
