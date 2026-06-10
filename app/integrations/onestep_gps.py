@@ -15,7 +15,7 @@ import httpx
 from sqlmodel import Session, select
 
 from ..db import engine
-from ..models import Truck, Order
+from ..models import Truck, Order, Load
 from .. import config
 
 
@@ -110,6 +110,16 @@ def _update_stop_state(truck: Truck) -> None:
 # auto-completes. State is in-memory (single uvicorn worker).
 # ──────────────────────────────────────────────────────────────────────────
 _job_loc: dict = {}   # order_id -> {"lat","lng","since"} pinned when it went On site
+_load_job_loc: dict = {}   # load_id -> {"lat","lng","since"} pinned when a pour load went On site
+
+
+def _rollup(s: Session, order_id: int) -> None:
+    """Re-roll a pour's umbrella status/progress after one of its loads advances.
+    Lazy import keeps main <-> onestep_gps free of a circular import at load time."""
+    from ..main import _rollup_pour
+    o = s.get(Order, order_id)
+    if o:
+        _rollup_pour(o, s)
 
 
 def _advance_return(s: Session, truck: Truck) -> None:
@@ -156,6 +166,62 @@ def arrival_pending(truck: Truck) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# PER-LOAD GPS (continuous pours) — a pour's trucks live on its loads, not the
+# order, so the order-level machine above never sees them. These mirror it for
+# each Load: yard-exit -> enroute, 300 m geofence -> on site, dwell -> pouring,
+# leave site -> returning, back at yard -> complete. Every change rolls the pour
+# up (umbrella stays "ongoing"; progress = delivered/ordered).
+# ──────────────────────────────────────────────────────────────────────────
+def _advance_loads_on_yard_exit(s: Session, truck: Truck) -> None:
+    """Promote a truck's 'batched' pour loads to 'enroute' once it leaves the yard."""
+    if truck.lat is None or truck.lng is None or truck.id is None:
+        return
+    if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
+        return
+    loads = s.exec(select(Load).where(Load.truck_id == truck.id, Load.status == "batched")).all()
+    for ld in loads:
+        ld.status = "enroute"
+        ld.progress = max(ld.progress, 0.05)
+        s.add(ld)
+        print(f"Yard exit: {truck.label} left the yard -> load #{ld.seq} en route.")
+        _rollup(s, ld.order_id)
+
+
+def _advance_loads_return(s: Session, truck: Truck) -> None:
+    """On site -> pouring (after dwell) -> returning (left site) -> complete (yard)."""
+    if truck.id is None or truck.lat is None or truck.lng is None:
+        return
+    loads = s.exec(
+        select(Load).where(Load.truck_id == truck.id,
+                           Load.status.in_(["onsite", "pouring", "returning"]))
+    ).all()
+    for ld in loads:
+        if ld.status in ("onsite", "pouring"):
+            st = _load_job_loc.get(ld.id)
+            if st is None:
+                _load_job_loc[ld.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+                continue
+            if _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.RETURN_LEAVE_SITE_M:
+                ld.status = "returning"
+                s.add(ld)
+                print(f"Left job: {truck.label} -> load #{ld.seq} returning to yard.")
+                _rollup(s, ld.order_id)
+            elif ld.status == "onsite" and (datetime.utcnow() - st["since"]).total_seconds() >= config.POUR_DELAY_SECONDS:
+                ld.status = "pouring"
+                s.add(ld)
+                print(f"On site {config.POUR_DELAY_SECONDS // 60}m: {truck.label} -> load #{ld.seq} pouring.")
+                _rollup(s, ld.order_id)
+        elif ld.status == "returning":
+            if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
+                ld.status = "complete"
+                ld.progress = 1.0
+                _load_job_loc.pop(ld.id, None)
+                s.add(ld)
+                print(f"Back at yard: {truck.label} -> load #{ld.seq} complete.")
+                _rollup(s, ld.order_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # LIVE MODE — calls the One Step GPS API. The exact endpoint/response shape
 # may differ slightly from what's below; adjust to match the docs they send.
 # ──────────────────────────────────────────────────────────────────────────
@@ -188,6 +254,8 @@ async def _poll_real() -> None:
                 _update_stop_state(truck)         # track how long it's been parked (arrival detection)
                 _advance_on_yard_exit(s, truck)   # batched -> enroute when it leaves the yard
                 _advance_return(s, truck)         # onsite -> returning -> complete on the way back
+                _advance_loads_on_yard_exit(s, truck)   # same, for a pour's loads
+                _advance_loads_return(s, truck)         # same, for a pour's loads
         s.commit()
 
 
@@ -272,6 +340,35 @@ async def _advance_on_site_arrival() -> None:
             s.commit()
 
 
+async def _advance_loads_on_site_arrival() -> None:
+    """Auto-advance an en-route pour LOAD to On site once its truck enters the job
+    geofence (JOB_GEOFENCE_M around the order's geocoded address)."""
+    with Session(engine) as s:
+        loads = s.exec(select(Load).where(Load.status == "enroute")).all()
+        changed = False
+        for ld in loads:
+            if not ld.truck_id:
+                continue
+            truck = s.get(Truck, ld.truck_id)
+            if not truck or truck.lat is None or truck.lng is None:
+                continue
+            o = s.get(Order, ld.order_id)
+            if not o:
+                continue
+            site = await _geocode(o.site)
+            if not site:
+                continue
+            if _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M:
+                ld.status = "onsite"
+                ld.progress = 1.0
+                s.add(ld)
+                changed = True
+                print(f"Geofence: {truck.label} within {config.JOB_GEOFENCE_M:.0f}m of {o.ref} site -> load #{ld.seq} On site.")
+                _rollup(s, o.id)
+        if changed:
+            s.commit()
+
+
 async def gps_poll_loop() -> None:
     mode = "MOCK" if config.USE_MOCK_GPS else "LIVE"
     print(f"GPS poller started in {mode} mode (every {config.GPS_POLL_SECONDS}s).")
@@ -283,6 +380,7 @@ async def gps_poll_loop() -> None:
                 await _poll_real()
                 await _update_enroute_progress()   # fill the "% to site" bar from real distance
                 await _advance_on_site_arrival()   # within 300m of the job -> auto On site
+                await _advance_loads_on_site_arrival()   # same, for a pour's loads
         except Exception as e:  # never let a hiccup kill the loop
             print("GPS poll error:", e)
         await asyncio.sleep(config.GPS_POLL_SECONDS)
