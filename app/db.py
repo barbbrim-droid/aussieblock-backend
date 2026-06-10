@@ -31,6 +31,7 @@ _COLUMN_MIGRATIONS = {
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
     "order": {
         "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR", "use_for": "VARCHAR", "project": "VARCHAR", "batch_ticket": "VARCHAR", "batch_data": "VARCHAR", "batch_ticket_print": "VARCHAR", "archived": "BOOLEAN DEFAULT 0", "driver": "VARCHAR",
+        "hauler": "VARCHAR", "mileage": "FLOAT",
         "prepay_required": "BOOLEAN DEFAULT 0", "prepay_amount": "FLOAT",
         "prepay_invoice_id": "VARCHAR", "prepaid": "BOOLEAN DEFAULT 0",
     },

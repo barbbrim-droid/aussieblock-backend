@@ -581,6 +581,46 @@ def put_price_sheet(body: PriceSheetIn, _: User = Depends(require_staff)):
     return pricing.save_sheet(body.model_dump())
 
 
+@app.get("/orders/{ref}/pricing")
+def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+        raise HTTPException(404, "Order not found")
+    sheet = pricing.load_sheet()
+    cust = s.get(Customer, o.customer_id).name if o.customer_id else ""
+    cp = pricing.compute_pricing(sheet, o.mix, cust, o.qty, o.qty, order_admixtures=o.admixtures or "")
+    # mileage: use the stored value, else auto-compute once and cache it on the order
+    mi = o.mileage
+    if mi is None:
+        mi = pricing.road_miles(o.site)
+        if mi is not None:
+            o.mileage = mi
+            s.add(o); s.commit()
+    dl = pricing.compute_delivery(sheet, mi, o.qty)
+    dl["hauler"] = o.hauler
+    return {"customer": cp, "delivery": dl}
+
+
+class DeliveryIn(BaseModel):
+    hauler: Optional[str] = None
+    mileage: Optional[float] = None
+
+
+@app.put("/orders/{ref}/delivery")
+def set_delivery(ref: str, body: DeliveryIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Set the hauler and/or mileage on an order (mileage auto-computed if omitted)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    o.hauler = (body.hauler or "").strip() or None
+    o.mileage = body.mileage if body.mileage is not None else pricing.road_miles(o.site)
+    s.add(o); s.commit(); s.refresh(o)
+    dl = pricing.compute_delivery(pricing.load_sheet(), o.mileage, o.qty)
+    dl["hauler"] = o.hauler
+    return dl
+
+
 @app.get("/orders/{ref}/batch-ticket")
 def get_batch_ticket(ref: str, variant: str = Query("view"),
                      user: User = Depends(get_current_user), s: Session = Depends(get_session)):

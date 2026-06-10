@@ -20,6 +20,60 @@ DEFAULT_SHEET = {
     "self_haul_customers": [],   # pickup customers (concrete only, no delivery/load fees)
 }
 
+# Haul rate per yard by road miles from the yard (Aussieblock Delivery Pricing).
+# Mileage rounds UP to the next bracket; the first bracket whose max_mi >= miles wins.
+DEFAULT_BRACKETS = [
+    {"max_mi": 10, "rate": 35.00}, {"max_mi": 24, "rate": 38.50},
+    {"max_mi": 25, "rate": 43.50}, {"max_mi": 30, "rate": 48.50},
+    {"max_mi": 35, "rate": 53.50}, {"max_mi": 40, "rate": 58.50},
+    {"max_mi": 45, "rate": 63.50}, {"max_mi": 50, "rate": 68.50},
+    {"max_mi": 55, "rate": 73.50}, {"max_mi": 60, "rate": 78.50},
+    {"max_mi": 65, "rate": 83.50}, {"max_mi": 70, "rate": 88.50},
+    {"max_mi": 75, "rate": 93.50}, {"max_mi": 80, "rate": 98.50},
+    {"max_mi": 85, "rate": 103.50}, {"max_mi": 90, "rate": 108.50},
+    {"max_mi": 95, "rate": 113.50}, {"max_mi": 100, "rate": 118.50},
+]
+DEFAULT_SHEET["delivery_brackets"] = DEFAULT_BRACKETS
+
+
+def compute_delivery(sheet: dict, mileage, yards) -> dict:
+    """Haul (delivery) cost for a load: the bracket rate for the road miles ×
+    yards. Returns {mileage, rate, total}."""
+    brackets = (sheet or {}).get("delivery_brackets") or DEFAULT_BRACKETS
+    mi, yd = _num(mileage), _num(yards)
+    rate = 0.0
+    if mi > 0:
+        ordered = sorted(brackets, key=lambda b: _num(b.get("max_mi")))
+        rate = _num(ordered[-1].get("rate")) if ordered else 0.0
+        for b in ordered:
+            if mi <= _num(b.get("max_mi")):
+                rate = _num(b.get("rate"))
+                break
+    return {"mileage": mi, "rate": rate, "total": round(rate * yd, 2)}
+
+
+def road_miles(address: str):
+    """Road miles from the Aussieblock yard to a job address (Google Distance
+    Matrix). Returns float miles rounded to 0.1, or None if unavailable."""
+    from . import config
+    if not (config.GEOCODE_API_KEY and address):
+        return None
+    try:
+        import httpx
+        r = httpx.get(
+            "https://maps.googleapis.com/maps/api/distancematrix/json",
+            params={"origins": f"{config.PLANT_LAT},{config.PLANT_LNG}",
+                    "destinations": address, "units": "imperial",
+                    "key": config.GEOCODE_API_KEY},
+            timeout=12,
+        )
+        el = r.json()["rows"][0]["elements"][0]
+        if el.get("status") == "OK":
+            return round(el["distance"]["value"] / 1609.34, 1)
+    except Exception:
+        pass
+    return None
+
 
 def _path() -> str:
     from . import config
@@ -41,6 +95,7 @@ def save_sheet(sheet: dict) -> dict:
     merged["overrides"] = sheet.get("overrides", []) if sheet else []
     merged["admixtures"] = sheet.get("admixtures", []) if sheet else []
     merged["self_haul_customers"] = sheet.get("self_haul_customers", []) if sheet else []
+    merged["delivery_brackets"] = (sheet.get("delivery_brackets") if sheet else None) or DEFAULT_BRACKETS
     with open(_path(), "w", encoding="utf-8") as fh:
         json.dump(merged, fh, indent=2)
     return merged
