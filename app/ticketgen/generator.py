@@ -18,7 +18,7 @@ RED   = (220, 38, 38)
 SHADE = (239, 237, 232)  # light label shading
 GREY  = (107, 114, 128)
 WATER_LB_PER_GAL = 8.345
-MIN_MATERIAL_ROWS = 8   # reserve blank rows so an added admixture has room
+MIN_MATERIAL_ROWS = 9   # reserve blank rows so an added admixture has room
 
 def _res(name):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -53,7 +53,7 @@ def render_ticket(data, out_path):
     pdf.add_font("DejaVu","B",_res("DejaVuSans-Bold.ttf"))
     pdf.add_page()
     W = pdf.w - 20  # usable width ~ 195.9mm
-    RH = 4.35       # data row height
+    RH = 4.6        # data row height (roomier)
     BAR = 5.6       # section header bar height
     GAP = 2.2       # gap before each section
 
@@ -181,9 +181,9 @@ def render_ticket(data, out_path):
             pdf.set_text_color(*col); pdf.set_font("DejaVu", "B" if b else "", 6.9)
             pdf.cell(wd, RH, val, border=1, align=al)
         pdf.ln(RH)
-    # leave a blank row under the last material for an added admixture
+    # always leave a few blank rows under the last material for extra admixtures
     pdf.set_text_color(*INK); pdf.set_font("DejaVu", "", 6.9)
-    for _ in range(max(1, MIN_MATERIAL_ROWS - len(d["materials"]))):
+    for _ in range(max(3, MIN_MATERIAL_ROWS - len(d["materials"]))):
         for wd in cw:
             pdf.cell(wd, RH, "", border=1)
         pdf.ln(RH)
@@ -220,63 +220,34 @@ def render_ticket(data, out_path):
         pdf.set_font("DejaVu", "B", 7.8)
         pdf.cell(half * 0.38, RH, str(v) + "  ", border=1, align="R", ln=2)
     right_end = pdf.get_y()
-    content_end = max(left_end, right_end)
-
-    # ---------- pricing ----------
-    px = d.get("pricing")
-    if px:
-        pdf.set_y(content_end + 1.5)
-        pdf.set_fill_color(*INK); pdf.set_text_color(255, 255, 255)
-        pdf.set_font("DejaVu", "B", 8); pdf.set_x(10)
-        pdf.cell(W, 4.5, "  PRICING", fill=True, ln=1)
-        pdf.set_text_color(*INK)
-        money = lambda v: ("-$%0.2f" % abs(v)) if v < 0 else ("$%0.2f" % v)
-
-        def _prow(label, val, bold=False):
-            pdf.set_font("DejaVu", "B" if bold else "", 7.6)
-            pdf.set_x(10); pdf.cell(W - 38, 3.7, "  " + label, border="LRB")
-            pdf.cell(38, 3.7, val + "  ", border="LRB", align="R", ln=1)
-
-        yd = d.get("yards", 0) or 0
-        _prow("Concrete  (%g yd x %s/yd)" % (yd, money(px["unit_price"])), money(px["extended"]))
-        for a in px.get("admixtures", []):
-            _prow(a.get("label", "Admixture"), money(a.get("amount", 0)))
-        if px.get("short_load"):
-            _prow("Short-load fee (order under min)", money(px["short_load"]))
-        if px.get("backhaul"):
-            _prow("Back-haul fee", money(px["backhaul"]))
-        _prow("Subtotal", money(px["subtotal"]))
-        _prow("Sales tax (%g%%)" % px.get("tax_pct", 0), money(px["tax"]))
-        _prow("Total", money(px["total"]), bold=True)
-        content_end = pdf.get_y()
 
     # ---------- footer: signature + max water ----------
-    pdf.set_y(content_end + 1)
+    pdf.set_y(max(left_end, right_end) + 4)
     fy = pdf.get_y()
     mw_lb, mw_gal = _max_water(d["binder_lb"], d["wc_eq"], d["max_wc"])
-    box_h = 21
+    box_h = 31
     # signature box
     pdf.set_draw_color(201, 205, 211); pdf.set_line_width(0.2)
     pdf.rect(10, fy, half, box_h)
-    pdf.set_xy(12, fy + 3)
+    pdf.set_xy(12, fy + 4)
     pdf.set_font("DejaVu", "B", 8); pdf.set_text_color(*INK)
     pdf.cell(half - 4, 4, "Total water added at construction site:")
-    pdf.line(12, fy + 9, 10 + half - 24, fy + 9)               # fill-in line
-    pdf.set_xy(10 + half - 22, fy + 5.5); pdf.set_font("DejaVu", "", 7.5); pdf.set_text_color(*GREY)
+    pdf.line(12, fy + 12, 10 + half - 24, fy + 12)             # fill-in line
+    pdf.set_xy(10 + half - 22, fy + 8.5); pdf.set_font("DejaVu", "", 7.5); pdf.set_text_color(*GREY)
     pdf.cell(20, 4, "gallons")
-    pdf.set_xy(12, fy + 12); pdf.set_font("DejaVu", "B", 8); pdf.set_text_color(*INK)
+    pdf.set_xy(12, fy + 16); pdf.set_font("DejaVu", "B", 8); pdf.set_text_color(*INK)
     pdf.cell(half - 4, 4, "Customer / Contractor Signature:")
-    pdf.line(12, fy + 18.5, 10 + half - 3, fy + 18.5)          # signature line (room to sign above)
+    pdf.line(12, fy + 26, 10 + half - 3, fy + 26)              # signature line (room to sign above)
     # max water box (red)
     pdf.set_draw_color(*RED); pdf.set_line_width(0.4)
     pdf.rect(10 + half + 4, fy, half, box_h)
-    pdf.set_xy(10 + half + 6, fy + 4)
+    pdf.set_xy(10 + half + 6, fy + 7)
     pdf.set_text_color(*RED); pdf.set_font("DejaVu", "B", 11)
     pdf.cell(half - 4, 5, "Max Water Allowed to Add:")
-    pdf.set_xy(10 + half + 4, fy + 11)
-    pdf.set_font("DejaVu", "B", 17)
+    pdf.set_xy(10 + half + 4, fy + 16)
+    pdf.set_font("DejaVu", "B", 18)
     pdf.cell(half - 3, 8, f"{mw_gal:.1f} gal", align="R")
-    pdf.set_xy(10 + half + 4, fy + 18.5)
+    pdf.set_xy(10 + half + 4, fy + 25)
     pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
     pdf.cell(half - 3, 3, f"({mw_lb:.1f} lb  -  at max w/c {d['max_wc']})", align="R")
 
