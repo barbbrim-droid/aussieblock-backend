@@ -169,22 +169,25 @@ def _create_loads(order: Order, s: Session):
 
 
 def _rollup_pour(o: Order, s: Session):
-    """Roll a pour's status/progress up from its loads: progress = delivered yards /
-    ordered yards; complete once every load is done AND the full order is loaded."""
+    """Roll a pour's progress up from its loads (progress = delivered / ordered).
+
+    Pours are NOT auto-completed: a big pour can take more loads than the ordered
+    estimate, so finishing it is a deliberate staff action (set "complete" on the
+    pour). We only keep progress current and mark it "ongoing" while in flight. A
+    pour staff have already marked complete stays complete through later load edits
+    (e.g. correcting a load's yards)."""
     loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
     if not loads:
         return   # no loads added yet — leave the order as scheduled
+    if o.status == "complete":
+        return   # staff completed it manually — don't reopen on a load edit
     total = pricing._num(o.qty)
-    loaded = sum(pricing._num(ld.qty) for ld in loads)
     delivered = sum(pricing._num(ld.qty) for ld in loads if ld.status == "complete")
-    if all(ld.status == "complete" for ld in loads) and loaded >= total - 0.5:
-        o.status, o.progress = "complete", 1.0
-    else:
-        # A pour with loads in flight is "ongoing" (umbrella status) — each truck
-        # carries its own per-load status, and the pour completes once every load is
-        # done. (Was "batched"/"Loading at yard", which read wrong mid-pour.)
-        o.status = "ongoing"
-        o.progress = round(delivered / total, 3) if total else 0.0
+    # A pour with loads in flight is "ongoing" (umbrella status) — each truck
+    # carries its own per-load status. Progress is capped at 100% even if the
+    # delivered yards run past the ordered estimate.
+    o.status = "ongoing"
+    o.progress = min(1.0, round(delivered / total, 3)) if total else 0.0
     s.add(o); s.commit()
 
 
