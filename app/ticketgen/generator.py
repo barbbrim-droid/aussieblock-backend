@@ -225,17 +225,17 @@ def render_ticket(data, out_path):
     # ---------- pricing ----------
     px = d.get("pricing")
     if px:
-        pdf.set_y(content_end + 3)
+        pdf.set_y(content_end + 1.5)
         pdf.set_fill_color(*INK); pdf.set_text_color(255, 255, 255)
         pdf.set_font("DejaVu", "B", 8); pdf.set_x(10)
-        pdf.cell(W, 5, "  PRICING", fill=True, ln=1)
+        pdf.cell(W, 4.5, "  PRICING", fill=True, ln=1)
         pdf.set_text_color(*INK)
         money = lambda v: ("-$%0.2f" % abs(v)) if v < 0 else ("$%0.2f" % v)
 
         def _prow(label, val, bold=False):
             pdf.set_font("DejaVu", "B" if bold else "", 7.6)
-            pdf.set_x(10); pdf.cell(W - 38, 4.4, "  " + label, border="LRB")
-            pdf.cell(38, 4.4, val + "  ", border="LRB", align="R", ln=1)
+            pdf.set_x(10); pdf.cell(W - 38, 3.7, "  " + label, border="LRB")
+            pdf.cell(38, 3.7, val + "  ", border="LRB", align="R", ln=1)
 
         yd = d.get("yards", 0) or 0
         _prow("Concrete  (%g yd x %s/yd)" % (yd, money(px["unit_price"])), money(px["extended"]))
@@ -251,32 +251,32 @@ def render_ticket(data, out_path):
         content_end = pdf.get_y()
 
     # ---------- footer: signature + max water ----------
-    pdf.set_y(content_end + 4)
+    pdf.set_y(content_end + 2)
     fy = pdf.get_y()
     mw_lb, mw_gal = _max_water(d["binder_lb"], d["wc_eq"], d["max_wc"])
-    box_h = 31
+    box_h = 26
     # signature box
     pdf.set_draw_color(201, 205, 211); pdf.set_line_width(0.2)
     pdf.rect(10, fy, half, box_h)
-    pdf.set_xy(12, fy + 4)
+    pdf.set_xy(12, fy + 3.5)
     pdf.set_font("DejaVu", "B", 8); pdf.set_text_color(*INK)
     pdf.cell(half - 4, 4, "Total water added at construction site:")
-    pdf.line(12, fy + 12, 10 + half - 24, fy + 12)             # fill-in line
-    pdf.set_xy(10 + half - 22, fy + 8.5); pdf.set_font("DejaVu", "", 7.5); pdf.set_text_color(*GREY)
+    pdf.line(12, fy + 10.5, 10 + half - 24, fy + 10.5)         # fill-in line
+    pdf.set_xy(10 + half - 22, fy + 7); pdf.set_font("DejaVu", "", 7.5); pdf.set_text_color(*GREY)
     pdf.cell(20, 4, "gallons")
-    pdf.set_xy(12, fy + 16); pdf.set_font("DejaVu", "B", 8); pdf.set_text_color(*INK)
+    pdf.set_xy(12, fy + 14); pdf.set_font("DejaVu", "B", 8); pdf.set_text_color(*INK)
     pdf.cell(half - 4, 4, "Customer / Contractor Signature:")
-    pdf.line(12, fy + 26, 10 + half - 3, fy + 26)              # signature line (room to sign above)
+    pdf.line(12, fy + 22, 10 + half - 3, fy + 22)              # signature line (room to sign above)
     # max water box (red)
     pdf.set_draw_color(*RED); pdf.set_line_width(0.4)
     pdf.rect(10 + half + 4, fy, half, box_h)
-    pdf.set_xy(10 + half + 6, fy + 7)
+    pdf.set_xy(10 + half + 6, fy + 5)
     pdf.set_text_color(*RED); pdf.set_font("DejaVu", "B", 11)
     pdf.cell(half - 4, 5, "Max Water Allowed to Add:")
-    pdf.set_xy(10 + half + 4, fy + 16)
+    pdf.set_xy(10 + half + 4, fy + 13)
     pdf.set_font("DejaVu", "B", 18)
     pdf.cell(half - 3, 8, f"{mw_gal:.1f} gal", align="R")
-    pdf.set_xy(10 + half + 4, fy + 25)
+    pdf.set_xy(10 + half + 4, fy + 22)
     pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
     pdf.cell(half - 3, 3, f"({mw_lb:.1f} lb  -  at max w/c {d['max_wc']})", align="R")
 
