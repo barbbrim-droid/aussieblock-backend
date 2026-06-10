@@ -180,7 +180,10 @@ def _rollup_pour(o: Order, s: Session):
     if all(ld.status == "complete" for ld in loads) and loaded >= total - 0.5:
         o.status, o.progress = "complete", 1.0
     else:
-        o.status = "batched"
+        # A pour with loads in flight is "ongoing" (umbrella status) — each truck
+        # carries its own per-load status, and the pour completes once every load is
+        # done. (Was "batched"/"Loading at yard", which read wrong mid-pour.)
+        o.status = "ongoing"
         o.progress = round(delivered / total, 3) if total else 0.0
     s.add(o); s.commit()
 
@@ -245,9 +248,12 @@ def _order_json(o: Order, s: Session) -> dict:
 # the dispatch board. The progress snap keeps the map + progress bar coherent
 # with whatever stage was just set (e.g. "onsite" => full bar, not 40%).
 # "requested" = placed by a customer in the app, awaiting staff confirmation.
-ORDER_STATUSES = ["requested", "scheduled", "batched", "enroute", "onsite", "pouring", "returning", "complete"]
+# "ongoing" is the umbrella status for a continuous pour while its loads are in
+# flight (set by _rollup_pour, not a single-truck stage). Single orders never use it.
+ORDER_STATUSES = ["requested", "scheduled", "ongoing", "batched", "enroute", "onsite", "pouring", "returning", "complete"]
 _STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "pouring": 1.0, "returning": 1.0, "complete": 1.0}
 # Stages that mean a truck is carrying the load — you can't enter them unassigned.
+# "ongoing" is NOT here: it's a pour umbrella, trucks live on its loads.
 _STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite", "pouring", "returning"}
 
 
@@ -533,7 +539,7 @@ def remove_load(ref: str, seq: int, _: User = Depends(require_staff),
 
 
 # ── Batch tickets (the plant's PDF, attached by staff once an order is batched) ──
-_BATCHABLE_STATUSES = {"batched", "enroute", "onsite", "pouring", "returning", "complete"}
+_BATCHABLE_STATUSES = {"ongoing", "batched", "enroute", "onsite", "pouring", "returning", "complete"}
 
 
 def _batch_ticket_dir() -> str:
