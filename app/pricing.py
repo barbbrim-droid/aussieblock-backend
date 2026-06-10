@@ -138,6 +138,19 @@ def _adx_present(name: str, order_admixtures: str, materials) -> bool:
     return False
 
 
+def is_self_haul(customer: str, sheet: dict = None) -> bool:
+    sheet = sheet or load_sheet()
+    return _norm(customer) in {_norm(c) for c in sheet.get("self_haul_customers", []) if c}
+
+
+def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):
+    """Self-haul customers buy concrete only — drop any '$200 short load fee' note."""
+    if not notes or not is_self_haul(customer, sheet):
+        return notes
+    cleaned = re.sub(r"\s*[—-]?\s*Short load fee \$200 \(accepted\)\s*", " ", notes, flags=re.I).strip()
+    return cleaned or None
+
+
 def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
                     materials=None, order_admixtures: str = "") -> dict:
     """Compute the ticket pricing block. Quantities are yards; load_qty is this

@@ -272,7 +272,7 @@ def create_order(
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
               truck_id=truck_id, driver=(body.driver or "").strip() or None, progress=0.0,
-              notes=(body.notes or "").strip() or None,
+              notes=pricing.strip_self_haul_fee((body.notes or "").strip() or None, customer.name),
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
               use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
               prepay_required=bool(customer.cod))
@@ -318,7 +318,8 @@ def request_order(
     cust = s.get(Customer, user.customer_id)
     o = Order(ref=_next_order_ref(s), customer_id=user.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
-              truck_id=None, progress=0.0, notes=(body.notes or "").strip() or None,
+              truck_id=None, progress=0.0,
+              notes=pricing.strip_self_haul_fee((body.notes or "").strip() or None, cust.name if cust else ""),
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
               use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
               prepay_required=bool(cust and cust.cod))
@@ -370,7 +371,8 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
     o.admixtures = ", ".join(body.admixtures) or None
     o.use_for = (body.use_for or "").strip() or None
     o.project = (body.project or "").strip() or None
-    o.notes = (body.notes or "").strip() or None
+    _cust = s.get(Customer, o.customer_id)
+    o.notes = pricing.strip_self_haul_fee((body.notes or "").strip() or None, _cust.name if _cust else "")
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -582,6 +584,18 @@ def put_price_sheet(body: PriceSheetIn, _: User = Depends(require_staff)):
     return pricing.save_sheet(body.model_dump())
 
 
+def _order_hauler(o: Order, s: Session):
+    """Staff-set hauler, else auto: a truck labelled 'RTS…' is Ray; otherwise
+    blank for staff to fill in."""
+    if o.hauler:
+        return o.hauler
+    if o.truck_id:
+        t = s.get(Truck, o.truck_id)
+        if t and (t.label or "").strip().upper().startswith("RTS"):
+            return "RAY"
+    return None
+
+
 @app.get("/orders/{ref}/pricing")
 def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
@@ -599,7 +613,7 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
             o.mileage = mi
             s.add(o); s.commit()
     dl = pricing.compute_delivery(sheet, mi, o.qty)
-    dl["hauler"] = o.hauler
+    dl["hauler"] = _order_hauler(o, s)
     return {"customer": cp, "delivery": dl}
 
 
@@ -618,7 +632,7 @@ def set_delivery(ref: str, body: DeliveryIn, _: User = Depends(require_staff), s
     o.mileage = body.mileage if body.mileage is not None else pricing.road_miles(o.site)
     s.add(o); s.commit(); s.refresh(o)
     dl = pricing.compute_delivery(pricing.load_sheet(), o.mileage, o.qty)
-    dl["hauler"] = o.hauler
+    dl["hauler"] = _order_hauler(o, s)
     return dl
 
 
