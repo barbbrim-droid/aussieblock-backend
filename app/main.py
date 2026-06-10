@@ -766,15 +766,27 @@ def put_price_sheet(body: PriceSheetIn, _: User = Depends(require_staff)):
     return pricing.save_sheet(body.model_dump())
 
 
+def _is_rts(label: str | None) -> bool:
+    return bool((label or "").strip().upper().startswith("RTS"))
+
+
 def _order_hauler(o: Order, s: Session):
     """Staff-set hauler, else auto: a truck labelled 'RTS…' is Ray; otherwise
-    blank for staff to fill in."""
+    blank for staff to fill in. For a pour the trucks are on its loads, so check
+    those too — any RTS truck on the order or its loads means Ray hauls it."""
     if o.hauler:
         return o.hauler
     if o.truck_id:
         t = s.get(Truck, o.truck_id)
-        if t and (t.label or "").strip().upper().startswith("RTS"):
+        if t and _is_rts(t.label):
             return "RAY"
+    # Continuous pour: trucks live on the loads, not the order.
+    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+    for ld in loads:
+        if ld.truck_id:
+            t = s.get(Truck, ld.truck_id)
+            if t and _is_rts(t.label):
+                return "RAY"
     return None
 
 
