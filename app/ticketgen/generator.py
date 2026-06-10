@@ -53,7 +53,7 @@ def render_ticket(data, out_path):
     pdf.add_font("DejaVu","B",_res("DejaVuSans-Bold.ttf"))
     pdf.add_page()
     W = pdf.w - 20  # usable width ~ 195.9mm
-    RH = 4.6        # data row height (roomier)
+    RH = 4.35       # data row height
     BAR = 5.6       # section header bar height
     GAP = 2.2       # gap before each section
 
@@ -251,7 +251,7 @@ def render_ticket(data, out_path):
         content_end = pdf.get_y()
 
     # ---------- footer: signature + max water ----------
-    pdf.set_y(content_end + 2)
+    pdf.set_y(content_end + 1)
     fy = pdf.get_y()
     mw_lb, mw_gal = _max_water(d["binder_lb"], d["wc_eq"], d["max_wc"])
     box_h = 26
