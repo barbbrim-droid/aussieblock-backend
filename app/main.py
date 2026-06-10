@@ -188,13 +188,23 @@ def _rollup_pour(o: Order, s: Session):
     s.add(o); s.commit()
 
 
-def _load_json(ld: Load, s: Session) -> dict:
+def _load_ticket_prefix(ref: str, seq: int) -> str:
+    """Files for a pour load's own batch ticket live alongside the order's, but
+    namespaced by load (e.g. AB1042_L2.pdf, AB1042_L2_original.jpg)."""
+    return f"{ref}_L{seq}"
+
+
+def _load_json(ld: Load, s: Session, ref: str) -> dict:
     t = s.get(Truck, ld.truck_id) if ld.truck_id else None
+    prefix = _load_ticket_prefix(ref, ld.seq)
+    has_orig = bool(ld.batch_ticket == f"{prefix}.pdf"
+                    and glob.glob(os.path.join(_batch_ticket_dir(), f"{prefix}_original.*")))
     return {
         "seq": ld.seq, "qty": ld.qty,
         "truck": t.label if t else "—", "driver": ld.driver or "—",
         "status": ld.status, "progress": round(ld.progress, 3),
         "has_batch_ticket": bool(ld.batch_ticket),
+        "has_original": has_orig,
         "truck_position": ({"lat": t.lat, "lng": t.lng, "heading": t.heading}
                            if t and t.lat is not None else None),
     }
@@ -240,7 +250,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "loads_total": len(loads),
         "loads_done": sum(1 for ld in loads if ld.status == "complete"),
         "yards_loaded": round(sum(pricing._num(ld.qty) for ld in loads), 2),
-        "loads": [_load_json(ld, s) for ld in loads],
+        "loads": [_load_json(ld, s, o.ref) for ld in loads],
     }
 
 
@@ -846,6 +856,121 @@ def delete_batch_ticket(ref: str, _: User = Depends(require_staff), s: Session =
         o.batch_ticket = None
         o.batch_ticket_print = None
         s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+# ── Per-load batch tickets ───────────────────────────────────────────────────
+# A continuous pour delivers in ~10-yd loads, each on its own truck — so each
+# load gets its own paper batch ticket. These mirror the order-level endpoints
+# but key files/records to the individual Load (AB1042_L2.pdf, …).
+@app.post("/orders/{ref}/loads/{seq}/batch-ticket")
+async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(...),
+                                   _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Attach a batch ticket to one load of a pour (staff). Same auto-branding
+    (scan/photo → branded Aussieblock ticket via Claude vision) as the order
+    ticket; the original upload is kept too."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+    if not ld:
+        raise HTTPException(404, "Load not found")
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(413, "That file is too large (15 MB max).")
+    name = (file.filename or "").lower()
+    ctype = (file.content_type or "").lower()
+    is_pdf = name.endswith(".pdf") or ctype == "application/pdf" or raw[:5] == b"%PDF-"
+    is_img = ctype.startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".heic", ".webp"))
+    if not (is_pdf or is_img):
+        raise HTTPException(422, "The batch ticket must be a PDF or a photo (JPG/PNG).")
+    bdir = _batch_ticket_dir()
+    prefix = _load_ticket_prefix(ref, seq)
+
+    # Keep the original upload so staff can verify a field against the paper.
+    for old in glob.glob(os.path.join(bdir, f"{prefix}_original.*")):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    ext = ".pdf" if is_pdf else (os.path.splitext(name)[1] or ".jpg")
+    orig_name = f"{prefix}_original{ext}"
+    with open(os.path.join(bdir, orig_name), "wb") as fh:
+        fh.write(raw)
+
+    # Record the original NOW so the upload survives even if branding crashes.
+    ld.batch_ticket = orig_name
+    s.add(ld); s.commit(); s.refresh(ld)
+
+    # Brand it (showing this load's yards); on success swap the branded copy in.
+    if ticket_convert.available():
+        try:
+            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site,
+                                             order_mix=o.mix, order_qty=ld.qty,
+                                             price_sheet=pricing.load_sheet(),
+                                             order_admixtures=o.admixtures or "")
+            if branded:
+                fname = f"{prefix}.pdf"
+                with open(os.path.join(bdir, fname), "wb") as fh:
+                    fh.write(branded)
+                ld.batch_ticket = fname
+                s.add(ld); s.commit(); s.refresh(ld)
+        except Exception as e:
+            print("load batch-ticket branding failed:", e)
+    return _order_json(o, s)
+
+
+@app.get("/orders/{ref}/loads/{seq}/batch-ticket")
+def get_load_batch_ticket(ref: str, seq: int, variant: str = Query("view"),
+                          user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Download a load's batch-ticket PDF (staff, or anyone on that company).
+    variant='original' serves the raw scan/photo that was uploaded."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+        raise HTTPException(404, "Order not found")
+    ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+    if not ld:
+        raise HTTPException(404, "Load not found")
+    prefix = _load_ticket_prefix(ref, seq)
+    if variant == "original":
+        matches = glob.glob(os.path.join(_batch_ticket_dir(), f"{prefix}_original.*"))
+        path = matches[0] if matches else None
+    else:
+        path = os.path.join(_batch_ticket_dir(), ld.batch_ticket) if ld.batch_ticket else None
+    if not path:
+        raise HTTPException(404, "No batch ticket for this load yet.")
+    if not os.path.exists(path):
+        raise HTTPException(404, "The batch ticket file is missing.")
+    return FileResponse(path, media_type=_media_type(path),
+                        filename=f"batch-ticket-{ref}-L{seq}{os.path.splitext(path)[1]}",
+                        headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+@app.delete("/orders/{ref}/loads/{seq}/batch-ticket")
+def delete_load_batch_ticket(ref: str, seq: int, _: User = Depends(require_staff),
+                             s: Session = Depends(get_session)):
+    """Remove one load's batch-ticket PDF (staff)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+    if not ld:
+        raise HTTPException(404, "Load not found")
+    prefix = _load_ticket_prefix(ref, seq)
+    if ld.batch_ticket:
+        try:
+            os.remove(os.path.join(_batch_ticket_dir(), ld.batch_ticket))
+        except OSError:
+            pass
+    for orig in glob.glob(os.path.join(_batch_ticket_dir(), f"{prefix}_original.*")):
+        try:
+            os.remove(orig)
+        except OSError:
+            pass
+    if ld.batch_ticket:
+        ld.batch_ticket = None
+        s.add(ld); s.commit()
     return _order_json(o, s)
 
 
