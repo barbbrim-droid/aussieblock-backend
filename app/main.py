@@ -33,7 +33,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
 )
@@ -143,9 +143,63 @@ app.add_middleware(
 )
 
 
+LOAD_SIZE_YD = 10.0   # one truck-load; orders over this are continuous pours, split into loads
+
+
+def _split_loads(qty: str):
+    """Yards per load for a pour. '80' -> [10]*8; '25' -> [10,10,5]. Returns [] for a
+    single-truck order (<= 10 yd)."""
+    total = pricing._num(qty)
+    if total <= LOAD_SIZE_YD + 1e-9:
+        return []
+    loads, rem = [], total
+    while rem > LOAD_SIZE_YD + 1e-9:
+        loads.append(LOAD_SIZE_YD); rem -= LOAD_SIZE_YD
+    loads.append(round(rem, 2))
+    return loads
+
+
+def _create_loads(order: Order, s: Session):
+    """Create the per-load rows for a continuous pour (no-op for single-load orders)."""
+    sizes = _split_loads(order.qty)
+    for i, q in enumerate(sizes, start=1):
+        s.add(Load(order_id=order.id, seq=i, qty=("%g" % q), status="scheduled"))
+    if sizes:
+        s.commit()
+
+
+def _rollup_pour(o: Order, s: Session):
+    """Roll a pour's overall status/progress up from its loads so it sits in the
+    right board column: complete when every load is, else in-progress, else scheduled."""
+    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+    if not loads:
+        return
+    if all(ld.status == "complete" for ld in loads):
+        o.status, o.progress = "complete", 1.0
+    elif any(ld.status not in ("scheduled", "requested") for ld in loads):
+        o.status = "batched"
+        o.progress = round(sum(ld.progress for ld in loads) / len(loads), 3)
+    else:
+        o.status, o.progress = "scheduled", 0.0
+    s.add(o); s.commit()
+
+
+def _load_json(ld: Load, s: Session) -> dict:
+    t = s.get(Truck, ld.truck_id) if ld.truck_id else None
+    return {
+        "seq": ld.seq, "qty": ld.qty,
+        "truck": t.label if t else "—", "driver": ld.driver or "—",
+        "status": ld.status, "progress": round(ld.progress, 3),
+        "has_batch_ticket": bool(ld.batch_ticket),
+        "truck_position": ({"lat": t.lat, "lng": t.lng, "heading": t.heading}
+                           if t and t.lat is not None else None),
+    }
+
+
 def _order_json(o: Order, s: Session) -> dict:
     truck = s.get(Truck, o.truck_id) if o.truck_id else None
     customer = s.get(Customer, o.customer_id) if o.customer_id else None
+    loads = s.exec(select(Load).where(Load.order_id == o.id).order_by(Load.seq)).all()
     return {
         "ref": o.ref,
         "customer": customer.name if customer else None,
@@ -177,6 +231,11 @@ def _order_json(o: Order, s: Session) -> dict:
         ),
         # True when an en-route truck looks parked at the job — dispatch confirms On site.
         "arrival_pending": (o.status == "enroute" and arrival_pending(truck)),
+        # Continuous pour (>10 yd) — the loads tucked inside this one card.
+        "is_pour": bool(loads),
+        "loads_total": len(loads),
+        "loads_done": sum(1 for ld in loads if ld.status == "complete"),
+        "loads": [_load_json(ld, s) for ld in loads],
     }
 
 
@@ -277,6 +336,7 @@ def create_order(
               use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
               prepay_required=bool(customer.cod))
     s.add(o); s.commit(); s.refresh(o)
+    _create_loads(o, s)   # split a >10 yd pour into per-truck loads
     return _order_json(o, s)
 
 
@@ -324,6 +384,7 @@ def request_order(
               use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
               prepay_required=bool(cust and cust.cod))
     s.add(o); s.commit(); s.refresh(o)
+    _create_loads(o, s)   # split a >10 yd pour into per-truck loads
     data = _order_json(o, s)
     # Alert staff (text/email) in the background — never blocks or fails the order.
     from .integrations.notify import notify_new_order
@@ -346,6 +407,8 @@ def cancel_order(ref: str, user: User = Depends(get_current_user), s: Session = 
         raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
     for r in s.exec(select(PlusLoadRequest).where(PlusLoadRequest.order_id == o.id)).all():
         s.delete(r)
+    for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+        s.delete(ld)
     s.delete(o)
     s.commit()
     return {"ok": True, "cancelled": True, "ref": ref}
@@ -374,6 +437,49 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
     _cust = s.get(Customer, o.customer_id)
     o.notes = pricing.strip_self_haul_fee((body.notes or "").strip() or None, _cust.name if _cust else "")
     s.add(o); s.commit(); s.refresh(o)
+    # if this became a pour (>10 yd) and has no loads yet, split it now
+    if not s.exec(select(Load).where(Load.order_id == o.id)).first():
+        _create_loads(o, s)
+    return _order_json(o, s)
+
+
+class LoadIn(BaseModel):
+    truck: Optional[str] = None
+    driver: Optional[str] = None
+    status: Optional[str] = None
+
+
+@app.patch("/orders/{ref}/loads/{seq}")
+def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staff),
+                s: Session = Depends(get_session)):
+    """Assign a truck/driver or advance the status of one load within a pour."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+    if not ld:
+        raise HTTPException(404, "Load not found")
+    if body.truck is not None:
+        label = body.truck.strip()
+        if label and label not in ("—", "-"):
+            t = s.exec(select(Truck).where(Truck.label == label)).first()
+            if not t:
+                raise HTTPException(404, f"No truck labelled '{label}'")
+            ld.truck_id = t.id
+        else:
+            ld.truck_id = None
+    if body.driver is not None:
+        ld.driver = body.driver.strip() or None
+    if body.status is not None:
+        st = body.status.strip()
+        if st not in ORDER_STATUSES:
+            raise HTTPException(422, "Unknown status")
+        if st in _STATUSES_NEEDING_TRUCK and not ld.truck_id:
+            raise HTTPException(409, "Assign a truck to this load first")
+        ld.status = st
+        ld.progress = _STATUS_PROGRESS.get(st, ld.progress)
+    s.add(ld); s.commit()
+    _rollup_pour(o, s)
     return _order_json(o, s)
 
 

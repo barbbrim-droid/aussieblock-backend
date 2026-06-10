@@ -107,6 +107,21 @@ class PlusLoadRequest(SQLModel, table=True):
     handled: bool = False
 
 
+class Load(SQLModel, table=True):
+    """One truck-load of a continuous pour (orders over 10 yd³ are split into ~10-yd
+    loads). Each load tracks its own truck, driver, status and batch ticket so a big
+    pour is one card on the board with the loads tucked inside."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    order_id: int = Field(foreign_key="order.id")
+    seq: int                                     # load number within the pour (1,2,3…)
+    qty: str                                     # yards on this load, e.g. "10" or "5"
+    truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")
+    driver: Optional[str] = None
+    status: str = "scheduled"                    # same stages as an order
+    progress: float = 0.0
+    batch_ticket: Optional[str] = None           # this load's branded ticket filename
+
+
 class Doc(SQLModel, table=True):
     """A Knowledge Center document — a shared-library PDF the office uploads.
     Every logged-in user (workers, admins, customers) can list and view them."""
