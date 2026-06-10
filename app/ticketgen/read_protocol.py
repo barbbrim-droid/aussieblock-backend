@@ -193,7 +193,7 @@ def _to_generator_data(p, cfg):
     req_slump = f"{req} in" if req else (pr.get("slump", "") or "")
     concrete_slump = f"{req} in (+/- 1.5 in)" if req else (pr.get("slump", "") or "-")
     qty = o.get("qty", "") or ""
-    yards = _num(qty) or 0
+    yards = _num(qty) or _num((cfg.get("_pricing") or {}).get("order_qty")) or 0
     data = {
         "report_date": prod_date or _uk_to_us_date(p.get("report_date", "")) or "",
         "sales_tax_pct": cfg.get("sales_tax_pct", 8.25),
@@ -238,6 +238,17 @@ def _to_generator_data(p, cfg):
         "yards": yards,
         "req_slump": req_slump,
     }
+    # Pricing block, from the price sheet + order context (set by convert()).
+    px = cfg.get("_pricing") or {}
+    if px.get("sheet"):
+        try:
+            from ..pricing import compute_pricing
+            data["pricing"] = compute_pricing(
+                px.get("sheet"), px.get("mix") or o.get("recipe", ""),
+                px.get("customer") or o.get("customer", ""),
+                px.get("order_qty"), qty)
+        except Exception as e:
+            print("pricing compute failed:", e)
     return data
 
 

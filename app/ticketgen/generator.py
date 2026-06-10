@@ -220,9 +220,36 @@ def render_ticket(data, out_path):
         pdf.set_font("DejaVu", "B", 7.8)
         pdf.cell(half * 0.38, RH, str(v) + "  ", border=1, align="R", ln=2)
     right_end = pdf.get_y()
+    content_end = max(left_end, right_end)
+
+    # ---------- pricing ----------
+    px = d.get("pricing")
+    if px:
+        pdf.set_y(content_end + 3)
+        pdf.set_fill_color(*INK); pdf.set_text_color(255, 255, 255)
+        pdf.set_font("DejaVu", "B", 8); pdf.set_x(10)
+        pdf.cell(W, 5, "  PRICING", fill=True, ln=1)
+        pdf.set_text_color(*INK)
+        money = lambda v: ("-$%0.2f" % abs(v)) if v < 0 else ("$%0.2f" % v)
+
+        def _prow(label, val, bold=False):
+            pdf.set_font("DejaVu", "B" if bold else "", 7.6)
+            pdf.set_x(10); pdf.cell(W - 38, 4.4, "  " + label, border="LRB")
+            pdf.cell(38, 4.4, val + "  ", border="LRB", align="R", ln=1)
+
+        yd = d.get("yards", 0) or 0
+        _prow("Concrete  (%g yd x %s/yd)" % (yd, money(px["unit_price"])), money(px["extended"]))
+        if px.get("short_load"):
+            _prow("Short-load fee (order under min)", money(px["short_load"]))
+        if px.get("backhaul"):
+            _prow("Back-haul fee", money(px["backhaul"]))
+        _prow("Subtotal", money(px["subtotal"]))
+        _prow("Sales tax (%g%%)" % px.get("tax_pct", 0), money(px["tax"]))
+        _prow("Total", money(px["total"]), bold=True)
+        content_end = pdf.get_y()
 
     # ---------- footer: signature + max water ----------
-    pdf.set_y(max(left_end, right_end) + 4)
+    pdf.set_y(content_end + 4)
     fy = pdf.get_y()
     mw_lb, mw_gal = _max_water(d["binder_lb"], d["wc_eq"], d["max_wc"])
     box_h = 31

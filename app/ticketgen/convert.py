@@ -74,7 +74,7 @@ def _to_image_file(data: bytes, filename: str) -> str:
         except Exception:
             done = False
         if not done:
-            pix = page.get_pixmap(dpi=120)   # vector/non-image PDF — low-DPI render
+            pix = page.get_pixmap(dpi=170)   # vector/text PDF (small) — readable render
             pix.save(tmp.name)
             pix = None
         doc.close()
@@ -85,10 +85,14 @@ def _to_image_file(data: bytes, filename: str) -> str:
     return tmp.name
 
 
-def convert(data: bytes, filename: str, customer_name: str = None, site: str = None) -> bytes:
+def convert(data: bytes, filename: str, customer_name: str = None, site: str = None,
+            order_mix: str = None, order_qty=None, price_sheet: dict = None) -> bytes:
     """Read the uploaded ticket and render the branded PDF. Returns PDF bytes.
     Raises on any failure (the caller falls back to the original)."""
     cfg = _cfg()
+    # context the reader uses to compute the ticket's pricing block
+    cfg["_pricing"] = {"sheet": price_sheet, "mix": order_mix,
+                       "customer": customer_name, "order_qty": order_qty}
     img = _to_image_file(data, filename)
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     out.close()

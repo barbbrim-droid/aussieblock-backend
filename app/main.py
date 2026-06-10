@@ -117,6 +117,7 @@ from .integrations.quickbooks import (
 )
 from .integrations.sms import send_sms
 from .ticketgen import convert as ticket_convert
+from . import pricing
 from . import config
 
 
@@ -541,7 +542,9 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
     if ticket_convert.available():
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site)
+            branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site,
+                                             order_mix=o.mix, order_qty=o.qty,
+                                             price_sheet=pricing.load_sheet())
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
@@ -551,6 +554,28 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
         except Exception as e:
             print("batch-ticket branding failed:", e)
     return _order_json(o, s)
+
+
+class PriceSheetIn(BaseModel):
+    tax_pct: float = 6.75
+    short_load_fee: float = 200.0
+    short_load_under_yd: float = 5.0
+    backhaul_per_yd: float = 50.0
+    backhaul_under_yd: float = 3.0
+    mixes: list = []        # [{"mix","price","haul"}]
+    overrides: list = []    # [{"customer","mix","price"}]
+
+
+@app.get("/price-sheet")
+def get_price_sheet(_: User = Depends(require_staff)):
+    """The pricing sheet that fills the ticket's pricing block (staff)."""
+    return pricing.load_sheet()
+
+
+@app.put("/price-sheet")
+def put_price_sheet(body: PriceSheetIn, _: User = Depends(require_staff)):
+    """Save the pricing sheet (staff)."""
+    return pricing.save_sheet(body.model_dump())
 
 
 @app.get("/orders/{ref}/batch-ticket")
