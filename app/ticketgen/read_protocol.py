@@ -246,7 +246,8 @@ def _to_generator_data(p, cfg):
             data["pricing"] = compute_pricing(
                 px.get("sheet"), px.get("mix") or o.get("recipe", ""),
                 px.get("customer") or o.get("customer", ""),
-                px.get("order_qty"), qty)
+                px.get("order_qty"), qty,
+                materials=mats, order_admixtures=px.get("order_admixtures", ""))
         except Exception as e:
             print("pricing compute failed:", e)
     return data

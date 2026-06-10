@@ -239,6 +239,8 @@ def render_ticket(data, out_path):
 
         yd = d.get("yards", 0) or 0
         _prow("Concrete  (%g yd x %s/yd)" % (yd, money(px["unit_price"])), money(px["extended"]))
+        for a in px.get("admixtures", []):
+            _prow(a.get("label", "Admixture"), money(a.get("amount", 0)))
         if px.get("short_load"):
             _prow("Short-load fee (order under min)", money(px["short_load"]))
         if px.get("backhaul"):

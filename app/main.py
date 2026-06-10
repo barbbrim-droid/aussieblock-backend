@@ -544,7 +544,8 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
             branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site,
                                              order_mix=o.mix, order_qty=o.qty,
-                                             price_sheet=pricing.load_sheet())
+                                             price_sheet=pricing.load_sheet(),
+                                             order_admixtures=o.admixtures or "")
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
@@ -564,6 +565,7 @@ class PriceSheetIn(BaseModel):
     backhaul_under_yd: float = 3.0
     mixes: list = []        # [{"mix","price","haul"}]
     overrides: list = []    # [{"customer","mix","price"}]
+    admixtures: list = []   # [{"name","rate","per":"lb"|"yard"}]
 
 
 @app.get("/price-sheet")
