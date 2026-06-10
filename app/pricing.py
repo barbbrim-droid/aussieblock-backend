@@ -152,9 +152,10 @@ def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):
 
 
 def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
-                    materials=None, order_admixtures: str = "") -> dict:
+                    materials=None, order_admixtures: str = "", unit_override=None) -> dict:
     """Compute the ticket pricing block. Quantities are yards; load_qty is this
-    load (the ticket), order_qty is the whole order (for the short-load rule)."""
+    load (the ticket), order_qty is the whole order (for the short-load rule).
+    unit_override, when set, forces the $/yd unit price (a staff per-order price)."""
     sheet = sheet or {}
     lq = _num(load_qty) or _num(order_qty)   # fall back to order qty if the load read is blank
     oq = _num(order_qty) or lq
@@ -170,6 +171,9 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
         if _norm(ov.get("customer")) == cust_n and cust_n and (not ov.get("mix") or _mix_matches(ov.get("mix"), mix)):
             unit = _num(ov.get("price"))
             break
+    # staff per-order price override wins over the sheet/customer price
+    if unit_override is not None and _num(unit_override) > 0:
+        unit = _num(unit_override)
 
     extended = round(lq * unit, 2)
 

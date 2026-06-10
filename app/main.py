@@ -242,14 +242,17 @@ def _order_json(o: Order, s: Session) -> dict:
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
+        "price_override": o.price_override,
         "truck_position": (
             {"lat": truck.lat, "lng": truck.lng, "heading": truck.heading}
             if truck and truck.lat is not None else None
         ),
         # True when an en-route truck looks parked at the job — dispatch confirms On site.
         "arrival_pending": (o.status == "enroute" and arrival_pending(truck)),
-        # Continuous pour (>10 yd) — loads are added as each truck is batched.
-        "is_pour": pricing._num(o.qty) > LOAD_SIZE_YD,
+        # A pour = either a big order (>10 yd) or any order that's started loading
+        # (has at least one load). Adding the first load turns any order into a
+        # load-tracked pour (per-load GPS, tickets, etc.).
+        "is_pour": pricing._num(o.qty) > LOAD_SIZE_YD or len(loads) > 0,
         "loads_total": len(loads),
         "loads_done": sum(1 for ld in loads if ld.status == "complete"),
         "yards_loaded": round(sum(pricing._num(ld.qty) for ld in loads), 2),
@@ -803,7 +806,8 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
     loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
     loaded = round(sum(pricing._num(ld.qty) for ld in loads), 2)
     billable = ("%g" % loaded) if (loads and loaded > 0) else o.qty
-    cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable, order_admixtures=o.admixtures or "")
+    cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable,
+                                 order_admixtures=o.admixtures or "", unit_override=o.price_override)
     # mileage: use the stored value, else auto-compute once and cache it on the order
     mi = o.mileage
     if mi is None:
@@ -813,7 +817,27 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
             s.add(o); s.commit()
     dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
-    return {"customer": cp, "delivery": dl, "billed_qty": billable, "ordered_qty": o.qty}
+    return {"customer": cp, "delivery": dl, "billed_qty": billable,
+            "ordered_qty": o.qty, "price_override": o.price_override}
+
+
+class PriceOverrideIn(BaseModel):
+    price_override: Optional[float] = None   # $/yd; null clears it back to the sheet price
+
+
+@app.put("/orders/{ref}/price")
+def set_order_price(ref: str, body: PriceOverrideIn, _: User = Depends(require_staff),
+                    s: Session = Depends(get_session)):
+    """Set (or clear) a custom $/yd unit price on an order — allowed at any stage,
+    including completed orders, so staff can correct billing after the fact."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if body.price_override is not None and body.price_override < 0:
+        raise HTTPException(422, "Price must be zero or more")
+    o.price_override = body.price_override
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
 
 
 class DeliveryIn(BaseModel):
