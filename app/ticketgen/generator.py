@@ -247,7 +247,10 @@ def render_ticket(data, out_path):
                 if idx < len(mpl):
                     m = mpl[idx]
                     parts = [m.get("source", ""), m.get("dms", "")]
-                    parts.append(f"#{m['mpl']}" if m.get("mpl") else "pending")
+                    if m.get("mpl"):
+                        parts.append(f"#{m['mpl']}")
+                    elif not m.get("dms"):
+                        parts.append("pending")
                     detail = "  ·  ".join(p for p in parts if p) + " "
                     pdf.set_font("DejaVu", "B", 6.6)
                     pdf.cell(colw * 0.42, RH, "  " + m.get("material", ""), border="LTB")
