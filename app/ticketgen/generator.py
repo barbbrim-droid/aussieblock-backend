@@ -18,7 +18,7 @@ RED   = (220, 38, 38)
 SHADE = (239, 237, 232)  # light label shading
 GREY  = (107, 114, 128)
 WATER_LB_PER_GAL = 8.345
-MIN_MATERIAL_ROWS = 9   # reserve blank rows so an added admixture has room
+MIN_MATERIAL_ROWS = 8   # reserve blank rows so an added admixture has room
 
 def _res(name):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -138,8 +138,8 @@ def render_ticket(data, out_path):
         pdf.cell(W * 0.30, RH, n, border=1, align="C")
         pdf.cell(W * 0.45, RH, ts, border=1, align="C")
         pdf.cell(W * 0.25, RH, q, border=1, align="C", ln=1)
-    # always leave room for up to 8 batches (blank rows if fewer were run)
-    for _ in range(max(0, 8 - len(d["batches"]))):
+    # leave a little room for extra batches (blank rows if fewer were run)
+    for _ in range(max(0, 3 - len(d["batches"]))):
         pdf.cell(W * 0.30, RH, "", border=1)
         pdf.cell(W * 0.45, RH, "", border=1)
         pdf.cell(W * 0.25, RH, "", border=1, ln=1)
@@ -187,7 +187,7 @@ def render_ticket(data, out_path):
         pdf.ln(RH)
     # always leave a few blank rows under the last material for extra admixtures
     pdf.set_text_color(*INK); pdf.set_font("DejaVu", "", 6.9)
-    for _ in range(max(3, MIN_MATERIAL_ROWS - len(d["materials"]))):
+    for _ in range(max(1, MIN_MATERIAL_ROWS - len(d["materials"]))):
         for wd in cw:
             pdf.cell(wd, RH, "", border=1)
         pdf.ln(RH)
@@ -246,12 +246,13 @@ def render_ticket(data, out_path):
                 idx = r * 2 + j
                 if idx < len(mpl):
                     m = mpl[idx]
-                    code = f"MPL {m['mpl']}" if m.get("mpl") else "MPL —"
-                    src = m.get("source", "")
-                    pdf.set_font("DejaVu", "B", 6.8)
-                    pdf.cell(colw * 0.46, RH, "  " + m.get("material", ""), border="LTB")
-                    pdf.set_font("DejaVu", "", 6.8)
-                    pdf.cell(colw * 0.54, RH, f"{src}  ·  {code} ", border="RTB", align="R")
+                    parts = [m.get("source", ""), m.get("dms", "")]
+                    parts.append(f"#{m['mpl']}" if m.get("mpl") else "pending")
+                    detail = "  ·  ".join(p for p in parts if p) + " "
+                    pdf.set_font("DejaVu", "B", 6.6)
+                    pdf.cell(colw * 0.42, RH, "  " + m.get("material", ""), border="LTB")
+                    pdf.set_font("DejaVu", "", 6.4)
+                    pdf.cell(colw * 0.58, RH, detail, border="RTB", align="R")
                 else:
                     pdf.cell(colw, RH, "", border=0)
             pdf.ln(RH)
@@ -259,7 +260,7 @@ def render_ticket(data, out_path):
         left_end = pdf.get_y()
 
     # ---------- footer: signature + max water ----------
-    pdf.set_y(max(left_end, right_end) + 4)
+    pdf.set_y(max(left_end, right_end) + 2)
     fy = pdf.get_y()
     mw_lb, mw_gal = _max_water(d["binder_lb"], d["wc_eq"], d["max_wc"])
     box_h = 31
