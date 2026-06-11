@@ -236,9 +236,14 @@ def render_ticket(data, out_path):
     # ---------- approved materials (TxDOT MPL) ----------
     # Fixed per-material producer + Material Producer List code, configured in
     # ticket_config.json. Sits below the totals as a certification block; a blank
-    # code prints "MPL —" so a not-yet-listed producer is obvious.
+    # code prints "pending" so a not-yet-listed producer is obvious.
+    # TxDOT ONLY — the MPL certification block is a TxDOT requirement, so it's
+    # shown only when the recipe is a TxDOT class (e.g. "Class A … TxDOT");
+    # commercial/PSI mixes get a clean ticket without it.
+    rcp = (d.get("order", {}).get("recipe", "") or "").lower()
+    is_txdot = "txdot" in rcp or "class " in rcp
     mpl = d.get("mpl") or []
-    if mpl:
+    if mpl and is_txdot:
         pdf.set_y(max(left_end, right_end) + GAP)
         my = pdf.get_y()
         pdf.set_fill_color(*INK); pdf.rect(10, my, W, BAR, style="F")
