@@ -170,10 +170,14 @@ def render_ticket(data, out_path):
         diff = av - sv
         p = _pct(sv, av)
         ok = abs(p) <= lim
+        # The value columns follow the material's OWN unit, not a fixed "lb":
+        # solids (cement/aggregate/water) and Mac Matrix Fiber read in lb, while
+        # liquid admixtures read in oz / fl oz exactly as the protocol reports them.
+        u = (unit or "lb").strip() or "lb"
         cells = [
             (" " + name, "L", INK), (unit, "C", INK), (f"{dens:g}" if dens else "", "C", INK),
-            (f"{recipe:g} lb", "C", INK), (f"{sv:,.2f} lb", "C", INK),
-            (f"{av:,.2f} lb", "C", INK), (f"{diff:+,.2f} lb", "C", INK),
+            (f"{recipe:g} {u}", "C", INK), (f"{sv:,.2f} {u}", "C", INK),
+            (f"{av:,.2f} {u}", "C", INK), (f"{diff:+,.2f} {u}", "C", INK),
             (f"{p:+.2f}%", "C", GREEN if ok else RED), (lab, "C", INK),
         ]
         bold = [False, False, False, False, False, True, False, True, False]
