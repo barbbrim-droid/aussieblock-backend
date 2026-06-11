@@ -171,7 +171,7 @@ def render_ticket(data, out_path):
         p = _pct(sv, av)
         ok = abs(p) <= lim
         cells = [
-            (" " + name, "L", INK), (unit, "C", INK), (f"{dens:g}", "C", INK),
+            (" " + name, "L", INK), (unit, "C", INK), (f"{dens:g}" if dens else "", "C", INK),
             (f"{recipe:g} lb", "C", INK), (f"{sv:,.2f} lb", "C", INK),
             (f"{av:,.2f} lb", "C", INK), (f"{diff:+,.2f} lb", "C", INK),
             (f"{p:+.2f}%", "C", GREEN if ok else RED), (lab, "C", INK),
