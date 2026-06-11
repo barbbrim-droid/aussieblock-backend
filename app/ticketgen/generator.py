@@ -225,6 +225,39 @@ def render_ticket(data, out_path):
         pdf.cell(half * 0.38, RH, str(v) + "  ", border=1, align="R", ln=2)
     right_end = pdf.get_y()
 
+    # ---------- approved materials (TxDOT MPL) ----------
+    # Fixed per-material producer + Material Producer List code, configured in
+    # ticket_config.json. Sits below the totals as a certification block; a blank
+    # code prints "MPL —" so a not-yet-listed producer is obvious.
+    mpl = d.get("mpl") or []
+    if mpl:
+        pdf.set_y(max(left_end, right_end) + GAP)
+        my = pdf.get_y()
+        pdf.set_fill_color(*INK); pdf.rect(10, my, W, BAR, style="F")
+        pdf.set_xy(10, my + (BAR - 3) / 2); pdf.set_text_color(255, 255, 255)
+        pdf.set_font("DejaVu", "B", 7.2)
+        pdf.cell(W, 3, "  Approved Materials — TxDOT Material Producer List (MPL)", align="L")
+        pdf.set_y(my + BAR)
+        pdf.set_draw_color(201, 205, 211); pdf.set_text_color(*INK)
+        colw = W / 2
+        rows = (len(mpl) + 1) // 2
+        for r in range(rows):
+            for j in range(2):
+                idx = r * 2 + j
+                if idx < len(mpl):
+                    m = mpl[idx]
+                    code = f"MPL {m['mpl']}" if m.get("mpl") else "MPL —"
+                    src = m.get("source", "")
+                    pdf.set_font("DejaVu", "B", 6.8)
+                    pdf.cell(colw * 0.46, RH, "  " + m.get("material", ""), border="LTB")
+                    pdf.set_font("DejaVu", "", 6.8)
+                    pdf.cell(colw * 0.54, RH, f"{src}  ·  {code} ", border="RTB", align="R")
+                else:
+                    pdf.cell(colw, RH, "", border=0)
+            pdf.ln(RH)
+        right_end = pdf.get_y()
+        left_end = pdf.get_y()
+
     # ---------- footer: signature + max water ----------
     pdf.set_y(max(left_end, right_end) + 4)
     fy = pdf.get_y()

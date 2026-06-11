@@ -229,6 +229,7 @@ def _to_generator_data(p, cfg):
         },
         "batches": batches,
         "materials": mats,
+        "mpl": cfg.get("material_mpl", []),
         "totals": {
             "Water": (_num(t.get("water_sum")), _num(t.get("water_per"))),
             "Binder": (binder_lb, _num(t.get("binder_per"))),

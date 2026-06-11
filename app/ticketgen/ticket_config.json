@@ -47,5 +47,15 @@
     "water": 1,
     "admixture": 3
   },
+  "material_mpl": [
+    {"material": "Cement Type I/II", "source": "CIMSA Houston", "mpl": "99777"},
+    {"material": "Slag Cement (50%)", "source": "Sathi USA", "mpl": "98419"},
+    {"material": "Coarse Aggregate (Gr. 4)", "source": "Black Diamond Endeavors", "mpl": ""},
+    {"material": "Fine Aggregate (Sand)", "source": "Black Diamond Endeavors", "mpl": ""},
+    {"material": "Air Entrainer (AE 90)", "source": "Master Builders — MasterAir AE 90", "mpl": ""},
+    {"material": "Water Reducer (Type A)", "source": "Master Builders — MasterX-Seed 66", "mpl": ""},
+    {"material": "Set Retarder (Type B)", "source": "Master Builders — MasterSet Delvo", "mpl": ""},
+    {"material": "Mac Matrix Fiber", "source": "Master Builders — MacMatrix 360", "mpl": ""}
+  ],
   "photo_rotate": 0
 }
