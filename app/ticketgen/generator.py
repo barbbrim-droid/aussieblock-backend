@@ -127,22 +127,30 @@ def render_ticket(data, out_path):
         kv_row(k, v)
 
     # ---------- BATCHES ----------
+    # Two columns side by side → always room for up to 8 batches in 4 rows
+    # (keeps the page on one sheet alongside the materials + MPL block). Batches
+    # fill the left column top-to-bottom (1-4), then the right column (5-8).
     section("BATCHES")
     pdf.set_draw_color(201, 205, 211); pdf.set_line_width(0.2)
-    pdf.set_fill_color(*INK); pdf.set_text_color(255, 255, 255); pdf.set_font("DejaVu", "B", 8)
-    pdf.cell(W * 0.30, RH, "Batch protocol no.", border=1, align="C", fill=True)
-    pdf.cell(W * 0.45, RH, "Prod. time", border=1, align="C", fill=True)
-    pdf.cell(W * 0.25, RH, "Batch quantity", border=1, align="C", fill=True, ln=1)
-    pdf.set_text_color(*INK); pdf.set_font("DejaVu", "", 8)
-    for n, ts, q in d["batches"]:
-        pdf.cell(W * 0.30, RH, n, border=1, align="C")
-        pdf.cell(W * 0.45, RH, ts, border=1, align="C")
-        pdf.cell(W * 0.25, RH, q, border=1, align="C", ln=1)
-    # leave a little room for extra batches (blank rows if fewer were run)
-    for _ in range(max(0, 3 - len(d["batches"]))):
-        pdf.cell(W * 0.30, RH, "", border=1)
-        pdf.cell(W * 0.45, RH, "", border=1)
-        pdf.cell(W * 0.25, RH, "", border=1, ln=1)
+    bhalf = W / 2
+    cwb = [bhalf * 0.28, bhalf * 0.44, bhalf * 0.28]
+    pdf.set_fill_color(*INK); pdf.set_text_color(255, 255, 255); pdf.set_font("DejaVu", "B", 7.0)
+    for _ in range(2):
+        pdf.cell(cwb[0], RH, "Batch no.", border=1, align="C", fill=True)
+        pdf.cell(cwb[1], RH, "Prod. time", border=1, align="C", fill=True)
+        pdf.cell(cwb[2], RH, "Batch qty", border=1, align="C", fill=True)
+    pdf.ln(RH)
+    pdf.set_text_color(*INK); pdf.set_font("DejaVu", "", 7.6)
+    SLOTS, BROWS = 8, 4
+    bl = list(d["batches"])[:SLOTS]
+    for r in range(BROWS):
+        for col in range(2):
+            idx = col * BROWS + r          # column-major: 1-4 left, 5-8 right
+            n, ts, q = bl[idx] if idx < len(bl) else ("", "", "")
+            pdf.cell(cwb[0], RH, n, border=1, align="C")
+            pdf.cell(cwb[1], RH, ts, border=1, align="C")
+            pdf.cell(cwb[2], RH, q, border=1, align="C")
+        pdf.ln(RH)
 
     # ---------- BATCH INFORMATION ----------
     section("BATCH INFORMATION")
@@ -187,7 +195,7 @@ def render_ticket(data, out_path):
         pdf.ln(RH)
     # always leave a few blank rows under the last material for extra admixtures
     pdf.set_text_color(*INK); pdf.set_font("DejaVu", "", 6.9)
-    for _ in range(max(1, MIN_MATERIAL_ROWS - len(d["materials"]))):
+    for _ in range(max(0, MIN_MATERIAL_ROWS - len(d["materials"]))):
         for wd in cw:
             pdf.cell(wd, RH, "", border=1)
         pdf.ln(RH)
@@ -266,7 +274,7 @@ def render_ticket(data, out_path):
     pdf.set_y(max(left_end, right_end) + 2)
     fy = pdf.get_y()
     mw_lb, mw_gal = _max_water(d["binder_lb"], d["wc_eq"], d["max_wc"])
-    box_h = 31
+    box_h = 28
     # signature box
     pdf.set_draw_color(201, 205, 211); pdf.set_line_width(0.2)
     pdf.rect(10, fy, half, box_h)
