@@ -206,7 +206,8 @@ def _to_generator_data(p, cfg):
         dose = float(dm.group(1)) if dm else 3.0
         lim, lab = _astm("Mac Matrix Fiber", "lb", cfg)
         total = dose * yards
-        mats.append(("Mac Matrix Fiber", "lb", 0.0, dose, total, total, lim, lab))
+        # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (MAC 360 FF macrofiber)
+        mats.append(("Mac Matrix Fiber", "lb", 56.8, dose, total, total, lim, lab))
     data = {
         "report_date": prod_date or _uk_to_us_date(p.get("report_date", "")) or "",
         "sales_tax_pct": cfg.get("sales_tax_pct", 8.25),
