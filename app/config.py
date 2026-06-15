@@ -28,6 +28,24 @@ GEOCODE_API_KEY = os.getenv("GEOCODE_API_KEY", "").strip()
 # When there's no API key, run in mock mode so the app still works end-to-end.
 USE_MOCK_GPS = not bool(ONESTEP_API_KEY)
 
+# ── FluidSecure (Graco) fuel tracking ──
+# Pulls fuel/fluid dispense transactions from FluidSecure's Export Transactions
+# API and attaches each fill to the matching truck (by its FluidSecure vehicle
+# number, Truck.fluidsecure_vehicle_id). The token is a bearer token you request
+# from FluidSecure support; CompanyName must match your name in the platform.
+# Leave either blank to run in MOCK mode (no external calls — nothing is pulled).
+FLUIDSECURE_TOKEN = os.getenv("FLUIDSECURE_TOKEN", "").strip()
+FLUIDSECURE_COMPANY = os.getenv("FLUIDSECURE_COMPANY", "").strip()
+FLUIDSECURE_API_BASE = os.getenv("FLUIDSECURE_API_BASE", "https://www.fluidsecure.net/api").strip()
+# How often (seconds) to pull new fuel transactions. 3600 = hourly — fuel data
+# doesn't change minute-to-minute the way GPS positions do.
+FUEL_POLL_SECONDS = int(os.getenv("FUEL_POLL_SECONDS", "3600"))
+# How many days back to re-pull each cycle (a rolling window; dedup on external_id
+# keeps re-pulls idempotent so overlap never double-counts).
+FUEL_LOOKBACK_DAYS = int(os.getenv("FUEL_LOOKBACK_DAYS", "7"))
+# Live only when both the token and company are set; otherwise mock (no calls).
+USE_FLUIDSECURE = bool(FLUIDSECURE_TOKEN and FLUIDSECURE_COMPANY)
+
 # ── Authentication ──
 # Secret used to sign login tokens. A built-in default lets you run instantly,
 # but set a long random SECRET_KEY in .env before going anywhere near production

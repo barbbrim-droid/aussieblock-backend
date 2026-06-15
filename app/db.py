@@ -27,7 +27,7 @@ def init_db() -> None:
 _COLUMN_MIGRATIONS = {
     "customer": {"qbo_id": "VARCHAR", "cod": "BOOLEAN DEFAULT 0", "email": "VARCHAR"},
     "user": {"phone": "VARCHAR", "company": "VARCHAR", "project": "VARCHAR"},
-    "truck": {"notes": "VARCHAR"},
+    "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR"},
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
     "order": {
         "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR", "use_for": "VARCHAR", "project": "VARCHAR", "batch_ticket": "VARCHAR", "batch_data": "VARCHAR", "batch_ticket_print": "VARCHAR", "archived": "BOOLEAN DEFAULT 0", "driver": "VARCHAR",

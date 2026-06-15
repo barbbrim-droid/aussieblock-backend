@@ -38,6 +38,9 @@ class Truck(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     label: str                                  # e.g. "Truck 14"
     gps_device_id: Optional[str] = None         # maps to a One Step GPS device
+    # FluidSecure (Graco) vehicle number — attaches fuel fills pulled from
+    # FluidSecure to this truck. Optional; fill it in to start tracking fuel.
+    fluidsecure_vehicle_id: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
     heading: Optional[float] = None             # degrees, 0 = north
@@ -121,6 +124,24 @@ class Load(SQLModel, table=True):
     status: str = "scheduled"                    # same stages as an order
     progress: float = 0.0
     batch_ticket: Optional[str] = None           # this load's branded ticket filename
+
+
+class FuelTransaction(SQLModel, table=True):
+    """One fuel/fluid dispense pulled from FluidSecure (Graco). De-duplicated on
+    `external_id` so re-pulling the rolling window never double-counts a fill.
+    Matched to a Truck by FluidSecure vehicle number (Truck.fluidsecure_vehicle_id);
+    `truck_id` stays None for a vehicle no truck is mapped to yet."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    external_id: str = Field(index=True, unique=True)   # FluidSecure transaction id, or a synthesized key
+    truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")
+    vehicle_no: Optional[str] = None                    # FluidSecure vehicle number as reported
+    gallons: Optional[float] = None                     # quantity dispensed
+    fuel_type: Optional[str] = None                     # e.g. "Diesel", "DEF"
+    odometer: Optional[float] = None                    # odometer/hours entered at the pump
+    pin: Optional[str] = None                           # operator PIN on the transaction
+    occurred_at: Optional[datetime] = None              # when the fill happened (FluidSecure time)
+    raw: Optional[str] = None                           # original record as JSON, for audit/unknown fields
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Doc(SQLModel, table=True):

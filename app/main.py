@@ -33,7 +33,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
 )
@@ -92,9 +92,11 @@ class OrderRequestIn(BaseModel):
 
 class TruckIn(BaseModel):
     """Body for adding/updating a truck (staff action). `gps_device_id` is the
-    One Step GPS device id used to match live positions — optional for now."""
+    One Step GPS device id used to match live positions; `fluidsecure_vehicle_id`
+    is the FluidSecure vehicle number used to attach fuel fills — both optional."""
     label: str
     gps_device_id: str | None = None
+    fluidsecure_vehicle_id: str | None = None
     notes: str = ""
 
 
@@ -110,6 +112,7 @@ class CodIn(BaseModel):
 class ChargeIn(BaseModel):
     amount: float | None = None
 from .integrations.onestep_gps import gps_poll_loop, arrival_pending
+from .integrations.fluidsecure import fuel_poll_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
@@ -129,6 +132,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(qbo_sync_loop()),   # periodic QuickBooks A/R sync
+        asyncio.create_task(fuel_poll_loop()),  # periodic FluidSecure fuel pull
     ]
     yield
     for t in tasks:
@@ -1131,7 +1135,8 @@ def list_trucks(
 ):
     """Live truck positions (updated by the GPS poller in the background)."""
     return [
-        {"label": t.label, "device": t.gps_device_id, "lat": t.lat, "lng": t.lng,
+        {"label": t.label, "device": t.gps_device_id, "fuel_vehicle": t.fluidsecure_vehicle_id,
+         "lat": t.lat, "lng": t.lng,
          "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes}
         for t in s.exec(select(Truck)).all()
     ]
@@ -1146,18 +1151,32 @@ def add_truck(body: TruckIn, _: User = Depends(require_staff), s: Session = Depe
     if not label:
         raise HTTPException(422, "Truck name is required")
     device = (body.gps_device_id or "").strip() or None
+    fuel_vehicle = (body.fluidsecure_vehicle_id or "").strip() or None
     notes = (body.notes or "").strip() or None
     truck = s.exec(select(Truck).where(Truck.label == label)).first()
     if truck:
         truck.gps_device_id = device
+        truck.fluidsecure_vehicle_id = fuel_vehicle
         truck.notes = notes
         s.add(truck)
         action = "updated"
     else:
-        truck = Truck(label=label, gps_device_id=device, notes=notes)
+        truck = Truck(label=label, gps_device_id=device,
+                      fluidsecure_vehicle_id=fuel_vehicle, notes=notes)
         s.add(truck)
         action = "added"
     s.commit(); s.refresh(truck)
+    # Re-attach any fuel pulled before this truck was mapped (or remap on change).
+    if fuel_vehicle:
+        target = fuel_vehicle.lower()
+        changed = False
+        for ft in s.exec(select(FuelTransaction).where(FuelTransaction.vehicle_no.is_not(None))).all():
+            if (ft.vehicle_no or "").strip().lower() == target and ft.truck_id != truck.id:
+                ft.truck_id = truck.id
+                s.add(ft)
+                changed = True
+        if changed:
+            s.commit()
     return {"ok": True, "action": action, "label": truck.label, "device": truck.gps_device_id}
 
 
@@ -1174,6 +1193,65 @@ def delete_truck(label: str, _: User = Depends(require_staff), s: Session = Depe
     s.delete(truck)
     s.commit()
     return {"ok": True, "removed": True}
+
+
+@app.get("/fuel")
+def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Per-truck fuel usage rolled up from FluidSecure transactions (staff only).
+    `unmatched` collects fills for vehicle numbers no truck is mapped to yet —
+    map that number on the truck to pull them in (existing fills get re-attached)."""
+    trucks = s.exec(select(Truck)).all()
+    txns = s.exec(select(FuelTransaction)).all()
+    by_truck: dict = {}
+    unmatched = {"gallons": 0.0, "fills": 0, "vehicles": set()}
+    for t in txns:
+        if t.truck_id is None:
+            unmatched["gallons"] += t.gallons or 0.0
+            unmatched["fills"] += 1
+            if t.vehicle_no:
+                unmatched["vehicles"].add(t.vehicle_no)
+            continue
+        agg = by_truck.setdefault(t.truck_id, {"gallons": 0.0, "fills": 0,
+                                               "last_fill": None, "last_odometer": None})
+        agg["gallons"] += t.gallons or 0.0
+        agg["fills"] += 1
+        if t.occurred_at and (agg["last_fill"] is None or t.occurred_at > agg["last_fill"]):
+            agg["last_fill"] = t.occurred_at
+            agg["last_odometer"] = t.odometer
+    rows = []
+    for t in trucks:
+        a = by_truck.get(t.id, {"gallons": 0.0, "fills": 0, "last_fill": None, "last_odometer": None})
+        rows.append({
+            "label": t.label, "fuel_vehicle": t.fluidsecure_vehicle_id,
+            "gallons": round(a["gallons"], 1), "fills": a["fills"],
+            "last_fill": a["last_fill"], "last_odometer": a["last_odometer"],
+        })
+    rows.sort(key=lambda r: r["gallons"], reverse=True)
+    return {
+        "trucks": rows,
+        "unmatched": {"gallons": round(unmatched["gallons"], 1), "fills": unmatched["fills"],
+                      "vehicles": sorted(unmatched["vehicles"])},
+        "live": config.USE_FLUIDSECURE,
+    }
+
+
+@app.get("/trucks/{label}/fuel")
+def truck_fuel(label: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """The fuel fills for one truck, newest first (staff only)."""
+    truck = s.exec(select(Truck).where(Truck.label == label)).first()
+    if not truck:
+        raise HTTPException(404, f"No truck named '{label}'")
+    txns = s.exec(select(FuelTransaction).where(FuelTransaction.truck_id == truck.id)).all()
+    txns.sort(key=lambda t: t.occurred_at or datetime.min, reverse=True)
+    return {
+        "label": truck.label,
+        "fuel_vehicle": truck.fluidsecure_vehicle_id,
+        "fills": [
+            {"when": t.occurred_at, "gallons": t.gallons, "fuel_type": t.fuel_type,
+             "odometer": t.odometer, "pin": t.pin}
+            for t in txns
+        ],
+    }
 
 
 # Keep billing fresh without depending on the background loop: opening billing
