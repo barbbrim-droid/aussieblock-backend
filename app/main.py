@@ -1248,7 +1248,7 @@ def truck_fuel(label: str, _: User = Depends(require_staff), s: Session = Depend
         "fuel_vehicle": truck.fluidsecure_vehicle_id,
         "fills": [
             {"when": t.occurred_at, "gallons": t.gallons, "fuel_type": t.fuel_type,
-             "odometer": t.odometer, "pin": t.pin}
+             "odometer": t.odometer, "driver": t.driver, "pin": t.pin}
             for t in txns
         ],
     }

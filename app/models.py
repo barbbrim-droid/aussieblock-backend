@@ -138,7 +138,8 @@ class FuelTransaction(SQLModel, table=True):
     gallons: Optional[float] = None                     # quantity dispensed
     fuel_type: Optional[str] = None                     # e.g. "Diesel", "DEF"
     odometer: Optional[float] = None                    # odometer/hours entered at the pump
-    pin: Optional[str] = None                           # operator PIN on the transaction
+    driver: Optional[str] = None                        # driver/operator name on the transaction
+    pin: Optional[str] = None                           # operator PIN on the transaction (if reported)
     occurred_at: Optional[datetime] = None              # when the fill happened (FluidSecure time)
     raw: Optional[str] = None                           # original record as JSON, for audit/unknown fields
     created_at: datetime = Field(default_factory=datetime.utcnow)

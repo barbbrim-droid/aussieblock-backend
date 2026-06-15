@@ -31,11 +31,19 @@ from ..models import Truck, FuelTransaction
 from .. import config
 
 
+def _norm(k) -> str:
+    """Normalize a key to letters+digits only, lowercased — so 'Vehicle Number',
+    'VehicleNumber' and 'vehicle_number' all collapse to the same thing. This is
+    what makes parsing robust to however FluidSecure spells its JSON keys."""
+    return "".join(ch for ch in str(k).lower() if ch.isalnum())
+
+
 def _first(d: dict, *keys):
-    """First present, non-empty value among `keys`, matched case-insensitively."""
-    low = {str(k).lower(): v for k, v in d.items()}
+    """First present, non-empty value among `keys`, matched punctuation/space- and
+    case-insensitively (see _norm)."""
+    norm = {_norm(k): v for k, v in d.items()}
     for k in keys:
-        v = low.get(k.lower())
+        v = norm.get(_norm(k))
         if v not in (None, ""):
             return v
     return None
@@ -64,7 +72,7 @@ def _parse_dt(v):
 def _external_id(rec: dict, vehicle_no, occurred_at, gallons) -> str:
     """Stable de-dup key: prefer FluidSecure's own transaction id, else synthesize
     one from vehicle + time + gallons (enough to recognize a repeated record)."""
-    tid = _first(rec, "TransactionId", "TransactionID", "Id", "TransactionNumber")
+    tid = _first(rec, "TransactionNumber", "Transaction #", "TransactionId", "TransactionID", "Id")
     if tid:
         return f"fs:{tid}"
     stamp = occurred_at.isoformat() if occurred_at else "?"
@@ -117,15 +125,21 @@ def _ingest(records: list) -> int:
             if not _printed_sample:
                 print("FluidSecure sample record:", json.dumps(rec)[:600])
                 _printed_sample = True
-            vehicle_no = _first(rec, "VehicleNumber", "Vehicle", "VehicleNo",
+            # Candidate keys cover the FluidSecure web columns (Vehicle Number,
+            # Fluid Quantity, Product, Current Odometer, Drivers Name, …) plus
+            # common variants; _norm makes spacing/punctuation differences moot.
+            vehicle_no = _first(rec, "Vehicle Number", "VehicleNumber", "Vehicle", "VehicleNo",
                                 "VehicleName", "Asset", "AssetName", "Unit")
-            gallons = _to_float(_first(rec, "Quantity", "Gallons", "Volume",
-                                       "Amount", "FuelQuantity", "DispensedQuantity"))
-            occurred_at = _parse_dt(_first(rec, "TransactionDate", "TransactionDateTime",
-                                           "Date", "DateTime", "Timestamp"))
-            odometer = _to_float(_first(rec, "Odometer", "Mileage", "Miles", "Hours", "Hourmeter"))
-            fuel_type = _first(rec, "FuelType", "Fluid", "Product", "ProductName", "FluidName")
-            pin = _first(rec, "PIN", "Pin", "OperatorPIN", "Operator", "Personnel", "Driver")
+            gallons = _to_float(_first(rec, "Fluid Quantity", "FluidQuantity", "Quantity",
+                                       "Gallons", "Volume", "Amount", "DispensedQuantity"))
+            occurred_at = _parse_dt(_first(rec, "Transaction Date & Time", "TransactionDateTime",
+                                           "TransactionDate", "Date", "DateTime", "Timestamp"))
+            odometer = _to_float(_first(rec, "Current Odometer", "CurrentOdometer", "Odometer",
+                                        "Mileage", "Miles", "Hours", "Hourmeter"))
+            fuel_type = _first(rec, "Product", "ProductName", "FuelType", "Fluid", "FluidName")
+            driver = _first(rec, "Drivers Name", "DriversName", "DriverName", "Driver",
+                            "Operator", "OperatorName", "Personnel")
+            pin = _first(rec, "PIN", "Pin", "OperatorPIN")
             ext = _external_id(rec, vehicle_no, occurred_at, gallons)
             if s.exec(select(FuelTransaction).where(FuelTransaction.external_id == ext)).first():
                 continue   # already stored — rolling-window overlap
@@ -134,7 +148,8 @@ def _ingest(records: list) -> int:
                 external_id=ext, truck_id=truck_id,
                 vehicle_no=str(vehicle_no) if vehicle_no else None,
                 gallons=gallons, fuel_type=str(fuel_type) if fuel_type else None,
-                odometer=odometer, pin=str(pin) if pin else None,
+                odometer=odometer, driver=str(driver) if driver else None,
+                pin=str(pin) if pin else None,
                 occurred_at=occurred_at, raw=json.dumps(rec)[:4000],
             ))
             added += 1
