@@ -20,6 +20,8 @@ API (per FluidSecure docs):
   NOTE: bad params still return 200 with a JSON failure message (no list).
 """
 import asyncio
+import csv
+import io
 import json
 from datetime import datetime, timedelta
 
@@ -156,6 +158,29 @@ def _ingest(records: list) -> int:
         if added:
             s.commit()
     return added
+
+
+def ingest_csv(text: str) -> dict:
+    """Ingest a FluidSecure transaction export (CSV/TSV) — the no-API path.
+
+    Each row becomes a record dict whose headers (Vehicle Number, Fluid Quantity,
+    Product, Current Odometer, Drivers Name, Transaction #, …) feed the SAME
+    _ingest() the live API uses, so column spelling/spacing doesn't matter (_norm
+    handles it) and de-dup + truck-matching behave identically. Re-uploading the
+    same file is safe — already-seen rows are skipped. Returns {rows, added}."""
+    text = (text or "").lstrip("﻿")
+    if not text.strip():
+        return {"rows": 0, "added": 0}
+    # FluidSecure exports are comma-delimited, but sniff so a tab/semicolon export
+    # still parses; fall back to plain CSV if the sniffer can't decide.
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",\t;|")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    rows = [r for r in reader if any((v or "").strip() for v in r.values())]
+    added = _ingest(rows)
+    return {"rows": len(rows), "added": added}
 
 
 async def _poll_once() -> None:

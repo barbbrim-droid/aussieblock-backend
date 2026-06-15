@@ -112,7 +112,7 @@ class CodIn(BaseModel):
 class ChargeIn(BaseModel):
     amount: float | None = None
 from .integrations.onestep_gps import gps_poll_loop, arrival_pending
-from .integrations.fluidsecure import fuel_poll_loop
+from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
@@ -1293,6 +1293,37 @@ def put_fuel_prices(body: FuelPricesIn, _: User = Depends(require_staff)):
     sheet["fuel_prices"] = body.fuel_prices
     pricing.save_sheet(sheet)
     return {"ok": True}
+
+
+@app.post("/fuel/import")
+async def import_fuel(file: UploadFile = File(...), _: User = Depends(require_staff)):
+    """Import a FluidSecure transaction export (CSV) — the no-API-token path.
+
+    Staff export the transactions from the FluidSecure portal and upload the CSV
+    here; rows are de-duped on the FluidSecure transaction id and attached to the
+    truck whose `fluidsecure_vehicle_id` matches the Vehicle Number, exactly like
+    the live poller. Re-uploading the same file is safe (already-seen rows skip).
+    Returns how many rows were read and how many were newly stored."""
+    raw = await file.read()
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(413, "That file is too large (10 MB max).")
+    name = (file.filename or "").lower()
+    ctype = (file.content_type or "").lower()
+    looks_csv = (name.endswith((".csv", ".txt", ".tsv"))
+                 or ctype.startswith("text/")
+                 or "csv" in ctype or "excel" in ctype)
+    if not looks_csv:
+        raise HTTPException(422, "Upload the FluidSecure export as a CSV file "
+                                 "(in the portal choose File Type = CSV).")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1", errors="replace")
+    result = ingest_fuel_csv(text)
+    if result["rows"] == 0:
+        raise HTTPException(422, "No transaction rows found in that file — make sure "
+                                 "it's the FluidSecure transaction export with a header row.")
+    return {"ok": True, **result}
 
 
 @app.get("/trucks/{label}/fuel")
