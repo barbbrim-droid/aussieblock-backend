@@ -23,6 +23,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 from datetime import datetime, timedelta
 
 import httpx
@@ -49,6 +50,23 @@ def _first(d: dict, *keys):
         if v not in (None, ""):
             return v
     return None
+
+
+def veh_keys(v) -> set:
+    """Match-keys for a vehicle id, tolerant of an 'RTS' prefix and spacing so the
+    truck mapping matches however FluidSecure spells the vehicle: 'RTS4554',
+    'RTS 4554' and '4554' all share the digit key '4554'. Trucks are indexed by
+    these keys and incoming fills looked up the same way."""
+    s = str(v or "").strip().lower()
+    keys = set()
+    if not s:
+        return keys
+    keys.add(s)                       # exact, e.g. 'rts4554'
+    keys.add(s.replace(" ", ""))      # spacing-insensitive
+    digits = re.sub(r"\D", "", s)     # just the number, e.g. '4554'
+    if digits:
+        keys.add(digits)
+    return keys
 
 
 def _to_float(v):
@@ -120,7 +138,10 @@ def _ingest(records: list) -> int:
         trucks = s.exec(
             select(Truck).where(Truck.fluidsecure_vehicle_id.is_not(None))
         ).all()
-        by_vehicle = {str(t.fluidsecure_vehicle_id).strip().lower(): t.id for t in trucks}
+        by_vehicle = {}
+        for t in trucks:
+            for k in veh_keys(t.fluidsecure_vehicle_id):
+                by_vehicle.setdefault(k, t.id)
         for rec in records:
             if not isinstance(rec, dict):
                 continue
@@ -145,7 +166,11 @@ def _ingest(records: list) -> int:
             ext = _external_id(rec, vehicle_no, occurred_at, gallons)
             if s.exec(select(FuelTransaction).where(FuelTransaction.external_id == ext)).first():
                 continue   # already stored — rolling-window overlap
-            truck_id = by_vehicle.get(str(vehicle_no).strip().lower()) if vehicle_no else None
+            truck_id = None
+            for k in veh_keys(vehicle_no):
+                if k in by_vehicle:
+                    truck_id = by_vehicle[k]
+                    break
             s.add(FuelTransaction(
                 external_id=ext, truck_id=truck_id,
                 vehicle_no=str(vehicle_no) if vehicle_no else None,

@@ -112,7 +112,7 @@ class CodIn(BaseModel):
 class ChargeIn(BaseModel):
     amount: float | None = None
 from .integrations.onestep_gps import gps_poll_loop, arrival_pending
-from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv
+from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv, veh_keys
 from .integrations.fuel_email import fuel_email_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
@@ -1168,12 +1168,13 @@ def add_truck(body: TruckIn, _: User = Depends(require_staff), s: Session = Depe
         s.add(truck)
         action = "added"
     s.commit(); s.refresh(truck)
-    # Re-attach any fuel pulled before this truck was mapped (or remap on change).
+    # Re-attach any fuel pulled before this truck was mapped (or remap on change),
+    # tolerant of the RTS prefix/spacing (see veh_keys).
     if fuel_vehicle:
-        target = fuel_vehicle.lower()
+        targets = veh_keys(fuel_vehicle)
         changed = False
         for ft in s.exec(select(FuelTransaction).where(FuelTransaction.vehicle_no.is_not(None))).all():
-            if (ft.vehicle_no or "").strip().lower() == target and ft.truck_id != truck.id:
+            if (veh_keys(ft.vehicle_no) & targets) and ft.truck_id != truck.id:
                 ft.truck_id = truck.id
                 s.add(ft)
                 changed = True
