@@ -46,6 +46,24 @@ FUEL_LOOKBACK_DAYS = int(os.getenv("FUEL_LOOKBACK_DAYS", "7"))
 # Live only when both the token and company are set; otherwise mock (no calls).
 USE_FLUIDSECURE = bool(FLUIDSECURE_TOKEN and FLUIDSECURE_COMPANY)
 
+# ── FluidSecure fuel via EMAIL (no API token needed) ──
+# FluidSecure can email a scheduled transaction CSV. When the API token isn't
+# available, point that export at a mailbox and set these so the backend reads
+# the inbox over IMAP, ingests each CSV attachment, and marks the mail seen.
+# aussie-block.com is Google Workspace → host imap.gmail.com, user the address,
+# password a Google App Password (not the normal login). Leave blank to disable.
+FUEL_IMAP_HOST = os.getenv("FUEL_IMAP_HOST", "imap.gmail.com").strip()
+FUEL_IMAP_USER = os.getenv("FUEL_IMAP_USER", "").strip()
+FUEL_IMAP_PASSWORD = os.getenv("FUEL_IMAP_PASSWORD", "").strip()
+FUEL_IMAP_FOLDER = os.getenv("FUEL_IMAP_FOLDER", "INBOX").strip()
+# Only ingest mail whose From contains this (case-insensitive) — guards against
+# picking up unrelated CSVs. Blank = accept any sender with a .csv attachment.
+FUEL_IMAP_FROM = os.getenv("FUEL_IMAP_FROM", "fluidsecure").strip().lower()
+# How often (seconds) to check the mailbox.
+FUEL_EMAIL_POLL_SECONDS = int(os.getenv("FUEL_EMAIL_POLL_SECONDS", "900"))
+# Live only when host + user + password are all set; otherwise idle (no IMAP).
+USE_FUEL_EMAIL = bool(FUEL_IMAP_HOST and FUEL_IMAP_USER and FUEL_IMAP_PASSWORD)
+
 # ── Authentication ──
 # Secret used to sign login tokens. A built-in default lets you run instantly,
 # but set a long random SECRET_KEY in .env before going anywhere near production

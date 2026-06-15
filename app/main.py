@@ -113,6 +113,7 @@ class ChargeIn(BaseModel):
     amount: float | None = None
 from .integrations.onestep_gps import gps_poll_loop, arrival_pending
 from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv
+from .integrations.fuel_email import fuel_email_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
 from .integrations.quickbooks import (
     get_billing_for_customer, sync_ar_from_quickbooks, qbo_sync_loop,
@@ -132,7 +133,8 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(qbo_sync_loop()),   # periodic QuickBooks A/R sync
-        asyncio.create_task(fuel_poll_loop()),  # periodic FluidSecure fuel pull
+        asyncio.create_task(fuel_poll_loop()),  # periodic FluidSecure fuel pull (API)
+        asyncio.create_task(fuel_email_loop()), # ingest FluidSecure fuel CSVs from email
     ]
     yield
     for t in tasks:
