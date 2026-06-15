@@ -159,9 +159,11 @@ def _ingest(records: list) -> int:
                                            "TransactionDate", "Date", "DateTime", "Timestamp"))
             odometer = _to_float(_first(rec, "Current Odometer", "CurrentOdometer", "Odometer",
                                         "Mileage", "Miles", "Hours", "Hourmeter"))
-            fuel_type = _first(rec, "Product", "ProductName", "FuelType", "Fluid", "FluidName")
+            fuel_type = _first(rec, "Product", "ProductName", "Product Name", "Product Type",
+                               "FuelType", "Fluid", "FluidName", "Hose")
             driver = _first(rec, "Drivers Name", "DriversName", "DriverName", "Driver",
-                            "Operator", "OperatorName", "Personnel")
+                            "Operator", "OperatorName", "Personnel", "Person Name",
+                            "PersonName", "Personnel Name", "Personnel Aussieblock Name")
             pin = _first(rec, "PIN", "Pin", "OperatorPIN")
             ext = _external_id(rec, vehicle_no, occurred_at, gallons)
             if s.exec(select(FuelTransaction).where(FuelTransaction.external_id == ext)).first():
