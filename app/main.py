@@ -1195,44 +1195,104 @@ def delete_truck(label: str, _: User = Depends(require_staff), s: Session = Depe
     return {"ok": True, "removed": True}
 
 
+def _yards_by_truck(s: Session) -> dict:
+    """Delivered cubic yards per truck_id, summed from completed work: each
+    completed pour LOAD on its truck, plus each completed single order on its truck
+    (orders that are split into loads are counted via their loads, not twice)."""
+    loads = s.exec(select(Load)).all()
+    order_has_loads = {ld.order_id for ld in loads}
+    yards: dict = {}
+    for ld in loads:
+        if ld.truck_id and ld.status == "complete":
+            yards[ld.truck_id] = yards.get(ld.truck_id, 0.0) + pricing._num(ld.qty)
+    for o in s.exec(select(Order).where(Order.status == "complete")).all():
+        if o.truck_id and o.id not in order_has_loads:
+            yards[o.truck_id] = yards.get(o.truck_id, 0.0) + pricing._num(o.qty)
+    return yards
+
+
 @app.get("/fuel")
 def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Per-truck fuel usage rolled up from FluidSecure transactions (staff only).
-    `unmatched` collects fills for vehicle numbers no truck is mapped to yet —
-    map that number on the truck to pull them in (existing fills get re-attached)."""
+    """Per-truck fuel usage rolled up from FluidSecure transactions (staff only),
+    with cost (gallons × the $/gal in the price sheet) and per-yard efficiency
+    (gallons and fuel-$ per delivered yard). `unmatched` collects fills for vehicle
+    numbers no truck is mapped to yet — map that number on the truck to pull them in."""
+    sheet = pricing.load_sheet()
     trucks = s.exec(select(Truck)).all()
     txns = s.exec(select(FuelTransaction)).all()
+    yards_by_truck = _yards_by_truck(s)
     by_truck: dict = {}
-    unmatched = {"gallons": 0.0, "fills": 0, "vehicles": set()}
+    products: dict = {}   # product name -> its current $/gal, for the price editor
+    unmatched = {"gallons": 0.0, "cost": 0.0, "fills": 0, "vehicles": set()}
     for t in txns:
+        gal = t.gallons or 0.0
+        cost = gal * pricing.fuel_price_for(sheet, t.fuel_type)
+        if t.fuel_type:
+            products.setdefault(t.fuel_type, pricing.fuel_price_for(sheet, t.fuel_type))
         if t.truck_id is None:
-            unmatched["gallons"] += t.gallons or 0.0
+            unmatched["gallons"] += gal
+            unmatched["cost"] += cost
             unmatched["fills"] += 1
             if t.vehicle_no:
                 unmatched["vehicles"].add(t.vehicle_no)
             continue
-        agg = by_truck.setdefault(t.truck_id, {"gallons": 0.0, "fills": 0,
+        agg = by_truck.setdefault(t.truck_id, {"gallons": 0.0, "cost": 0.0, "fills": 0,
                                                "last_fill": None, "last_odometer": None})
-        agg["gallons"] += t.gallons or 0.0
+        agg["gallons"] += gal
+        agg["cost"] += cost
         agg["fills"] += 1
         if t.occurred_at and (agg["last_fill"] is None or t.occurred_at > agg["last_fill"]):
             agg["last_fill"] = t.occurred_at
             agg["last_odometer"] = t.odometer
     rows = []
+    fleet = {"gallons": 0.0, "cost": 0.0, "yards": 0.0}
     for t in trucks:
-        a = by_truck.get(t.id, {"gallons": 0.0, "fills": 0, "last_fill": None, "last_odometer": None})
+        a = by_truck.get(t.id, {"gallons": 0.0, "cost": 0.0, "fills": 0,
+                                "last_fill": None, "last_odometer": None})
+        yd = yards_by_truck.get(t.id, 0.0)
+        fleet["gallons"] += a["gallons"]
+        fleet["cost"] += a["cost"]
+        fleet["yards"] += yd
         rows.append({
             "label": t.label, "fuel_vehicle": t.fluidsecure_vehicle_id,
-            "gallons": round(a["gallons"], 1), "fills": a["fills"],
-            "last_fill": a["last_fill"], "last_odometer": a["last_odometer"],
+            "gallons": round(a["gallons"], 1), "cost": round(a["cost"], 2),
+            "fills": a["fills"], "last_fill": a["last_fill"], "last_odometer": a["last_odometer"],
+            "yards": round(yd, 1),
+            "gal_per_yd": round(a["gallons"] / yd, 2) if yd else None,
+            "cost_per_yd": round(a["cost"] / yd, 2) if yd else None,
         })
     rows.sort(key=lambda r: r["gallons"], reverse=True)
     return {
         "trucks": rows,
-        "unmatched": {"gallons": round(unmatched["gallons"], 1), "fills": unmatched["fills"],
-                      "vehicles": sorted(unmatched["vehicles"])},
+        "fleet": {
+            "gallons": round(fleet["gallons"], 1), "cost": round(fleet["cost"], 2),
+            "yards": round(fleet["yards"], 1),
+            "gal_per_yd": round(fleet["gallons"] / fleet["yards"], 2) if fleet["yards"] else None,
+            "cost_per_yd": round(fleet["cost"] / fleet["yards"], 2) if fleet["yards"] else None,
+        },
+        "unmatched": {"gallons": round(unmatched["gallons"], 1), "cost": round(unmatched["cost"], 2),
+                      "fills": unmatched["fills"], "vehicles": sorted(unmatched["vehicles"])},
+        "products": [{"product": p, "price": pr} for p, pr in sorted(products.items())],
+        "fuel_price_default": pricing._num(sheet.get("fuel_price_default")),
         "live": config.USE_FLUIDSECURE,
     }
+
+
+class FuelPricesIn(BaseModel):
+    """Body for saving fuel $/gal — a default plus optional per-product rates."""
+    fuel_price_default: float = 0.0
+    fuel_prices: list = []   # [{"product": "Diesel", "price": 3.85}]
+
+
+@app.put("/fuel/prices")
+def put_fuel_prices(body: FuelPricesIn, _: User = Depends(require_staff)):
+    """Save fuel $/gal rates into the price sheet (staff). Other sheet fields are
+    preserved (see pricing.save_sheet)."""
+    sheet = pricing.load_sheet()
+    sheet["fuel_price_default"] = body.fuel_price_default
+    sheet["fuel_prices"] = body.fuel_prices
+    pricing.save_sheet(sheet)
+    return {"ok": True}
 
 
 @app.get("/trucks/{label}/fuel")

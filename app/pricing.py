@@ -18,6 +18,11 @@ DEFAULT_SHEET = {
     "overrides": [],    # [{"customer": "...", "mix": "" (=any), "price": 0.0}]
     "admixtures": [],   # [{"name": "Fiber", "rate": 3.75, "per": "lb"|"yard"}]
     "self_haul_customers": [],   # pickup customers (concrete only, no delivery/load fees)
+    # Fuel cost: FluidSecure reports gallons, not dollars, so staff set a $/gal
+    # rate. `fuel_prices` holds per-product rates; `fuel_price_default` covers any
+    # product without one. Used to cost the fuel view's gallons.
+    "fuel_price_default": 0.0,
+    "fuel_prices": [],  # [{"product": "Diesel", "price": 3.85}]
 }
 
 # Haul rate per yard by road miles from the yard (Aussieblock Delivery Pricing).
@@ -90,15 +95,30 @@ def load_sheet() -> dict:
 
 
 def save_sheet(sheet: dict) -> dict:
-    merged = {**DEFAULT_SHEET, **(sheet or {})}
-    merged["mixes"] = sheet.get("mixes", []) if sheet else []
-    merged["overrides"] = sheet.get("overrides", []) if sheet else []
-    merged["admixtures"] = sheet.get("admixtures", []) if sheet else []
-    merged["self_haul_customers"] = sheet.get("self_haul_customers", []) if sheet else []
-    merged["delivery_brackets"] = (sheet.get("delivery_brackets") if sheet else None) or DEFAULT_BRACKETS
+    sheet = sheet or {}
+    current = load_sheet()   # so a partial save never drops fields it didn't send
+    merged = {**DEFAULT_SHEET, **sheet}
+    merged["mixes"] = sheet.get("mixes", [])
+    merged["overrides"] = sheet.get("overrides", [])
+    merged["admixtures"] = sheet.get("admixtures", [])
+    merged["self_haul_customers"] = sheet.get("self_haul_customers", [])
+    merged["delivery_brackets"] = sheet.get("delivery_brackets") or DEFAULT_BRACKETS
+    # Fuel prices live in the sheet but are edited from the fuel view, not the
+    # price-sheet editor — carry the saved values forward when not in this payload.
+    merged["fuel_price_default"] = sheet.get("fuel_price_default", current.get("fuel_price_default", 0.0))
+    merged["fuel_prices"] = sheet.get("fuel_prices", current.get("fuel_prices", []))
     with open(_path(), "w", encoding="utf-8") as fh:
         json.dump(merged, fh, indent=2)
     return merged
+
+
+def fuel_price_for(sheet: dict, product) -> float:
+    """$/gal for a fuel product: a matching per-product rate, else the default."""
+    pn = _norm(product)
+    for p in (sheet or {}).get("fuel_prices") or []:
+        if pn and _norm(p.get("product")) == pn:
+            return _num(p.get("price"))
+    return _num((sheet or {}).get("fuel_price_default"))
 
 
 def _num(v) -> float:
