@@ -986,40 +986,36 @@ def _stamp_signature_on_ticket(o: Order, s: Session) -> None:
             pass
         meta = f"Signed by {o.signed_by or '—'}"
         if o.water_added:
-            meta += f"     Water added on site: {o.water_added} gal"
+            meta += f"      Water added on site: {o.water_added} gal"
         if signed_at:
-            meta += f"     {signed_at}"
+            meta += f"      {signed_at}"
 
-        doc = fitz.open(pdf_path)
-        page = doc[-1]
-        W, H = page.rect.width, page.rect.height
-        # find where existing content ends (text blocks + drawn table borders)
-        bottom = 0.0
-        for b in page.get_text("blocks"):
-            bottom = max(bottom, b[3])
-        try:
-            for dr in page.get_drawings():
-                bottom = max(bottom, dr["rect"].y1)
-        except Exception:
-            pass
+        # Rebuild the PDF: shrink the LAST ticket page into the top ~84% of the
+        # sheet and put the customer sign-off in the freed footer strip — so it's
+        # ON the actual ticket page and covers none of the batch data.
+        src = fitz.open(pdf_path)
+        out = fitz.open()
+        n = src.page_count
+        for i in range(n - 1):                  # earlier pages copied unchanged
+            out.insert_pdf(src, from_page=i, to_page=i)
+        last = src[n - 1]
+        W, H = last.rect.width, last.rect.height
+        page = out.new_page(width=W, height=H)
+        content_h = H * 0.84
+        page.show_pdf_page(fitz.Rect(0, 0, W, content_h), src, n - 1, keep_proportion=False)
 
-        m = 40                      # side margin (points)
-        block_h = 96                # sign-off block height
-        if bottom + block_h + 24 <= H:
-            y = bottom + 20         # sits just below the ticket content
-        else:                       # ticket fills the page → clean page rather than cover data
-            page = doc.new_page(width=W, height=H)
-            y = 56
-        page.draw_line((m, y), (W - m, y), color=(0.78, 0.8, 0.83), width=0.7); y += 16
-        page.insert_text((m, y), "CUSTOMER SIGN-OFF", fontsize=10, fontname="hebo", color=navy); y += 16
-        page.insert_text((m, y), meta, fontsize=9, color=grey); y += 6
-        rect = fitz.Rect(m, y, m + 220, y + 64)
-        page.draw_rect(rect, color=(0.8, 0.8, 0.8), width=0.6)
-        page.insert_image(rect, filename=sig_path, keep_proportion=True)
+        m = 36
+        y = content_h + 14
+        page.draw_line((m, y), (W - m, y), color=(0.7, 0.72, 0.75), width=0.8); y += 16
+        page.insert_text((m, y), "CUSTOMER SIGN-OFF", fontsize=10, fontname="hebo", color=navy)
+        page.insert_text((m, y + 15), meta, fontsize=8.5, color=grey)
+        sig_rect = fitz.Rect(W - m - 170, content_h + 18, W - m, H - 10)
+        page.draw_rect(sig_rect, color=(0.8, 0.8, 0.8), width=0.6)
+        page.insert_image(sig_rect, filename=sig_path, keep_proportion=True)
 
         tmp = pdf_path + ".tmp"
-        doc.save(tmp, garbage=3, deflate=True)
-        doc.close()
+        out.save(tmp, garbage=3, deflate=True)
+        out.close(); src.close()
         os.replace(tmp, pdf_path)
     except Exception as e:   # never let stamping break the request
         print("signature stamp failed:", e)
@@ -1058,6 +1054,8 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
         raise HTTPException(404, "Order not found")
     if o.status == "requested":
         raise HTTPException(409, "This delivery hasn't been confirmed yet.")
+    if o.signature:
+        raise HTTPException(409, "This delivery has already been signed.")
     name = (signed_by or "").strip()
     if not name:
         raise HTTPException(422, "Enter who signed for the delivery.")
