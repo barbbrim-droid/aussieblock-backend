@@ -801,6 +801,27 @@ def _order_hauler(o: Order, s: Session):
     return None
 
 
+def _billable_yards(o: Order, s: Session) -> str:
+    """The yards to bill the customer and haul on — ACTUAL delivered, never the
+    ordered estimate. Priority:
+      1. summed loads (a pour: ordered 15, loaded 18 -> 18),
+      2. the batch ticket's 'delivered' field (a single delivery's actual yards),
+      3. the ordered qty as a fallback (nothing actual recorded yet).
+    Returns a string quantity."""
+    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+    loaded = round(sum(pricing._num(ld.qty) for ld in loads), 2)
+    if loads and loaded > 0:
+        return "%g" % loaded
+    if o.batch_data:
+        try:
+            delivered = pricing._num(json.loads(o.batch_data).get("delivered"))
+            if delivered > 0:
+                return "%g" % delivered
+        except (ValueError, TypeError):
+            pass
+    return o.qty
+
+
 @app.get("/orders/{ref}/pricing")
 def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
@@ -809,11 +830,9 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
         raise HTTPException(404, "Order not found")
     sheet = pricing.load_sheet()
     cust = s.get(Customer, o.customer_id).name if o.customer_id else ""
-    # bill the ACTUAL yards delivered: for a pour, the sum of its loads (e.g. ordered
-    # 15, loaded 18 -> bill 18); for a single order, the order quantity.
-    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
-    loaded = round(sum(pricing._num(ld.qty) for ld in loads), 2)
-    billable = ("%g" % loaded) if (loads and loaded > 0) else o.qty
+    # bill the ACTUAL yards delivered (loads for a pour, batch-ticket delivered for
+    # a single order), falling back to the ordered qty — see _billable_yards.
+    billable = _billable_yards(o, s)
     cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable,
                                  order_admixtures=o.admixtures or "", unit_override=o.price_override)
     # mileage: use the stored value, else auto-compute once and cache it on the order
@@ -862,7 +881,9 @@ def set_delivery(ref: str, body: DeliveryIn, _: User = Depends(require_staff), s
     o.hauler = (body.hauler or "").strip() or None
     o.mileage = body.mileage if body.mileage is not None else pricing.road_miles(o.site)
     s.add(o); s.commit(); s.refresh(o)
-    dl = pricing.compute_delivery(pricing.load_sheet(), o.mileage, o.qty)
+    # haul on the ACTUAL delivered yards (not o.qty) so saving the hauler can't
+    # revert the figure to the ordered estimate — matches GET /pricing.
+    dl = pricing.compute_delivery(pricing.load_sheet(), o.mileage, _billable_yards(o, s))
     dl["hauler"] = _order_hauler(o, s)
     return dl
 
