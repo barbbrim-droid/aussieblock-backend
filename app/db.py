@@ -35,7 +35,7 @@ _COLUMN_MIGRATIONS = {
         "hauler": "VARCHAR", "mileage": "FLOAT", "price_override": "FLOAT",
         "prepay_required": "BOOLEAN DEFAULT 0", "prepay_amount": "FLOAT",
         "prepay_invoice_id": "VARCHAR", "prepaid": "BOOLEAN DEFAULT 0",
-        "signed_by": "VARCHAR", "signature": "VARCHAR", "signed_at": "VARCHAR",
+        "signed_by": "VARCHAR", "signature": "VARCHAR", "signed_at": "VARCHAR", "water_added": "VARCHAR",
     },
 }
 

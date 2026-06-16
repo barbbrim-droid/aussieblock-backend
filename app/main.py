@@ -249,6 +249,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "archived": bool(o.archived),
         "signed_by": o.signed_by,
         "signed_at": o.signed_at,
+        "water_added": o.water_added,
         "has_signature": bool(o.signature),
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
@@ -979,11 +980,13 @@ def driver_orders(user: User = Depends(require_driver), s: Session = Depends(get
 @app.post("/orders/{ref}/signoff")
 async def sign_off_order(ref: str, file: UploadFile = File(...),
                          signed_by: str = Query(...),
+                         water_added: str = Query(""),
                          user: User = Depends(require_driver),
                          s: Session = Depends(get_session)):
     """Driver captures the customer's signature on delivery: store the signature
-    image + printed name + timestamp and mark the order complete (proof of
-    delivery). Driver may only sign off their own assigned, active orders."""
+    image + printed name + water added on site + timestamp and mark the order
+    complete (proof of delivery). Driver may only sign off their own assigned,
+    active orders."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or not _is_driver_of(o, user):
         raise HTTPException(404, "Order not found")
@@ -1003,6 +1006,7 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
         fh.write(raw)
     o.signature = fname
     o.signed_by = name
+    o.water_added = (water_added or "").strip() or None
     o.signed_at = datetime.utcnow().isoformat()
     o.status = "complete"
     o.progress = 1.0

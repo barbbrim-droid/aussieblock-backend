@@ -92,6 +92,7 @@ class Order(SQLModel, table=True):
     signed_by: Optional[str] = None             # printed name of who signed for it
     signature: Optional[str] = None             # stored signature image filename
     signed_at: Optional[str] = None             # ISO timestamp of the sign-off
+    water_added: Optional[str] = None           # gallons of water added on site (driver records at sign-off)
 
 
 class Invoice(SQLModel, table=True):
