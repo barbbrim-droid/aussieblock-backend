@@ -36,6 +36,7 @@ from .seed import seed_if_empty
 from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
+    require_driver,
 )
 
 
@@ -56,6 +57,7 @@ class StaffLoginIn(BaseModel):
     phone: str = ""               # worker's cell, so they can be texted their login
     customer_id: int | None = None  # REQUIRED for a worker — the company they work for (scopes what they see)
     project: str = ""             # their current project/job (label only)
+    company: str = ""             # for a 'driver' login: the driver's name (matches Order.driver)
 
 
 class OrderIn(BaseModel):
@@ -245,6 +247,9 @@ def _order_json(o: Order, s: Session) -> dict:
         "has_original": _has_original(o.ref, o.batch_ticket),
         "batch_data": json.loads(o.batch_data) if o.batch_data else None,
         "archived": bool(o.archived),
+        "signed_by": o.signed_by,
+        "signed_at": o.signed_at,
+        "has_signature": bool(o.signature),
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
@@ -301,7 +306,8 @@ def login(form: OAuth2PasswordRequestForm = Depends(), s: Session = Depends(get_
             "Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    company = s.get(Customer, user.customer_id).name if user.customer_id else None
+    # company name for company-scoped users; for a driver it's their own name.
+    company = (s.get(Customer, user.customer_id).name if user.customer_id else None) or user.company
     return {
         "access_token": create_access_token(user),
         "token_type": "bearer",
@@ -315,7 +321,7 @@ def login(form: OAuth2PasswordRequestForm = Depends(), s: Session = Depends(get_
 def me(user: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """Who am I? Handy for the front-end to render the right screen. `company` is
     the customer name for company-scoped users (customer/worker), else None."""
-    company = s.get(Customer, user.customer_id).name if user.customer_id else None
+    company = (s.get(Customer, user.customer_id).name if user.customer_id else None) or user.company
     return {"email": user.email, "role": user.role, "customer_id": user.customer_id, "company": company}
 
 
@@ -822,6 +828,13 @@ def _billable_yards(o: Order, s: Session) -> str:
     return o.qty
 
 
+def _is_driver_of(o: Order, user: User) -> bool:
+    """True when this driver login is the assigned driver on the order (matched by
+    name: the driver's User.company vs Order.driver, case/space-insensitive)."""
+    return (user.role == "driver" and bool(o.driver) and bool(user.company)
+            and o.driver.strip().lower() == user.company.strip().lower())
+
+
 @app.get("/orders/{ref}/pricing")
 def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
@@ -894,7 +907,7 @@ def get_batch_ticket(ref: str, variant: str = Query("view"),
     """Download an order's batch-ticket PDF (staff, or anyone on that company).
     variant='print' serves the light copy if one exists (else falls back)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
         raise HTTPException(404, "Order not found")
     if variant == "original":
         matches = glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*"))
@@ -933,6 +946,83 @@ def delete_batch_ticket(ref: str, _: User = Depends(require_staff), s: Session =
         o.batch_ticket_print = None
         s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
+
+
+# ── Driver tablet ────────────────────────────────────────────────────────────
+# Aussieblock's own drivers run the app on a truck tablet: they see today's
+# deliveries assigned to them, show/open the batch ticket, and capture the
+# customer's signature on delivery (proof of delivery → marks the order complete).
+def _signature_dir() -> str:
+    d = config.data_path("signatures")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@app.get("/driver/orders")
+def driver_orders(user: User = Depends(require_driver), s: Session = Depends(get_session)):
+    """Today's deliveries assigned to this driver (newest scheduled first). Matched
+    by the driver's name (User.company) vs Order.driver."""
+    today = _business_today().isoformat()
+    name = (user.company or "").strip().lower()
+    rows = []
+    for o in s.exec(select(Order).where(Order.scheduled_for == today)).all():
+        if o.status in ("requested", "complete"):
+            continue   # not yet confirmed, or already delivered
+        od = (o.driver or "").strip().lower()
+        if od and name and od != name:
+            continue   # assigned to a different driver — hide it
+        rows.append(_order_json(o, s))   # mine, or not yet assigned to anyone
+    rows.sort(key=lambda r: r.get("time") or "")
+    return {"driver": user.company, "date": today, "orders": rows}
+
+
+@app.post("/orders/{ref}/signoff")
+async def sign_off_order(ref: str, file: UploadFile = File(...),
+                         signed_by: str = Query(...),
+                         user: User = Depends(require_driver),
+                         s: Session = Depends(get_session)):
+    """Driver captures the customer's signature on delivery: store the signature
+    image + printed name + timestamp and mark the order complete (proof of
+    delivery). Driver may only sign off their own assigned, active orders."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or not _is_driver_of(o, user):
+        raise HTTPException(404, "Order not found")
+    if o.status in ("requested", "complete"):
+        raise HTTPException(409, "This delivery can't be signed off right now.")
+    name = (signed_by or "").strip()
+    if not name:
+        raise HTTPException(422, "Enter who signed for the delivery.")
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Signature image is too large.")
+    ctype = (file.content_type or "").lower()
+    if not (ctype.startswith("image/") or raw[:8] == b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(422, "Signature must be an image.")
+    fname = f"{ref}_signature.png"
+    with open(os.path.join(_signature_dir(), fname), "wb") as fh:
+        fh.write(raw)
+    o.signature = fname
+    o.signed_by = name
+    o.signed_at = datetime.utcnow().isoformat()
+    o.status = "complete"
+    o.progress = 1.0
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+@app.get("/orders/{ref}/signature")
+def get_signature(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """View the captured signature image (staff, the owning company, or the driver)."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+        raise HTTPException(404, "Order not found")
+    if not o.signature:
+        raise HTTPException(404, "No signature on this order yet.")
+    path = os.path.join(_signature_dir(), o.signature)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The signature file is missing.")
+    return FileResponse(path, media_type="image/png",
+                        headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 # ── Per-load batch tickets ───────────────────────────────────────────────────
@@ -1494,7 +1584,7 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     For an EXISTING login, a blank password leaves the current one in place — so
     company/phone/project/role can be updated without resetting the password. A
     new login always requires a 6+ character password."""
-    role = body.role if body.role in ("staff", "worker", "customer") else "worker"
+    role = body.role if body.role in ("staff", "worker", "customer", "driver") else "worker"
     email = (body.email or "").strip().lower()
     if not email:
         raise HTTPException(422, "Email is required")
@@ -1503,6 +1593,7 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     project = (body.project or "").strip() or None
     # Workers AND company admins (customer) MUST belong to a real company — that's
     # what scopes their view. Only the full operator (staff) has no company.
+    # A 'driver' has no company; `company` instead holds their NAME (matches Order.driver).
     cust_id = None
     company = None
     if role in ("worker", "customer"):
@@ -1511,6 +1602,10 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
             raise HTTPException(422, "Pick the company this person belongs to")
         cust_id = cust.id
         company = cust.name            # stored for easy display in the list
+    elif role == "driver":
+        company = (body.company or "").strip()    # the driver's name, used to match deliveries
+        if not company:
+            raise HTTPException(422, "Enter the driver's name (must match the name on their orders)")
     u = s.exec(select(User).where(User.email == email)).first()
     if u:
         if pw:                                   # only reset the password when one is supplied
@@ -1541,7 +1636,7 @@ def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_sess
     """All logins — operators (staff), company admins (customer), and workers
     (full staff only). For company-scoped logins, `company` is their customer name."""
     out = []
-    for u in s.exec(select(User).where(User.role.in_(("staff", "worker", "customer")))).all():
+    for u in s.exec(select(User).where(User.role.in_(("staff", "worker", "customer", "driver")))).all():
         company = u.company
         if u.customer_id and not company:   # customer logins made via the Customers tab have no stored company name
             c = s.get(Customer, u.customer_id)
@@ -1557,7 +1652,7 @@ def delete_staff(email: str, user: User = Depends(require_finance), s: Session =
     Can't delete your own account."""
     target = (email or "").strip().lower()
     u = s.exec(select(User).where(User.email == target)).first()
-    if not u or u.role not in ("staff", "worker", "customer"):
+    if not u or u.role not in ("staff", "worker", "customer", "driver"):
         raise HTTPException(404, "Login not found")
     if u.id == user.id:
         raise HTTPException(409, "You can't remove your own login")

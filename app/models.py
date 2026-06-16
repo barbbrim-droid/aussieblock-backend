@@ -12,9 +12,11 @@ class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(index=True, unique=True)
     password_hash: str
-    role: str = "customer"                       # "customer" | "staff" | "worker"
+    role: str = "customer"                       # "customer" | "staff" | "worker" | "driver"
     customer_id: Optional[int] = Field(default=None, foreign_key="customer.id")
     phone: Optional[str] = None                  # for worker logins, so they can be texted their login
+    # For a "driver" login, `company` holds the driver's NAME as it appears in
+    # Order.driver (e.g. "Rodney") — that's how their deliveries are matched.
     company: Optional[str] = None                # worker's employer / who they work for (label only, not access)
     project: Optional[str] = None                # worker's current project/job (label only)
 
@@ -86,6 +88,10 @@ class Order(SQLModel, table=True):
     prepay_amount: Optional[float] = None       # load total staff set
     prepay_invoice_id: Optional[str] = None     # QuickBooks invoice created for the prepayment
     prepaid: bool = False
+    # Proof of delivery — the customer's on-site sign-off captured by the driver.
+    signed_by: Optional[str] = None             # printed name of who signed for it
+    signature: Optional[str] = None             # stored signature image filename
+    signed_at: Optional[str] = None             # ISO timestamp of the sign-off
 
 
 class Invoice(SQLModel, table=True):

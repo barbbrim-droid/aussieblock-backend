@@ -108,3 +108,13 @@ def require_finance(user: User = Depends(get_current_user)) -> User:
     if user.role != "staff":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Financial access is restricted to approved staff")
     return user
+
+
+# A "driver" login is one of Aussieblock's own drivers on the truck tablet: they
+# see their assigned deliveries, the batch ticket, and capture the customer's
+# sign-off. No board, no billing, no other companies.
+def require_driver(user: User = Depends(get_current_user)) -> User:
+    """Truck-tablet (driver) access only."""
+    if user.role != "driver":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Driver access required")
+    return user
