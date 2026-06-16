@@ -113,7 +113,10 @@ class CodIn(BaseModel):
 
 class ChargeIn(BaseModel):
     amount: float | None = None
-from .integrations.onestep_gps import gps_poll_loop, arrival_pending, learn_site_location
+from .integrations.onestep_gps import (
+    gps_poll_loop, arrival_pending, learn_site_location,
+    pin_job_location, pin_load_job_location,
+)
 from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv, veh_keys
 from .integrations.fuel_email import fuel_email_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
@@ -522,6 +525,14 @@ def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staf
             raise HTTPException(409, "Assign a truck to this load first")
         ld.status = st
         ld.progress = _STATUS_PROGRESS.get(st, ld.progress)
+        # On site: learn the truck's real parked spot as this job's pin and anchor
+        # the return-trip check to it, so a wrongly-geocoded address doesn't read as
+        # the load having "left the job" and flip it straight to 'returning'.
+        if st == "onsite" and ld.truck_id:
+            truck = s.get(Truck, ld.truck_id)
+            if truck and truck.lat is not None:
+                learn_site_location(o, truck)
+                pin_load_job_location(ld.id, truck)
     s.add(ld); s.commit()
     _rollup_pour(o, s)
     return _order_json(o, s)
@@ -1979,6 +1990,10 @@ def set_order_status(
         truck = s.get(Truck, o.truck_id)
         if truck and truck.lat is not None:
             learn_site_location(o, truck)
+            # Pin the return-trip anchor to where the truck ACTUALLY is right now —
+            # not the address geocode — so the next GPS poll doesn't read a wrongly
+            # geocoded site as "left the job" and flip the order to 'returning'.
+            pin_job_location(o.id, truck)
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 

@@ -164,6 +164,25 @@ _job_loc: dict = {}   # order_id -> {"lat","lng","since"} pinned when it went On
 _load_job_loc: dict = {}   # load_id -> {"lat","lng","since"} pinned when a pour load went On site
 
 
+def pin_job_location(order_id: int, truck) -> None:
+    """Anchor an order's job location to the truck's CURRENT GPS spot. Called when
+    dispatch MANUALLY confirms On site — the authoritative "the truck is here now"
+    signal. This overrides the (often inaccurate) address geocode so the return-trip
+    check measures how far the truck has moved from where it actually is, not from a
+    bad address pin — otherwise a truck parked at a wrongly-geocoded site reads as
+    having "left" and the order flips straight to 'returning'."""
+    if truck is None or truck.lat is None or truck.lng is None or order_id is None:
+        return
+    _job_loc[order_id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+
+
+def pin_load_job_location(load_id: int, truck) -> None:
+    """Same as `pin_job_location`, for one load within a continuous pour."""
+    if truck is None or truck.lat is None or truck.lng is None or load_id is None:
+        return
+    _load_job_loc[load_id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
+
+
 def _rollup(s: Session, order_id: int) -> None:
     """Re-roll a pour's umbrella status/progress after one of its loads advances.
     Lazy import keeps main <-> onestep_gps free of a circular import at load time."""
