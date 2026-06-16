@@ -1093,6 +1093,35 @@ def get_signature(ref: str, user: User = Depends(get_current_user), s: Session =
                         headers={"Cache-Control": "no-store, must-revalidate"})
 
 
+@app.get("/orders/{ref}/batch-ticket-images")
+def batch_ticket_images(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """The batch ticket rendered to PNG page images (data URLs) — for showing it
+    INSIDE the app (an <iframe> PDF won't render on Android; images always do).
+    Staff, the owning company, or the assigned driver."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+        raise HTTPException(404, "Order not found")
+    if not o.batch_ticket:
+        raise HTTPException(404, "No batch ticket for this order yet.")
+    path = os.path.join(_batch_ticket_dir(), o.batch_ticket)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The batch ticket file is missing.")
+    import base64
+    pages = []
+    if o.batch_ticket.lower().endswith(".pdf"):
+        import fitz
+        doc = fitz.open(path)
+        for pg in doc:
+            png = pg.get_pixmap(dpi=110).tobytes("png")
+            pages.append("data:image/png;base64," + base64.b64encode(png).decode())
+        doc.close()
+    else:   # an image ticket (no branding) — serve it as a single page
+        with open(path, "rb") as fh:
+            mt = _media_type(path)
+            pages.append(f"data:{mt};base64," + base64.b64encode(fh.read()).decode())
+    return {"pages": pages}
+
+
 # ── Per-load batch tickets ───────────────────────────────────────────────────
 # A continuous pour delivers in ~10-yd loads, each on its own truck — so each
 # load gets its own paper batch ticket. These mirror the order-level endpoints
