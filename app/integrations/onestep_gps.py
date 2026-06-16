@@ -103,6 +103,57 @@ def _update_stop_state(truck: Truck) -> None:
         _stop_state[truck.id] = {"lat": truck.lat, "lng": truck.lng, "since": datetime.utcnow()}
 
 
+def _stopped_seconds(truck_id) -> float:
+    """How long the truck has been parked at its current spot (0 if moving/unknown)."""
+    st = _stop_state.get(truck_id)
+    if not st:
+        return 0.0
+    return (datetime.utcnow() - st["since"]).total_seconds()
+
+
+def _norm_site(addr) -> str:
+    """Normalize a job address for matching (so the same site learns its location)."""
+    return "".join(ch for ch in str(addr or "").lower() if ch.isalnum())
+
+
+def learn_site_location(o, truck) -> None:
+    """Remember where the truck actually parked as THIS order's job location — the
+    accurate pin that replaces the address geocode for arrival detection and is
+    reused for the same customer+site next time. Only sets it once."""
+    if o is None or truck is None or truck.lat is None or truck.lng is None:
+        return
+    if o.site_lat is None or o.site_lng is None:
+        o.site_lat, o.site_lng = truck.lat, truck.lng
+
+
+def _learned_site(s: Session, o):
+    """A previously-learned pin for this customer+site, from an earlier order."""
+    if not o or not o.customer_id:
+        return None
+    key = _norm_site(o.site)
+    if not key:
+        return None
+    prior = s.exec(
+        select(Order).where(Order.customer_id == o.customer_id,
+                            Order.site_lat.is_not(None)).order_by(Order.id.desc())
+    ).all()
+    for r in prior:
+        if r.id != o.id and _norm_site(r.site) == key:
+            return (r.site_lat, r.site_lng)
+    return None
+
+
+def _site_center(s: Session, o):
+    """Best-known job location, sync: this order's learned pin → a learned pin from
+    a past order to the same customer+site → the cached geocode. None if unknown."""
+    if o.site_lat is not None and o.site_lng is not None:
+        return (o.site_lat, o.site_lng)
+    learned = _learned_site(s, o)
+    if learned:
+        return learned
+    return _geo_cache.get(o.site)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # RETURN TRIP — once an order is On site, we pin the job location (the truck's
 # GPS spot at that moment — no address geocoding needed). When the truck then
@@ -133,10 +184,10 @@ def _advance_return(s: Session, truck: Truck) -> None:
         if o.status in ("onsite", "pouring"):
             st = _job_loc.get(o.id)
             if st is None:
-                # Anchor the job location at the geocoded site centre (cached when the
-                # truck entered the geofence), NOT the truck's spot at the geofence
-                # edge — else the final drive-in to park reads as "leaving the site".
-                site = _geo_cache.get(o.site)
+                # Anchor the job location at the known site centre (learned pin first,
+                # else geocode), NOT the truck's spot at the geofence edge — else the
+                # final drive-in to park reads as "leaving the site".
+                site = _site_center(s, o)
                 _job_loc[o.id] = {"lat": site[0] if site else truck.lat,
                                   "lng": site[1] if site else truck.lng,
                                   "since": datetime.utcnow()}
@@ -208,7 +259,7 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
                 # Anchor at the geocoded site centre, not the geofence-edge spot (see
                 # _advance_return) — so arriving and parking isn't read as leaving.
                 o = s.get(Order, ld.order_id)
-                site = _geo_cache.get(o.site) if o else None
+                site = _site_center(s, o) if o else None
                 _load_job_loc[ld.id] = {"lat": site[0] if site else truck.lat,
                                         "lng": site[1] if site else truck.lng,
                                         "since": datetime.utcnow()}
@@ -309,7 +360,7 @@ async def _update_enroute_progress() -> None:
             truck = s.get(Truck, o.truck_id)
             if not truck or truck.lat is None:
                 continue
-            site = await _geocode(o.site)
+            site = _site_center(s, o) or await _geocode(o.site)
             if not site:
                 continue
             total = _haversine_m(config.PLANT_LAT, config.PLANT_LNG, site[0], site[1])
@@ -339,15 +390,19 @@ async def _advance_on_site_arrival() -> None:
             truck = s.get(Truck, o.truck_id)
             if not truck or truck.lat is None or truck.lng is None:
                 continue
-            site = await _geocode(o.site)
+            site = _site_center(s, o) or await _geocode(o.site)
             if not site:
                 continue
-            if _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M:
+            within = _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M
+            # Must be STOPPED in the geofence (not just driving through it) — a
+            # drive-by never accrues stop time, so it no longer trips On site.
+            if within and _stopped_seconds(truck.id) >= config.SITE_ARRIVAL_STOP_SECONDS:
                 o.status = "onsite"
                 o.progress = 1.0
+                learn_site_location(o, truck)   # pin the real parked spot for next time
                 s.add(o)
                 changed = True
-                print(f"Geofence: {truck.label} within {config.JOB_GEOFENCE_M:.0f}m of {o.ref} site -> On site.")
+                print(f"Geofence+stop: {truck.label} parked at {o.ref} site -> On site.")
         if changed:
             s.commit()
 
@@ -367,15 +422,17 @@ async def _advance_loads_on_site_arrival() -> None:
             o = s.get(Order, ld.order_id)
             if not o:
                 continue
-            site = await _geocode(o.site)
+            site = _site_center(s, o) or await _geocode(o.site)
             if not site:
                 continue
-            if _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M:
+            within = _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M
+            if within and _stopped_seconds(truck.id) >= config.SITE_ARRIVAL_STOP_SECONDS:
                 ld.status = "onsite"
                 ld.progress = 1.0
-                s.add(ld)
+                learn_site_location(o, truck)   # learn the job pin from the parked truck
+                s.add(ld); s.add(o)
                 changed = True
-                print(f"Geofence: {truck.label} within {config.JOB_GEOFENCE_M:.0f}m of {o.ref} site -> load #{ld.seq} On site.")
+                print(f"Geofence+stop: {truck.label} parked at {o.ref} -> load #{ld.seq} On site.")
                 _rollup(s, o.id)
         if changed:
             s.commit()

@@ -113,7 +113,7 @@ class CodIn(BaseModel):
 
 class ChargeIn(BaseModel):
     amount: float | None = None
-from .integrations.onestep_gps import gps_poll_loop, arrival_pending
+from .integrations.onestep_gps import gps_poll_loop, arrival_pending, learn_site_location
 from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv, veh_keys
 from .integrations.fuel_email import fuel_email_loop
 from .integrations.moby_mix_csv import import_orders_from_csv
@@ -242,6 +242,8 @@ def _order_json(o: Order, s: Session) -> dict:
         "admixtures": o.admixtures,
         "use_for": o.use_for,
         "project": o.project,
+        "site_lat": o.site_lat,
+        "site_lng": o.site_lng,
         "has_batch_ticket": bool(o.batch_ticket),
         "has_print_ticket": bool(o.batch_ticket_print),
         "has_original": _has_original(o.ref, o.batch_ticket),
@@ -1971,6 +1973,12 @@ def set_order_status(
     o.status = status
     if status in _STATUS_PROGRESS:
         o.progress = _STATUS_PROGRESS[status]
+    # When dispatch confirms On site, LEARN where the truck is parked as this job's
+    # location — replaces the inaccurate address geocode and is reused next time.
+    if status == "onsite" and o.truck_id:
+        truck = s.get(Truck, o.truck_id)
+        if truck and truck.lat is not None:
+            learn_site_location(o, truck)
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 

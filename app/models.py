@@ -70,6 +70,11 @@ class Order(SQLModel, table=True):
     admixtures: Optional[str] = None            # comma-joined, e.g. "Fiber, Color"
     hauler: Optional[str] = None                # trucking co. hauling the load (LGTZ/P&L/RAY)
     mileage: Optional[float] = None             # road miles yard→job (auto, staff-overridable)
+    # Exact job-site coordinates, LEARNED from where the truck actually parked when
+    # the order went On site (overrides the often-inaccurate address geocode for
+    # arrival detection; reused for the same customer+site on future orders).
+    site_lat: Optional[float] = None
+    site_lng: Optional[float] = None
     price_override: Optional[float] = None      # staff-set custom $/yd unit price (any status, incl. complete)
     use_for: Optional[str] = None               # what the concrete is for (slab, curbs, …)
     project: Optional[str] = None               # optional project / job name or reference

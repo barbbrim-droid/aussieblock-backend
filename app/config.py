@@ -160,5 +160,9 @@ RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "400"))
 # 300 m radius absorbs small address/geocode inaccuracies; stop-detection above
 # still backs up a wildly-wrong address the truck never gets within range of.
 JOB_GEOFENCE_M = float(os.getenv("JOB_GEOFENCE_M", "300"))
+# A truck must be STOPPED within the job geofence this long before it auto-advances
+# to "On site" — so a truck merely DRIVING PAST the job (it never stops) no longer
+# trips it, and a truck that overshoots then comes back only counts once it parks.
+SITE_ARRIVAL_STOP_SECONDS = int(os.getenv("SITE_ARRIVAL_STOP_SECONDS", "90"))
 # Once On site this long (and still at the job), the order auto-advances to "pouring".
 POUR_DELAY_SECONDS = int(os.getenv("POUR_DELAY_SECONDS", "300"))   # 5 minutes on site
