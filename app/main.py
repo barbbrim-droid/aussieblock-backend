@@ -757,6 +757,8 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
                 s.add(o); s.commit(); s.refresh(o)
         except Exception as e:
             print("batch-ticket branding failed:", e)
+    # If this order is already signed, stamp the signature onto the new ticket.
+    _stamp_signature_on_ticket(o, s)
     return _order_json(o, s)
 
 
@@ -959,6 +961,60 @@ def _signature_dir() -> str:
     return d
 
 
+def _stamp_signature_on_ticket(o: Order, s: Session) -> None:
+    """Append a 'Delivery Confirmation' page (water added on site + the customer
+    signature) to the order's batch-ticket PDF when both the PDF and a signature
+    exist. Called on sign-off AND on each batch-ticket upload, so the uploaded
+    ticket always carries the signature. Best-effort — never raises into the
+    request. Idempotent in practice: uploads rewrite the PDF before stamping, and
+    an order can only be signed once."""
+    if not (o.batch_ticket and o.batch_ticket.lower().endswith(".pdf") and o.signature):
+        return
+    pdf_path = os.path.join(_batch_ticket_dir(), o.batch_ticket)
+    sig_path = os.path.join(_signature_dir(), o.signature)
+    if not (os.path.exists(pdf_path) and os.path.exists(sig_path)):
+        return
+    try:
+        import fitz   # PyMuPDF
+        cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+        truck = s.get(Truck, o.truck_id) if o.truck_id else None
+        signed_at = o.signed_at or ""
+        try:
+            signed_at = datetime.fromisoformat(o.signed_at).strftime("%b %d, %Y %I:%M %p UTC")
+        except (ValueError, TypeError):
+            pass
+        navy, grey = (0.05, 0.07, 0.09), (0.45, 0.45, 0.5)
+        doc = fitz.open(pdf_path)
+        page = doc.new_page(width=612, height=792)   # US Letter
+        m, y = 54, 70
+        page.insert_text((m, y), "DELIVERY CONFIRMATION", fontsize=18, fontname="hebo", color=navy); y += 16
+        page.insert_text((m, y), f"Aussieblock   ·   {o.ref}", fontsize=10, color=grey); y += 32
+        rows = [
+            ("Customer", cust), ("Job site", o.site), ("Project", o.project),
+            ("Mix", o.mix), ("Quantity", f"{o.qty} yd" if o.qty else None),
+            ("Driver", o.driver), ("Truck", truck.label if truck else None),
+            ("Water added on site", f"{o.water_added} gal" if o.water_added else None),
+            ("Signed by", o.signed_by), ("Signed at", signed_at),
+        ]
+        for label, val in rows:
+            if not val:
+                continue
+            page.insert_text((m, y), label.upper(), fontsize=8, color=grey)
+            page.insert_text((m + 170, y), str(val), fontsize=11, color=(0, 0, 0))
+            y += 22
+        y += 16
+        page.insert_text((m, y), "CUSTOMER SIGNATURE", fontsize=8, color=grey); y += 12
+        rect = fitz.Rect(m, y, m + 340, y + 150)
+        page.draw_rect(rect, color=(0.8, 0.8, 0.8), width=0.6)
+        page.insert_image(rect, filename=sig_path, keep_proportion=True)
+        tmp = pdf_path + ".tmp"
+        doc.save(tmp, garbage=3, deflate=True)
+        doc.close()
+        os.replace(tmp, pdf_path)
+    except Exception as e:   # never let stamping break the request
+        print("signature stamp failed:", e)
+
+
 @app.get("/driver/orders")
 def driver_orders(user: User = Depends(require_driver), s: Session = Depends(get_session)):
     """Today's deliveries assigned to this driver (newest scheduled first). Matched
@@ -1011,6 +1067,7 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
     o.status = "complete"
     o.progress = 1.0
     s.add(o); s.commit(); s.refresh(o)
+    _stamp_signature_on_ticket(o, s)   # add the signature to the batch-ticket PDF if one's uploaded
     return _order_json(o, s)
 
 
