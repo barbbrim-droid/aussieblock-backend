@@ -1050,14 +1050,14 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
                          user: User = Depends(require_driver),
                          s: Session = Depends(get_session)):
     """Driver captures the customer's signature on delivery: store the signature
-    image + printed name + water added on site + timestamp and mark the order
-    complete (proof of delivery). Driver may only sign off their own assigned,
-    active orders."""
+    image + printed name + water added on site + timestamp. Does NOT complete the
+    order — completing is the batch-plant operator's call; this just records the
+    sign-off (proof of delivery). Driver may only sign their own assigned order."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     if not o or not _is_driver_of(o, user):
         raise HTTPException(404, "Order not found")
-    if o.status in ("requested", "complete"):
-        raise HTTPException(409, "This delivery can't be signed off right now.")
+    if o.status == "requested":
+        raise HTTPException(409, "This delivery hasn't been confirmed yet.")
     name = (signed_by or "").strip()
     if not name:
         raise HTTPException(422, "Enter who signed for the delivery.")
@@ -1074,8 +1074,7 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
     o.signed_by = name
     o.water_added = (water_added or "").strip() or None
     o.signed_at = datetime.utcnow().isoformat()
-    o.status = "complete"
-    o.progress = 1.0
+    # status is left as-is — the operator completes the order when they decide.
     s.add(o); s.commit(); s.refresh(o)
     _stamp_signature_on_ticket(o, s)   # add the signature to the batch-ticket PDF if one's uploaded
     return _order_json(o, s)
