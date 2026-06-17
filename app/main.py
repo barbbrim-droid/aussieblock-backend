@@ -33,7 +33,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -679,6 +679,257 @@ def delete_doc(doc_id: int, _: User = Depends(require_staff), s: Session = Depen
             pass
     s.delete(d); s.commit()
     return {"ok": True, "removed": doc_id}
+
+
+# ── Cement & Slag tracker ────────────────────────────────────────────────────
+# Two pieces: (1) a receiving log of incoming cement/slag loads, to reconcile
+# against supplier invoices; (2) a silo gauge — on-hand = opening + received −
+# used, where "used" is completed-order yards × the mix design's lb/yd ÷ 2000.
+# Operator/office only (require_staff). Silos seed themselves on first read.
+TONS_PER_LB = 1 / 2000.0
+# Ballpark cementitious content per cubic yard (lb), ~25% slag replacement. These
+# are EDITABLE defaults so the gauge works out of the box — the office should set
+# their real numbers in the mix-design editor.
+DEFAULT_MIX_DESIGNS = [
+    {"mix": "3000 PSI", "cement_lb_yd": 376, "slag_lb_yd": 94},
+    {"mix": "3500 PSI", "cement_lb_yd": 413, "slag_lb_yd": 104},
+    {"mix": "4000 PSI", "cement_lb_yd": 451, "slag_lb_yd": 113},
+    {"mix": "4500 PSI", "cement_lb_yd": 480, "slag_lb_yd": 120},
+    {"mix": "5000 PSI", "cement_lb_yd": 508, "slag_lb_yd": 132},
+]
+_MATERIAL_FIELD = {"Portland": "cement_lb_yd", "Slag": "slag_lb_yd"}
+
+
+def _ensure_materials(s: Session) -> None:
+    """Create the Portland & Slag silos and seed default mix designs once. Runs in
+    production too (not gated behind SEED_DEMO); idempotent."""
+    today = _business_today().isoformat()
+    changed = False
+    for name in ("Portland", "Slag"):
+        if not s.exec(select(Material).where(Material.name == name)).first():
+            s.add(Material(name=name, counted_on=today)); changed = True
+    if not s.exec(select(MixDesign)).first():
+        for d in DEFAULT_MIX_DESIGNS:
+            s.add(MixDesign(**d))
+        changed = True
+    if changed:
+        s.commit()
+
+
+def _design_for(mix: str, designs: list):
+    """Best mix-design match for an order's mix string. Exact first, then the
+    longest design whose label is contained (so '4000 PSI · 3/4\" Limestone' maps
+    to '4000 PSI'). None if nothing matches."""
+    m = (mix or "").strip().lower()
+    if not m:
+        return None
+    for d in designs:
+        if d.mix.strip().lower() == m:
+            return d
+    for d in sorted(designs, key=lambda d: -len(d.mix or "")):
+        dm = d.mix.strip().lower()
+        if dm and dm in m:
+            return d
+    return None
+
+
+def _materials_summary(s: Session) -> dict:
+    """Silo levels + reorder flags for every material, plus any completed-order
+    mixes with no design (they contribute 0 to usage until mapped)."""
+    _ensure_materials(s)
+    designs = s.exec(select(MixDesign)).all()
+    mats = s.exec(select(Material)).all()
+    cutoffs = [m.counted_on for m in mats if m.counted_on]
+    earliest = min(cutoffs) if cutoffs else ""
+    # Resolve each completed order once: its tons of cement & slag (0 if unmapped).
+    completed, unmapped = [], {}
+    for o in s.exec(select(Order).where(Order.status == "complete")).all():
+        yds = pricing._num(_billable_yards(o, s))
+        if yds <= 0:
+            continue
+        d = _design_for(o.mix, designs)
+        done = o.completed_at or ""
+        completed.append({"done": done,
+                          "cement": yds * (d.cement_lb_yd or 0) * TONS_PER_LB if d else 0.0,
+                          "slag": yds * (d.slag_lb_yd or 0) * TONS_PER_LB if d else 0.0})
+        if not d and (not earliest or done >= earliest):
+            unmapped[o.mix] = round(unmapped.get(o.mix, 0.0) + yds, 2)
+    key_for = {"Portland": "cement", "Slag": "slag"}
+    items = []
+    for m in mats:
+        cutoff = m.counted_on or ""
+        received = sum((r.tons or 0) for r in s.exec(
+            select(MaterialReceipt).where(MaterialReceipt.material_id == m.id)).all()
+            if (r.received_on or "") >= cutoff)
+        used = 0.0
+        key = key_for.get(m.name)
+        if cutoff and key:
+            used = sum(c[key] for c in completed if c["done"] >= cutoff)
+        on_hand = (m.opening_tons or 0) + received - used
+        items.append({
+            "id": m.id, "name": m.name,
+            "capacity_tons": m.capacity_tons, "reorder_tons": m.reorder_tons,
+            "opening_tons": m.opening_tons, "counted_on": m.counted_on,
+            "received_tons": round(received, 2), "used_tons": round(used, 2),
+            "on_hand_tons": round(on_hand, 2),
+            "low": bool((m.reorder_tons or 0) > 0 and on_hand <= m.reorder_tons),
+            "pct": (round(max(0.0, min(1.0, on_hand / m.capacity_tons)), 3)
+                    if m.capacity_tons else None),
+        })
+    return {"materials": items,
+            "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())]}
+
+
+def _receipt_json(r: MaterialReceipt, mat_name: str) -> dict:
+    return {"id": r.id, "material_id": r.material_id, "material": mat_name,
+            "received_on": r.received_on, "supplier": r.supplier, "tons": r.tons,
+            "ticket_no": r.ticket_no, "invoice_no": r.invoice_no,
+            "unit_cost": r.unit_cost, "total_cost": r.total_cost,
+            "invoice_matched": r.invoice_matched, "notes": r.notes}
+
+
+@app.get("/materials")
+def get_materials(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Silo levels (on-hand, capacity, reorder flag) for cement & slag (staff)."""
+    return _materials_summary(s)
+
+
+class MaterialIn(BaseModel):
+    capacity_tons: Optional[float] = None
+    reorder_tons: Optional[float] = None
+    opening_tons: Optional[float] = None
+    counted_on: Optional[str] = None             # ISO date
+
+
+@app.put("/materials/{material_id}")
+def update_material(material_id: int, body: MaterialIn, _: User = Depends(require_staff),
+                    s: Session = Depends(get_session)):
+    """Set a silo's capacity, reorder point, and opening balance/date (staff)."""
+    m = s.get(Material, material_id)
+    if not m:
+        raise HTTPException(404, "Material not found")
+    for f in ("capacity_tons", "reorder_tons", "opening_tons", "counted_on"):
+        v = getattr(body, f)
+        if v is not None:
+            setattr(m, f, v)
+    s.add(m); s.commit()
+    return _materials_summary(s)
+
+
+@app.get("/materials/receipts")
+def list_receipts(material_id: Optional[int] = None, _: User = Depends(require_staff),
+                  s: Session = Depends(get_session)):
+    """The receiving log — incoming cement/slag loads, newest first (staff)."""
+    _ensure_materials(s)
+    names = {m.id: m.name for m in s.exec(select(Material)).all()}
+    q = select(MaterialReceipt)
+    if material_id is not None:
+        q = q.where(MaterialReceipt.material_id == material_id)
+    rows = s.exec(q).all()
+    rows.sort(key=lambda r: (r.received_on or "", r.id or 0), reverse=True)
+    return [_receipt_json(r, names.get(r.material_id, "")) for r in rows]
+
+
+class ReceiptIn(BaseModel):
+    material_id: int
+    received_on: str                             # ISO date
+    tons: float
+    supplier: Optional[str] = None
+    ticket_no: Optional[str] = None
+    invoice_no: Optional[str] = None
+    unit_cost: Optional[float] = None
+    total_cost: Optional[float] = None
+    invoice_matched: bool = False
+    notes: Optional[str] = None
+
+
+@app.post("/materials/receipts")
+def add_receipt(body: ReceiptIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Log an incoming cement/slag load received from a supplier (staff)."""
+    if not s.get(Material, body.material_id):
+        raise HTTPException(404, "Material not found")
+    if body.tons <= 0:
+        raise HTTPException(422, "Tons must be a positive number")
+    data = body.model_dump()
+    # default the line total to tons × $/ton when a unit cost was given but no total
+    if data.get("total_cost") is None and data.get("unit_cost") is not None:
+        data["total_cost"] = round(body.tons * body.unit_cost, 2)
+    r = MaterialReceipt(**data)
+    s.add(r); s.commit()
+    return _materials_summary(s)
+
+
+class ReceiptPatch(BaseModel):
+    received_on: Optional[str] = None
+    tons: Optional[float] = None
+    supplier: Optional[str] = None
+    ticket_no: Optional[str] = None
+    invoice_no: Optional[str] = None
+    unit_cost: Optional[float] = None
+    total_cost: Optional[float] = None
+    invoice_matched: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+@app.patch("/materials/receipts/{receipt_id}")
+def edit_receipt(receipt_id: int, body: ReceiptPatch, _: User = Depends(require_staff),
+                 s: Session = Depends(get_session)):
+    """Edit a logged receipt — correct figures or tick 'invoice matched' (staff)."""
+    r = s.get(MaterialReceipt, receipt_id)
+    if not r:
+        raise HTTPException(404, "Receipt not found")
+    for f, v in body.model_dump(exclude_unset=True).items():
+        setattr(r, f, v)
+    s.add(r); s.commit()
+    names = {m.id: m.name for m in s.exec(select(Material)).all()}
+    return _receipt_json(r, names.get(r.material_id, ""))
+
+
+@app.delete("/materials/receipts/{receipt_id}")
+def delete_receipt(receipt_id: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove a logged receipt (staff)."""
+    r = s.get(MaterialReceipt, receipt_id)
+    if r:
+        s.delete(r); s.commit()
+    return {"ok": True, "removed": receipt_id}
+
+
+@app.get("/materials/mix-designs")
+def list_mix_designs(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """The cement & slag lb/yd per mix that drive silo draw-down (staff)."""
+    _ensure_materials(s)
+    rows = sorted(s.exec(select(MixDesign)).all(), key=lambda d: d.mix)
+    return [{"id": d.id, "mix": d.mix, "cement_lb_yd": d.cement_lb_yd, "slag_lb_yd": d.slag_lb_yd}
+            for d in rows]
+
+
+class MixDesignIn(BaseModel):
+    mix: str
+    cement_lb_yd: float = 0.0
+    slag_lb_yd: float = 0.0
+
+
+class MixDesignsIn(BaseModel):
+    designs: list[MixDesignIn] = []
+
+
+@app.put("/materials/mix-designs")
+def save_mix_designs(body: MixDesignsIn, _: User = Depends(require_staff),
+                     s: Session = Depends(get_session)):
+    """Upsert the mix-design table by mix name; rows omitted are left as-is (staff)."""
+    for d in body.designs:
+        name = d.mix.strip()
+        if not name:
+            continue
+        row = s.exec(select(MixDesign).where(MixDesign.mix == name)).first()
+        if row:
+            row.cement_lb_yd = d.cement_lb_yd
+            row.slag_lb_yd = d.slag_lb_yd
+        else:
+            row = MixDesign(mix=name, cement_lb_yd=d.cement_lb_yd, slag_lb_yd=d.slag_lb_yd)
+        s.add(row)
+    s.commit()
+    return list_mix_designs(s=s)
 
 
 class BatchDataIn(BaseModel):
@@ -1984,6 +2235,10 @@ def set_order_status(
     o.status = status
     if status in _STATUS_PROGRESS:
         o.progress = _STATUS_PROGRESS[status]
+    # Stamp the completion date the first time it's marked complete — drives the
+    # cement/slag silo draw-down (usage counts orders completed since the count).
+    if status == "complete" and not o.completed_at:
+        o.completed_at = _business_today().isoformat()
     # When dispatch confirms On site, LEARN where the truck is parked as this job's
     # location — replaces the inaccurate address geocode and is reused next time.
     if status == "onsite" and o.truck_id:

@@ -98,6 +98,7 @@ class Order(SQLModel, table=True):
     signature: Optional[str] = None             # stored signature image filename
     signed_at: Optional[str] = None             # ISO timestamp of the sign-off
     water_added: Optional[str] = None           # gallons of water added on site (driver records at sign-off)
+    completed_at: Optional[str] = None           # ISO date the order was marked complete (drives material draw-down)
 
 
 class Invoice(SQLModel, table=True):
@@ -164,3 +165,42 @@ class Doc(SQLModel, table=True):
     title: str
     filename: str = ""                 # stored file on the persistent disk (knowledge/{id}.pdf)
     uploaded_at: str = ""              # ISO date for display/sort
+
+
+class Material(SQLModel, table=True):
+    """A cementitious raw material kept in a silo (Portland cement, Slag). On-hand
+    tons = opening balance + tons received − tons used by completed orders, all
+    counted from `counted_on`. The fill gauge + reorder alert read off this."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)   # "Portland" | "Slag"
+    capacity_tons: float = 0.0                   # silo capacity (tons) — for the fill gauge
+    reorder_tons: float = 0.0                    # alert when on-hand falls to/below this
+    opening_tons: float = 0.0                    # silo content when counting started
+    counted_on: Optional[str] = None             # ISO date the opening balance was taken (usage/receipts count from here)
+
+
+class MaterialReceipt(SQLModel, table=True):
+    """One incoming load of cement/slag received from a supplier — the record you
+    reconcile against the supplier's invoice."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    material_id: int = Field(foreign_key="material.id")
+    received_on: str                             # ISO date received
+    supplier: Optional[str] = None
+    tons: float = 0.0
+    ticket_no: Optional[str] = None              # scale/delivery ticket number
+    invoice_no: Optional[str] = None             # supplier invoice number
+    unit_cost: Optional[float] = None            # $/ton (optional)
+    total_cost: Optional[float] = None           # invoice line total (optional)
+    invoice_matched: bool = False                # reconciled against the supplier invoice
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MixDesign(SQLModel, table=True):
+    """Cementitious content per cubic yard for a mix — drives the silo draw-down
+    (tons used = order yards × lb/yd ÷ 2000). Editable by the office; a mix with no
+    row here simply contributes 0 to usage (surfaced as 'unmapped' in the UI)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    mix: str = Field(index=True, unique=True)    # e.g. "3500 PSI"
+    cement_lb_yd: float = 0.0                    # Portland cement, lb per cubic yard
+    slag_lb_yd: float = 0.0                      # slag, lb per cubic yard

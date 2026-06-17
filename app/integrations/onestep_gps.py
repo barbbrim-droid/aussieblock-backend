@@ -223,6 +223,8 @@ def _advance_return(s: Session, truck: Truck) -> None:
             if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
                 o.status = "complete"
                 o.progress = 1.0
+                if not o.completed_at:
+                    o.completed_at = datetime.utcnow().date().isoformat()
                 _job_loc.pop(o.id, None)
                 s.add(o)
                 print(f"Back at yard: {truck.label} -> order {o.ref} complete.")
