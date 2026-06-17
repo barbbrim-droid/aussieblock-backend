@@ -203,7 +203,7 @@ def _to_generator_data(p, cfg):
     has_fiber_row = any("fiber" in (mm[0] or "").lower() or "matrix" in (mm[0] or "").lower() for mm in mats)
     if re.search(r"fiber", order_adx, re.I) and not has_fiber_row and yards:
         dm = re.search(r"fiber[^\d]*([\d.]+)\s*lb", order_adx, re.I)
-        dose = float(dm.group(1)) if dm else 3.0
+        dose = float(dm.group(1)) if dm else 4.5   # plant standard 4.5 lb/yd
         lim, lab = _astm("Mac Matrix Fiber", "lb", cfg)
         total = dose * yards
         # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (MAC 360 FF macrofiber)
