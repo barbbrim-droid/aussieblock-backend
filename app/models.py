@@ -76,6 +76,7 @@ class Order(SQLModel, table=True):
     site_lat: Optional[float] = None
     site_lng: Optional[float] = None
     price_override: Optional[float] = None      # staff-set custom $/yd unit price (any status, incl. complete)
+    fiber_rate: Optional[float] = None          # staff-set custom fiber $/lb for this order (blank = price-sheet rate)
     use_for: Optional[str] = None               # what the concrete is for (slab, curbs, …)
     project: Optional[str] = None               # optional project / job name or reference
     batch_ticket: Optional[str] = None          # stored PDF filename once a batch ticket is uploaded

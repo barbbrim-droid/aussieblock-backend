@@ -35,7 +35,7 @@ _COLUMN_MIGRATIONS = {
     "material": {"unit": "VARCHAR DEFAULT 'ton'", "cost_rate": "FLOAT DEFAULT 0", "track_inventory": "BOOLEAN DEFAULT 1"},
     "order": {
         "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR", "use_for": "VARCHAR", "project": "VARCHAR", "batch_ticket": "VARCHAR", "batch_data": "VARCHAR", "batch_ticket_print": "VARCHAR", "archived": "BOOLEAN DEFAULT 0", "driver": "VARCHAR",
-        "hauler": "VARCHAR", "mileage": "FLOAT", "price_override": "FLOAT",
+        "hauler": "VARCHAR", "mileage": "FLOAT", "price_override": "FLOAT", "fiber_rate": "FLOAT",
         "prepay_required": "BOOLEAN DEFAULT 0", "prepay_amount": "FLOAT",
         "prepay_invoice_id": "VARCHAR", "prepaid": "BOOLEAN DEFAULT 0",
         "signed_by": "VARCHAR", "signature": "VARCHAR", "signed_at": "VARCHAR", "water_added": "VARCHAR",

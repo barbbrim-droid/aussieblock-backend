@@ -172,7 +172,8 @@ def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):
 
 
 def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
-                    materials=None, order_admixtures: str = "", unit_override=None) -> dict:
+                    materials=None, order_admixtures: str = "", unit_override=None,
+                    fiber_rate_override=None) -> dict:
     """Compute the ticket pricing block. Quantities are yards; load_qty is this
     load (the ticket), order_qty is the whole order (for the short-load rule).
     unit_override, when set, forces the $/yd unit price (a staff per-order price)."""
@@ -199,8 +200,27 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
 
     # admixture add-ons (Fiber $/lb, Master Set Delvo $/yd, etc.)
     adx_lines = []
+    # Fiber is handled on its own so a per-order rate (fiber_rate_override) can win
+    # over the price-sheet $/lb. The lbs/yd dosage comes off the order itself.
+    sheet_fiber_rate, fiber_name = 0.0, "Fiber"
+    for adx in sheet.get("admixtures", []):
+        if "fiber" in (adx.get("name") or "").lower():
+            sheet_fiber_rate = _num(adx.get("rate"))
+            fiber_name = (adx.get("name") or "Fiber").strip() or "Fiber"
+            break
+    fiber_rate = (_num(fiber_rate_override) if (fiber_rate_override is not None and _num(fiber_rate_override) > 0)
+                  else sheet_fiber_rate)
+    fiber_lbs_per_yd = _adx_lbs("fiber", order_admixtures, materials)
+    if fiber_lbs_per_yd > 0 and fiber_rate > 0:
+        total_lbs = round(fiber_lbs_per_yd * lq, 2)
+        charge = round(fiber_rate * total_lbs, 2)
+        if charge:
+            adx_lines.append({"label": f"{fiber_name} ({total_lbs:g} lb @ ${fiber_rate:.2f}/lb)", "amount": charge})
+    # all other (non-fiber) admixtures, priced from the sheet
     for adx in sheet.get("admixtures", []):
         nm, rate = (adx.get("name") or "").strip(), _num(adx.get("rate"))
+        if "fiber" in nm.lower():
+            continue   # priced above
         per = (adx.get("per") or "yard").lower()
         if not nm or rate <= 0 or not _adx_present(nm, order_admixtures, materials):
             continue

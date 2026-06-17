@@ -261,6 +261,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "prepaid": o.prepaid,
         "prepay_amount": o.prepay_amount,
         "price_override": o.price_override,
+        "fiber_rate": o.fiber_rate,
         "truck_position": (
             {"lat": truck.lat, "lng": truck.lng, "heading": truck.heading}
             if truck and truck.lat is not None else None
@@ -1288,7 +1289,8 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
     # a single order), falling back to the ordered qty — see _billable_yards.
     billable = _billable_yards(o, s)
     cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable,
-                                 order_admixtures=o.admixtures or "", unit_override=o.price_override)
+                                 order_admixtures=o.admixtures or "", unit_override=o.price_override,
+                                 fiber_rate_override=o.fiber_rate)
     # mileage: use the stored value, else auto-compute once and cache it on the order
     mi = o.mileage
     if mi is None:
@@ -1317,6 +1319,38 @@ def set_order_price(ref: str, body: PriceOverrideIn, _: User = Depends(require_s
     if body.price_override is not None and body.price_override < 0:
         raise HTTPException(422, "Price must be zero or more")
     o.price_override = body.price_override
+    s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+class FiberIn(BaseModel):
+    lbs: Optional[float] = None    # Mac Matrix Fiber dosage in lbs/yd; null or 0 removes it
+    rate: Optional[float] = None   # custom $/lb for this order; null = use the price-sheet rate
+
+
+@app.put("/orders/{ref}/fiber")
+def set_order_fiber(ref: str, body: FiberIn, _: User = Depends(require_staff),
+                    s: Session = Depends(get_session)):
+    """Set (or clear) the Mac Matrix Fiber dosage (lbs/yd) and the $/lb rate on an
+    order from the Ticket-details panel. The dosage rewrites the fiber entry in the
+    admixtures string; the rate is stored per-order and overrides the price sheet
+    (blank = sheet rate). Allowed at any stage, including completed orders, so staff
+    can correct billing after the fact."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if body.lbs is not None and body.lbs < 0:
+        raise HTTPException(422, "Fiber lbs/yd must be zero or more")
+    if body.rate is not None and body.rate < 0:
+        raise HTTPException(422, "Fiber $/lb must be zero or more")
+    # drop any existing fiber entry, then re-add when a dosage was given. Matches
+    # the "Mac Matrix Fiber: 4.5 lbs/yd" format the order form writes.
+    parts = [p.strip() for p in (o.admixtures or "").split(",")
+             if p.strip() and "fiber" not in p.lower()]
+    if body.lbs and body.lbs > 0:
+        parts.append(f"Mac Matrix Fiber: {body.lbs:g} lbs/yd")
+    o.admixtures = ", ".join(parts) or None
+    o.fiber_rate = body.rate if (body.rate is not None and body.rate > 0) else None
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
