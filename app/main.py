@@ -344,6 +344,20 @@ def _next_order_ref(s: Session) -> str:
     return f"AB-{(max(nums) + 1) if nums else 10001}"
 
 
+# Customers that only ever take one mix — force it on create/edit so an order for
+# them can never go out on the wrong mix. Matched as a substring of the customer
+# name (case-insensitive), so "Landers" covers "Landers Concrete" etc.
+_FORCED_MIX = {"landers": "Precast"}
+
+
+def _forced_mix(customer_name: str, mix: str) -> str:
+    n = (customer_name or "").lower()
+    for key, forced in _FORCED_MIX.items():
+        if key in n:
+            return forced
+    return mix
+
+
 @app.post("/orders")
 def create_order(
     body: OrderIn,
@@ -360,6 +374,7 @@ def create_order(
     if not customer:
         raise HTTPException(404, "Customer not found")
     site, mix, qty = body.site.strip(), body.mix.strip(), body.qty.strip()
+    mix = _forced_mix(customer.name, mix)   # precast-only customers (Landers) → always Precast
     when = body.scheduled_for.strip()
     if not all([site, mix, qty, when]):
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
@@ -421,6 +436,7 @@ def request_order(
     if _is_past_date(when):
         raise HTTPException(422, "Delivery date can't be in the past.")
     cust = s.get(Customer, user.customer_id)
+    mix = _forced_mix(cust.name if cust else "", mix)   # precast-only customers (Landers) → always Precast
     o = Order(ref=_next_order_ref(s), customer_id=user.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="requested",
               truck_id=None, progress=0.0,
@@ -473,12 +489,13 @@ def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_
         raise HTTPException(422, "Site, mix, quantity, and date are all required")
     if user.role != "staff" and _is_past_date(when):
         raise HTTPException(422, "Delivery date can't be in the past.")
+    _cust = s.get(Customer, o.customer_id)
+    mix = _forced_mix(_cust.name if _cust else "", mix)   # precast-only customers (Landers) → always Precast
     o.site, o.mix, o.qty, o.scheduled_for, o.time = site, mix, qty, when, body.time.strip()
     o.slump = (body.slump or "").strip() or None
     o.admixtures = ", ".join(body.admixtures) or None
     o.use_for = (body.use_for or "").strip() or None
     o.project = (body.project or "").strip() or None
-    _cust = s.get(Customer, o.customer_id)
     o.notes = pricing.strip_self_haul_fee((body.notes or "").strip() or None, _cust.name if _cust else "")
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
