@@ -703,15 +703,47 @@ DEFAULT_MIX_DESIGNS = [
 ]
 _MATERIAL_FIELD = {"Portland": "cement_lb_yd", "Slag": "slag_lb_yd"}
 
+# Every tracked material, keyed by name → (batch_data mix_design key it reads its
+# actual batched amount from, display/cost unit, convert that actual from lb→ton?).
+# Cement & slag are silos (inventory + lb/yd estimate fallback); the rest are tracked
+# by ACTUAL ticket amounts + cost only. Aggregates batch in lb (shown as tons); fiber
+# in lb; liquid admixtures in oz — the cost rate is per that unit.
+_MATERIAL_SPEC = {
+    "Portland":         ("cement",        "ton", True),
+    "Slag":             ("slag",          "ton", True),
+    "Gravel":           ("rock",          "ton", True),
+    "Sand":             ("sand",          "ton", True),
+    "Mac Matrix Fiber": ("fiber",         "lb",  False),
+    "Air Entrainer":    ("air_entrainer", "oz",  False),
+    "Water Reducer":    ("water_reducer", "oz",  False),
+}
+# Silos (on-hand draw-down) vs usage-only (just used + cost). order = display order.
+DEFAULT_MATERIALS = [
+    {"name": "Portland",         "unit": "ton", "track_inventory": True},
+    {"name": "Slag",             "unit": "ton", "track_inventory": True},
+    {"name": "Gravel",           "unit": "ton", "track_inventory": False},
+    {"name": "Sand",             "unit": "ton", "track_inventory": False},
+    {"name": "Mac Matrix Fiber", "unit": "lb",  "track_inventory": False},
+    {"name": "Air Entrainer",    "unit": "oz",  "track_inventory": False},
+    {"name": "Water Reducer",    "unit": "oz",  "track_inventory": False},
+]
+
 
 def _ensure_materials(s: Session) -> None:
-    """Create the Portland & Slag silos and seed default mix designs once. Runs in
-    production too (not gated behind SEED_DEMO); idempotent."""
+    """Create the tracked materials and seed default mix designs once. Backfills any
+    material missing by name so new ones (gravel/sand/admixtures) reach an
+    already-seeded production DB on deploy. Runs in production too; idempotent."""
     today = _business_today().isoformat()
     changed = False
-    for name in ("Portland", "Slag"):
-        if not s.exec(select(Material).where(Material.name == name)).first():
-            s.add(Material(name=name, counted_on=today)); changed = True
+    have = {(m.name or "").strip().lower() for m in s.exec(select(Material)).all()}
+    for spec in DEFAULT_MATERIALS:
+        if spec["name"].strip().lower() not in have:
+            # Inventory silos count from today; usage-only materials count all-time
+            # (counted_on stays null) so historical actuals aren't excluded.
+            s.add(Material(name=spec["name"], unit=spec["unit"],
+                           track_inventory=spec["track_inventory"],
+                           counted_on=today if spec["track_inventory"] else None))
+            changed = True
     # Backfill any default design missing by name (not just on an empty table) so
     # new defaults like TxDOT Class A reach an already-seeded production DB on
     # deploy. Office-customized lb/yd values are left untouched.
@@ -740,78 +772,96 @@ def _design_for(mix: str, designs: list):
     return None
 
 
-def _ticket_cementitious_tons(o: Order):
-    """Actual cement & slag tons batched, read off the order's batch ticket — the
-    mix-design grid's 'actual' is total lb for the load, so ÷ 2000 = tons. Returns
-    (cement_tons, slag_tons) or None when the order has no batched cementitious
-    weights on file (so the caller falls back to the lb/yd estimate)."""
+def _ticket_actuals(o: Order) -> dict:
+    """Actual batched amounts off the order's batch ticket, keyed by mix-design key
+    (cement/slag/rock/sand/fiber/air_entrainer/water_reducer) in the value's native
+    unit as printed (lb for solids, oz for liquid admixtures). Empty when the order
+    has no batch ticket on file."""
     if not o.batch_data:
-        return None
+        return {}
     try:
         md = (json.loads(o.batch_data) or {}).get("mix_design") or {}
     except (ValueError, TypeError):
-        return None
-    cem = pricing._num((md.get("cement") or {}).get("actual"))
-    slag = pricing._num((md.get("slag") or {}).get("actual"))
-    if cem <= 0 and slag <= 0:
-        return None
-    return cem * TONS_PER_LB, slag * TONS_PER_LB
+        return {}
+    out = {}
+    for key in ("cement", "slag", "rock", "sand", "fiber", "air_entrainer", "water_reducer"):
+        v = pricing._num((md.get(key) or {}).get("actual"))
+        if v > 0:
+            out[key] = v
+    return out
 
 
 def _materials_summary(s: Session) -> dict:
-    """Silo levels + reorder flags for every material. Usage per completed order
-    comes from the ACTUAL batched weights on its batch ticket when available, else
-    falls back to the mix-design lb/yd × yards estimate. Also returns mixes with no
-    design that are still relying on (missing) estimates."""
+    """Per-material usage + cost. Every material's usage comes from the ACTUAL
+    batched amounts on completed orders' batch tickets. Cement & slag are silos
+    (on-hand draw-down) and additionally fall back to the mix-design lb/yd × yards
+    estimate when an order has no ticket; aggregates and admixtures are actual-only.
+    Cost = actual used × the material's cost rate. Also returns mixes with no design
+    still relying on (missing) cement/slag estimates."""
     _ensure_materials(s)
     designs = s.exec(select(MixDesign)).all()
-    mats = s.exec(select(Material)).all()
+    mats = sorted(s.exec(select(Material)).all(),
+                  key=lambda m: next((i for i, d in enumerate(DEFAULT_MATERIALS)
+                                      if d["name"] == m.name), 99))
     cutoffs = [m.counted_on for m in mats if m.counted_on]
     earliest = min(cutoffs) if cutoffs else ""
-    # Resolve each completed order once: tons of cement & slag + how we got them.
+    # Resolve each completed order once: its date, ticket actuals, and (for the
+    # cement/slag estimate fallback) its billable yards + matched mix design.
     completed, unmapped = [], {}
     for o in s.exec(select(Order).where(Order.status == "complete")).all():
         done = o.completed_at or ""
-        ticket = _ticket_cementitious_tons(o)
-        if ticket:
-            cement_t, slag_t = ticket
-            completed.append({"done": done, "cement": cement_t, "slag": slag_t, "src": "ticket"})
-            continue
-        # No batched weights on file — estimate from the mix design × delivered yards.
+        actuals = _ticket_actuals(o)
         yds = pricing._num(_billable_yards(o, s))
-        if yds <= 0:
-            continue
-        d = _design_for(o.mix, designs)
-        completed.append({"done": done, "src": "estimate",
-                          "cement": yds * (d.cement_lb_yd or 0) * TONS_PER_LB if d else 0.0,
-                          "slag": yds * (d.slag_lb_yd or 0) * TONS_PER_LB if d else 0.0})
-        if not d and (not earliest or done >= earliest):
-            unmapped[o.mix] = round(unmapped.get(o.mix, 0.0) + yds, 2)
-    key_for = {"Portland": "cement", "Slag": "slag"}
-    items = []
+        d = _design_for(o.mix, designs) if yds > 0 else None
+        completed.append({"done": done, "actuals": actuals, "yds": yds, "design": d})
+        # An order with yards but no cement actual AND no design isn't drawing the
+        # cement/slag silos down — surface its mix so staff can map it.
+        if yds > 0 and not actuals.get("cement") and not actuals.get("slag") and not d:
+            if not earliest or done >= earliest:
+                unmapped[o.mix] = round(unmapped.get(o.mix, 0.0) + yds, 2)
+
+    _EST_FIELD = {"cement": "cement_lb_yd", "slag": "slag_lb_yd"}
+    items, total_cost = [], 0.0
     for m in mats:
+        key, unit, to_ton = _MATERIAL_SPEC.get(m.name, ("", m.unit or "ton", (m.unit or "ton") == "ton"))
         cutoff = m.counted_on or ""
-        received = sum((r.tons or 0) for r in s.exec(
-            select(MaterialReceipt).where(MaterialReceipt.material_id == m.id)).all()
-            if (r.received_on or "") >= cutoff)
-        key = key_for.get(m.name)
-        rows = [c for c in completed if cutoff and key and c["done"] >= cutoff]
-        used = sum(c[key] for c in rows)
-        used_ticket = sum(c[key] for c in rows if c["src"] == "ticket")
-        on_hand = (m.opening_tons or 0) + received - used
-        items.append({
-            "id": m.id, "name": m.name,
-            "capacity_tons": m.capacity_tons, "reorder_tons": m.reorder_tons,
-            "opening_tons": m.opening_tons, "counted_on": m.counted_on,
-            "received_tons": round(received, 2), "used_tons": round(used, 2),
-            "used_ticket_tons": round(used_ticket, 2),
-            "used_estimate_tons": round(used - used_ticket, 2),
-            "on_hand_tons": round(on_hand, 2),
-            "low": bool((m.reorder_tons or 0) > 0 and on_hand <= m.reorder_tons),
-            "pct": (round(max(0.0, min(1.0, on_hand / m.capacity_tons)), 3)
-                    if m.capacity_tons else None),
-        })
-    return {"materials": items,
+        used_native = used_ticket_native = 0.0
+        for c in completed:
+            if cutoff and c["done"] < cutoff:
+                continue
+            a = c["actuals"].get(key)
+            if a:
+                used_native += a; used_ticket_native += a
+            elif m.track_inventory and key in _EST_FIELD and c["design"] and c["yds"] > 0:
+                used_native += c["yds"] * (getattr(c["design"], _EST_FIELD[key]) or 0)
+        conv = TONS_PER_LB if to_ton else 1.0
+        used = used_native * conv
+        used_ticket = used_ticket_native * conv
+        cost = used * (m.cost_rate or 0)
+        total_cost += cost
+        item = {
+            "id": m.id, "name": m.name, "unit": unit,
+            "cost_rate": m.cost_rate or 0, "track_inventory": bool(m.track_inventory),
+            "counted_on": m.counted_on,
+            "used_amount": round(used, 2), "used_ticket_amount": round(used_ticket, 2),
+            "used_estimate_amount": round(used - used_ticket, 2),
+            "cost": round(cost, 2),
+        }
+        if m.track_inventory:
+            received = sum((r.tons or 0) for r in s.exec(
+                select(MaterialReceipt).where(MaterialReceipt.material_id == m.id)).all()
+                if (r.received_on or "") >= cutoff)
+            on_hand = (m.opening_tons or 0) + received - used
+            item.update({
+                "capacity_tons": m.capacity_tons, "reorder_tons": m.reorder_tons,
+                "opening_tons": m.opening_tons, "received_tons": round(received, 2),
+                "on_hand_tons": round(on_hand, 2),
+                "low": bool((m.reorder_tons or 0) > 0 and on_hand <= m.reorder_tons),
+                "pct": (round(max(0.0, min(1.0, on_hand / m.capacity_tons)), 3)
+                        if m.capacity_tons else None),
+            })
+        items.append(item)
+    return {"materials": items, "total_cost": round(total_cost, 2),
             "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())]}
 
 
@@ -858,16 +908,18 @@ class MaterialIn(BaseModel):
     reorder_tons: Optional[float] = None
     opening_tons: Optional[float] = None
     counted_on: Optional[str] = None             # ISO date
+    cost_rate: Optional[float] = None            # $ per unit, for usage-based cost
 
 
 @app.put("/materials/{material_id}")
 def update_material(material_id: int, body: MaterialIn, _: User = Depends(require_staff),
                     s: Session = Depends(get_session)):
-    """Set a silo's capacity, reorder point, and opening balance/date (staff)."""
+    """Set a material's cost rate, and (for silos) capacity, reorder point, and
+    opening balance/date (staff)."""
     m = s.get(Material, material_id)
     if not m:
         raise HTTPException(404, "Material not found")
-    for f in ("capacity_tons", "reorder_tons", "opening_tons", "counted_on"):
+    for f in ("capacity_tons", "reorder_tons", "opening_tons", "counted_on", "cost_rate"):
         v = getattr(body, f)
         if v is not None:
             setattr(m, f, v)

@@ -30,6 +30,9 @@ _COLUMN_MIGRATIONS = {
     "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR"},
     "fueltransaction": {"driver": "VARCHAR"},   # added after the table first shipped
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
+    # Materials gained a unit, a flat cost rate ($/unit), and an inventory flag so
+    # gravel/sand/admixtures can be tracked by actual usage + cost without a silo.
+    "material": {"unit": "VARCHAR DEFAULT 'ton'", "cost_rate": "FLOAT DEFAULT 0", "track_inventory": "BOOLEAN DEFAULT 1"},
     "order": {
         "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR", "use_for": "VARCHAR", "project": "VARCHAR", "batch_ticket": "VARCHAR", "batch_data": "VARCHAR", "batch_ticket_print": "VARCHAR", "archived": "BOOLEAN DEFAULT 0", "driver": "VARCHAR",
         "hauler": "VARCHAR", "mileage": "FLOAT", "price_override": "FLOAT",

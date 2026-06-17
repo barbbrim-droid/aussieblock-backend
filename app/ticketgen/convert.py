@@ -10,6 +10,7 @@ caller keeps the original upload as-is.
 """
 import os
 import io
+import re
 import json
 import tempfile
 
@@ -87,10 +88,14 @@ def _to_image_file(data: bytes, filename: str) -> str:
 
 def _mix_design_from(materials) -> dict:
     """Collapse the protocol's material rows into the app's mix-design grid, keeping
-    Portland cement and slag as SEPARATE rows so the silo tracker can read each one's
-    actual batched weight. 'Slag Cement' counts as slag (checked before cement)."""
+    Portland cement and slag as SEPARATE rows so the materials tracker can read each
+    one's actual batched weight. 'Slag Cement' counts as slag (checked before cement).
+    Aggregates (rock/sand) and admixtures (fiber/air entrainer/water reducer) carry
+    their actual too — the tracker draws usage + cost off these. Admixture cells keep
+    a 'unit' (lb for fiber, oz for liquids) since their cost rate is per that unit."""
     md = {k: {"design": "", "target": "", "actual": ""}
-          for k in ["rock", "sand", "cement", "slag", "air", "water"]}
+          for k in ["rock", "sand", "cement", "slag", "air", "water",
+                    "fiber", "air_entrainer", "water_reducer"]}
     cem = [0.0, 0.0, 0.0]   # recipe / target / actual lb
     slag = [0.0, 0.0, 0.0]
     for row in materials or []:
@@ -100,6 +105,7 @@ def _mix_design_from(materials) -> dict:
             continue
         n = str(name).lower()
         cell = {"design": f"{rec:g}", "target": f"{sv:,.0f}", "actual": f"{av:,.0f}"}
+        adx = {**cell, "unit": str(unit or "").strip() or "lb"}
         if "gravel" in n or "agg1" in n:
             md["rock"] = cell
         elif "sand" in n or "agg2" in n:
@@ -108,6 +114,13 @@ def _mix_design_from(materials) -> dict:
             slag[0] += rec; slag[1] += sv; slag[2] += av
         elif "cem" in n or "portland" in n:
             cem[0] += rec; cem[1] += sv; cem[2] += av
+        elif "fiber" in n or "matrix" in n:
+            md["fiber"] = adx
+        # Water reducer must be checked BEFORE plain water (the name contains "water").
+        elif re.search(r"reduc|glenium|polyheed|pozzolith|wrda|daracem|\bwr\b|\badva\b|plastol|mira", n):
+            md["water_reducer"] = adx
+        elif re.search(r"entrain|daravair|darex|micro\s*air|airex|\bae\b", n):
+            md["air_entrainer"] = adx
         elif "water" in n:
             md["water"] = cell
     if cem[1] or cem[2]:

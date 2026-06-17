@@ -168,11 +168,17 @@ class Doc(SQLModel, table=True):
 
 
 class Material(SQLModel, table=True):
-    """A cementitious raw material kept in a silo (Portland cement, Slag). On-hand
-    tons = opening balance + tons received − tons used by completed orders, all
-    counted from `counted_on`. The fill gauge + reorder alert read off this."""
+    """A tracked raw material. Cementitious ones (Portland, Slag) are kept in silos
+    with on-hand = opening balance + tons received − tons used, counted from
+    `counted_on`; the fill gauge + reorder alert read off that. Aggregates and
+    admixtures (Gravel, Sand, Mac Matrix Fiber, Air Entrainer, Water Reducer) set
+    `track_inventory=False` and are tracked by actual batched usage + cost only.
+    Usage cost = actual amount used × `cost_rate` ($ per `unit`)."""
     id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(index=True, unique=True)   # "Portland" | "Slag"
+    name: str = Field(index=True, unique=True)   # "Portland" | "Slag" | "Gravel" | ...
+    unit: str = "ton"                            # display/cost unit: "ton" | "lb" | "oz"
+    cost_rate: float = 0.0                       # $ per unit, for usage-based cost (editable)
+    track_inventory: bool = True                 # True = silo with on-hand draw-down; False = usage + cost only
     capacity_tons: float = 0.0                   # silo capacity (tons) — for the fill gauge
     reorder_tons: float = 0.0                    # alert when on-hand falls to/below this
     opening_tons: float = 0.0                    # silo content when counting started
