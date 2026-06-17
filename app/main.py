@@ -14,6 +14,7 @@ from typing import Optional
 import glob
 import json
 import os
+import shutil
 import time
 from contextlib import asynccontextmanager
 
@@ -780,12 +781,36 @@ def _materials_summary(s: Session) -> dict:
             "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())]}
 
 
+_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"}
+
+
+def _photo_root() -> str:
+    return config.data_path("material_photos")
+
+
+def _receipt_photo_dir(receipt_id: int, create: bool = False) -> str:
+    d = os.path.join(_photo_root(), str(receipt_id))
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _receipt_photos(receipt_id: int) -> list:
+    """Filenames of the photos attached to a receipt, in upload order."""
+    d = _receipt_photo_dir(receipt_id)
+    if not os.path.isdir(d):
+        return []
+    names = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in _PHOTO_EXTS]
+    return sorted(names, key=lambda n: (int(os.path.splitext(n)[0]) if os.path.splitext(n)[0].isdigit() else 1 << 30, n))
+
+
 def _receipt_json(r: MaterialReceipt, mat_name: str) -> dict:
     return {"id": r.id, "material_id": r.material_id, "material": mat_name,
             "received_on": r.received_on, "supplier": r.supplier, "tons": r.tons,
             "ticket_no": r.ticket_no, "invoice_no": r.invoice_no,
             "unit_cost": r.unit_cost, "total_cost": r.total_cost,
-            "invoice_matched": r.invoice_matched, "notes": r.notes}
+            "invoice_matched": r.invoice_matched, "notes": r.notes,
+            "photos": _receipt_photos(r.id)}
 
 
 @app.get("/materials")
@@ -855,8 +880,9 @@ def add_receipt(body: ReceiptIn, _: User = Depends(require_staff), s: Session = 
     if data.get("total_cost") is None and data.get("unit_cost") is not None:
         data["total_cost"] = round(body.tons * body.unit_cost, 2)
     r = MaterialReceipt(**data)
-    s.add(r); s.commit()
-    return _materials_summary(s)
+    s.add(r); s.commit(); s.refresh(r)
+    mat = s.get(Material, r.material_id)
+    return _receipt_json(r, mat.name if mat else "")
 
 
 class ReceiptPatch(BaseModel):
@@ -887,11 +913,68 @@ def edit_receipt(receipt_id: int, body: ReceiptPatch, _: User = Depends(require_
 
 @app.delete("/materials/receipts/{receipt_id}")
 def delete_receipt(receipt_id: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Remove a logged receipt (staff)."""
+    """Remove a logged receipt and any photos attached to it (staff)."""
     r = s.get(MaterialReceipt, receipt_id)
     if r:
         s.delete(r); s.commit()
+    d = _receipt_photo_dir(receipt_id)
+    if os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True)
     return {"ok": True, "removed": receipt_id}
+
+
+@app.post("/materials/receipts/{receipt_id}/photos")
+async def add_receipt_photo(receipt_id: int, file: UploadFile = File(...),
+                            _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Attach a photo of the delivery/scale ticket (or the load) to a receipt —
+    image only, 15 MB max, up to 12 per receipt (staff)."""
+    r = s.get(MaterialReceipt, receipt_id)
+    if not r:
+        raise HTTPException(404, "Receipt not found")
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    is_img = (file.content_type or "").lower().startswith("image/") or ext in _PHOTO_EXTS
+    if not is_img:
+        raise HTTPException(422, "Attach an image (JPG, PNG, HEIC…).")
+    existing = _receipt_photos(receipt_id)
+    if len(existing) >= 12:
+        raise HTTPException(409, "That receipt already has the maximum of 12 photos.")
+    data = await file.read()
+    if len(data) > 15 * 1024 * 1024:
+        raise HTTPException(413, "That image is too large (15 MB max).")
+    nums = [int(os.path.splitext(n)[0]) for n in existing if os.path.splitext(n)[0].isdigit()]
+    fname = f"{(max(nums) + 1) if nums else 1}{ext or '.jpg'}"
+    with open(os.path.join(_receipt_photo_dir(receipt_id, create=True), fname), "wb") as fh:
+        fh.write(data)
+    mat = s.get(Material, r.material_id)
+    return _receipt_json(r, mat.name if mat else "")
+
+
+@app.get("/materials/receipts/{receipt_id}/photos/{name}")
+def get_receipt_photo(receipt_id: int, name: str, _: User = Depends(require_staff)):
+    """View a receipt's photo (staff). Authed, so the app fetches it as a blob."""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Bad photo name")
+    path = os.path.join(_receipt_photo_dir(receipt_id), name)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Photo not found")
+    return FileResponse(path, media_type=_media_type(path), filename=name)
+
+
+@app.delete("/materials/receipts/{receipt_id}/photos/{name}")
+def delete_receipt_photo(receipt_id: int, name: str, _: User = Depends(require_staff),
+                         s: Session = Depends(get_session)):
+    """Remove one photo from a receipt (staff)."""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Bad photo name")
+    path = os.path.join(_receipt_photo_dir(receipt_id), name)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    r = s.get(MaterialReceipt, receipt_id)
+    mat = s.get(Material, r.material_id) if r else None
+    return _receipt_json(r, mat.name if mat else "") if r else {"ok": True}
 
 
 @app.get("/materials/mix-designs")
