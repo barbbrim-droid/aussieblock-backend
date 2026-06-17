@@ -697,6 +697,9 @@ DEFAULT_MIX_DESIGNS = [
     {"mix": "4000 PSI", "cement_lb_yd": 451, "slag_lb_yd": 113},
     {"mix": "4500 PSI", "cement_lb_yd": 480, "slag_lb_yd": 120},
     {"mix": "5000 PSI", "cement_lb_yd": 508, "slag_lb_yd": 132},
+    # TxDOT Item 421 Class A — 470 lb/yd³ binder, 50% slag replacement (per the
+    # certified batch protocol: 235 lb/yd³ Portland + 235 lb/yd³ slag).
+    {"mix": "TxDOT Class A", "cement_lb_yd": 235, "slag_lb_yd": 235},
 ]
 _MATERIAL_FIELD = {"Portland": "cement_lb_yd", "Slag": "slag_lb_yd"}
 
@@ -709,10 +712,13 @@ def _ensure_materials(s: Session) -> None:
     for name in ("Portland", "Slag"):
         if not s.exec(select(Material).where(Material.name == name)).first():
             s.add(Material(name=name, counted_on=today)); changed = True
-    if not s.exec(select(MixDesign)).first():
-        for d in DEFAULT_MIX_DESIGNS:
-            s.add(MixDesign(**d))
-        changed = True
+    # Backfill any default design missing by name (not just on an empty table) so
+    # new defaults like TxDOT Class A reach an already-seeded production DB on
+    # deploy. Office-customized lb/yd values are left untouched.
+    existing = {(d.mix or "").strip().lower() for d in s.exec(select(MixDesign)).all()}
+    for d in DEFAULT_MIX_DESIGNS:
+        if d["mix"].strip().lower() not in existing:
+            s.add(MixDesign(**d)); changed = True
     if changed:
         s.commit()
 
