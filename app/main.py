@@ -734,23 +734,49 @@ def _design_for(mix: str, designs: list):
     return None
 
 
+def _ticket_cementitious_tons(o: Order):
+    """Actual cement & slag tons batched, read off the order's batch ticket — the
+    mix-design grid's 'actual' is total lb for the load, so ÷ 2000 = tons. Returns
+    (cement_tons, slag_tons) or None when the order has no batched cementitious
+    weights on file (so the caller falls back to the lb/yd estimate)."""
+    if not o.batch_data:
+        return None
+    try:
+        md = (json.loads(o.batch_data) or {}).get("mix_design") or {}
+    except (ValueError, TypeError):
+        return None
+    cem = pricing._num((md.get("cement") or {}).get("actual"))
+    slag = pricing._num((md.get("slag") or {}).get("actual"))
+    if cem <= 0 and slag <= 0:
+        return None
+    return cem * TONS_PER_LB, slag * TONS_PER_LB
+
+
 def _materials_summary(s: Session) -> dict:
-    """Silo levels + reorder flags for every material, plus any completed-order
-    mixes with no design (they contribute 0 to usage until mapped)."""
+    """Silo levels + reorder flags for every material. Usage per completed order
+    comes from the ACTUAL batched weights on its batch ticket when available, else
+    falls back to the mix-design lb/yd × yards estimate. Also returns mixes with no
+    design that are still relying on (missing) estimates."""
     _ensure_materials(s)
     designs = s.exec(select(MixDesign)).all()
     mats = s.exec(select(Material)).all()
     cutoffs = [m.counted_on for m in mats if m.counted_on]
     earliest = min(cutoffs) if cutoffs else ""
-    # Resolve each completed order once: its tons of cement & slag (0 if unmapped).
+    # Resolve each completed order once: tons of cement & slag + how we got them.
     completed, unmapped = [], {}
     for o in s.exec(select(Order).where(Order.status == "complete")).all():
+        done = o.completed_at or ""
+        ticket = _ticket_cementitious_tons(o)
+        if ticket:
+            cement_t, slag_t = ticket
+            completed.append({"done": done, "cement": cement_t, "slag": slag_t, "src": "ticket"})
+            continue
+        # No batched weights on file — estimate from the mix design × delivered yards.
         yds = pricing._num(_billable_yards(o, s))
         if yds <= 0:
             continue
         d = _design_for(o.mix, designs)
-        done = o.completed_at or ""
-        completed.append({"done": done,
+        completed.append({"done": done, "src": "estimate",
                           "cement": yds * (d.cement_lb_yd or 0) * TONS_PER_LB if d else 0.0,
                           "slag": yds * (d.slag_lb_yd or 0) * TONS_PER_LB if d else 0.0})
         if not d and (not earliest or done >= earliest):
@@ -762,16 +788,18 @@ def _materials_summary(s: Session) -> dict:
         received = sum((r.tons or 0) for r in s.exec(
             select(MaterialReceipt).where(MaterialReceipt.material_id == m.id)).all()
             if (r.received_on or "") >= cutoff)
-        used = 0.0
         key = key_for.get(m.name)
-        if cutoff and key:
-            used = sum(c[key] for c in completed if c["done"] >= cutoff)
+        rows = [c for c in completed if cutoff and key and c["done"] >= cutoff]
+        used = sum(c[key] for c in rows)
+        used_ticket = sum(c[key] for c in rows if c["src"] == "ticket")
         on_hand = (m.opening_tons or 0) + received - used
         items.append({
             "id": m.id, "name": m.name,
             "capacity_tons": m.capacity_tons, "reorder_tons": m.reorder_tons,
             "opening_tons": m.opening_tons, "counted_on": m.counted_on,
             "received_tons": round(received, 2), "used_tons": round(used, 2),
+            "used_ticket_tons": round(used_ticket, 2),
+            "used_estimate_tons": round(used - used_ticket, 2),
             "on_hand_tons": round(on_hand, 2),
             "low": bool((m.reorder_tons or 0) > 0 and on_hand <= m.reorder_tons),
             "pct": (round(max(0.0, min(1.0, on_hand / m.capacity_tons)), 3)
@@ -1092,16 +1120,21 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
     if ticket_convert.available():
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site,
-                                             order_mix=o.mix, order_qty=o.qty,
-                                             price_sheet=pricing.load_sheet(),
-                                             order_admixtures=o.admixtures or "")
+            branded, parsed_bd = ticket_convert.convert(
+                raw, name, customer_name=cust, site=o.site,
+                order_mix=o.mix, order_qty=o.qty,
+                price_sheet=pricing.load_sheet(),
+                order_admixtures=o.admixtures or "", return_data=True)
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
                     fh.write(branded)
                 o.batch_ticket = fname
-                s.add(o); s.commit(); s.refresh(o)
+            # Keep the parsed cement/slag actuals so the silo tracker draws down from
+            # the real batched weights (not the lb/yd estimate).
+            if parsed_bd and (parsed_bd.get("mix_design") or {}):
+                o.batch_data = json.dumps(parsed_bd)
+            s.add(o); s.commit(); s.refresh(o)
         except Exception as e:
             print("batch-ticket branding failed:", e)
     # If this order is already signed, stamp the signature onto the new ticket.

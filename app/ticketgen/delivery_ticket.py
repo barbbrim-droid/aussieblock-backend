@@ -176,7 +176,7 @@ def render_delivery_ticket(data, out_path):
         pdf.cell(cw, RH, h, align="C", fill=True)
     pdf.ln(RH)
     pdf.set_text_color(*INK); pdf.set_draw_color(*LINE)
-    for row in ["Rock", "Sand", "Cement", "Air", "Water"]:
+    for row in ["Rock", "Sand", "Cement", "Slag", "Air", "Water"]:
         pdf.set_font("DejaVu", "B", 8); pdf.set_fill_color(*SHADE)
         pdf.cell(lw, RH, "  " + row, border=1, fill=True)
         pdf.set_font("DejaVu", "", 8.5)

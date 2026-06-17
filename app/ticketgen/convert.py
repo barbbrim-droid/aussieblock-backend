@@ -85,10 +85,62 @@ def _to_image_file(data: bytes, filename: str) -> str:
     return tmp.name
 
 
+def _mix_design_from(materials) -> dict:
+    """Collapse the protocol's material rows into the app's mix-design grid, keeping
+    Portland cement and slag as SEPARATE rows so the silo tracker can read each one's
+    actual batched weight. 'Slag Cement' counts as slag (checked before cement)."""
+    md = {k: {"design": "", "target": "", "actual": ""}
+          for k in ["rock", "sand", "cement", "slag", "air", "water"]}
+    cem = [0.0, 0.0, 0.0]   # recipe / target / actual lb
+    slag = [0.0, 0.0, 0.0]
+    for row in materials or []:
+        try:
+            name, unit, dens, rec, sv, av, lim, lab = row
+        except (ValueError, TypeError):
+            continue
+        n = str(name).lower()
+        cell = {"design": f"{rec:g}", "target": f"{sv:,.0f}", "actual": f"{av:,.0f}"}
+        if "gravel" in n or "agg1" in n:
+            md["rock"] = cell
+        elif "sand" in n or "agg2" in n:
+            md["sand"] = cell
+        elif "slag" in n:
+            slag[0] += rec; slag[1] += sv; slag[2] += av
+        elif "cem" in n or "portland" in n:
+            cem[0] += rec; cem[1] += sv; cem[2] += av
+        elif "water" in n:
+            md["water"] = cell
+    if cem[1] or cem[2]:
+        md["cement"] = {"design": f"{cem[0]:g}", "target": f"{cem[1]:,.0f}", "actual": f"{cem[2]:,.0f}"}
+    if slag[1] or slag[2]:
+        md["slag"] = {"design": f"{slag[0]:g}", "target": f"{slag[1]:,.0f}", "actual": f"{slag[2]:,.0f}"}
+    return md
+
+
+def _batch_data_from(d: dict) -> dict:
+    """The app's nested batch_data from a parsed typed protocol (powers the silo
+    tracker's actual-usage draw-down and the in-app ticket view)."""
+    o = d.get("order") or {}
+    return {
+        "date": d.get("report_date", ""), "cash_charge": "", "customer_phone": "",
+        "product_name": o.get("recipe", ""), "plant": o.get("plant", ""), "air": "",
+        "load": o.get("load_no", ""), "ordered": o.get("qty", ""), "delivered": o.get("qty", ""),
+        "water_reducer": "", "retarder": "",
+        "times": {"left_plant": "", "a_train_pr": "", "left_job": "", "return_plant": ""},
+        "inspector": "", "received_by": "",
+        "mix_design": _mix_design_from(d.get("materials") or []),
+        "pricing": {"unit_price": "", "extended": "", "subtotal": "", "tax1": "", "tax2": "",
+                    "total": "", "job_running_total": ""},
+        "_kind": "typed protocol",
+    }
+
+
 def convert(data: bytes, filename: str, customer_name: str = None, site: str = None,
             order_mix: str = None, order_qty=None, price_sheet: dict = None,
-            order_admixtures: str = "") -> bytes:
-    """Read the uploaded ticket and render the branded PDF. Returns PDF bytes.
+            order_admixtures: str = "", return_data: bool = False):
+    """Read the uploaded ticket and render the branded PDF. Returns PDF bytes, or
+    (pdf_bytes, batch_data) when return_data=True — batch_data is the parsed nested
+    record for a typed protocol (with cement & slag actuals), else None.
     Raises on any failure (the caller falls back to the original)."""
     cfg = _cfg()
     # context the reader uses to compute the ticket's pricing block
@@ -98,6 +150,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
     img = _to_image_file(data, filename)
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     out.close()
+    batch_data = None
     try:
         if _is_pdf(data, filename):
             # Typed dornerBatch "Total batch protocol" — full materials/batches/water.
@@ -109,6 +162,10 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
                 if site:
                     d["order"]["site_addr"] = site           # …and for the job-site address
             generator.render_ticket(d, out.name)
+            try:
+                batch_data = _batch_data_from(d)   # cement & slag actuals for the silo tracker
+            except Exception as e:
+                print("batch_data extract failed:", e)
         else:
             # Handwritten field-ticket photo — summary delivery ticket.
             from . import read_ticket, delivery_ticket
@@ -122,7 +179,8 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
                 d["site"] = site
             delivery_ticket.render_delivery_ticket(d, out.name)
         with open(out.name, "rb") as fh:
-            return fh.read()
+            pdf = fh.read()
+        return (pdf, batch_data) if return_data else pdf
     finally:
         for p in (img, out.name):
             try:
