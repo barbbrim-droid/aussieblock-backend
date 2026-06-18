@@ -933,7 +933,7 @@ class MaterialIn(BaseModel):
     cost_rate: Optional[float] = None            # $ per unit, for usage-based cost
 
 
-@app.put("/materials/{material_id}")
+@app.put("/materials/{material_id:int}")
 def update_material(material_id: int, body: MaterialIn, _: User = Depends(require_staff),
                     s: Session = Depends(get_session)):
     """Set a material's cost rate, and (for silos) capacity, reorder point, and
