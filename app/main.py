@@ -928,6 +928,7 @@ class MaterialIn(BaseModel):
     capacity_tons: Optional[float] = None
     reorder_tons: Optional[float] = None
     opening_tons: Optional[float] = None
+    on_hand_tons: Optional[float] = None         # "set current tons" — desired on-hand NOW
     counted_on: Optional[str] = None             # ISO date
     cost_rate: Optional[float] = None            # $ per unit, for usage-based cost
 
@@ -936,7 +937,10 @@ class MaterialIn(BaseModel):
 def update_material(material_id: int, body: MaterialIn, _: User = Depends(require_staff),
                     s: Session = Depends(get_session)):
     """Set a material's cost rate, and (for silos) capacity, reorder point, and
-    opening balance/date (staff)."""
+    opening balance/date (staff). `on_hand_tons` is a physical-count override: it
+    sets the silo to read EXACTLY that amount right now (today's already-completed
+    orders aren't subtracted from the count again), and future deliveries draw it
+    down from there."""
     m = s.get(Material, material_id)
     if not m:
         raise HTTPException(404, "Material not found")
@@ -944,6 +948,17 @@ def update_material(material_id: int, body: MaterialIn, _: User = Depends(requir
         v = getattr(body, f)
         if v is not None:
             setattr(m, f, v)
+    # Physical count: store opening so on-hand == the counted amount. on-hand =
+    # opening + receipts_in_window − usage_in_window, so opening = count + usage −
+    # receipts (computed against the now-current count window).
+    if body.on_hand_tons is not None:
+        if body.counted_on is None:
+            m.counted_on = _business_today().isoformat()
+        s.add(m); s.commit()
+        mi = next((x for x in _materials_summary(s)["materials"] if x["id"] == m.id), None)
+        used = (mi or {}).get("used_amount", 0.0)
+        received = (mi or {}).get("received_tons", 0.0)
+        m.opening_tons = round(body.on_hand_tons + used - received, 3)
     s.add(m); s.commit()
     return _materials_summary(s)
 
