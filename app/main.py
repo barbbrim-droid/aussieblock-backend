@@ -899,6 +899,8 @@ def _materials_summary(s: Session) -> dict:
 
 
 _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"}
+# A receipt attachment can be a photo OR a PDF delivery/scale ticket.
+_ATTACH_EXTS = _PHOTO_EXTS | {".pdf"}
 
 
 def _photo_root() -> str:
@@ -913,11 +915,11 @@ def _receipt_photo_dir(receipt_id: int, create: bool = False) -> str:
 
 
 def _receipt_photos(receipt_id: int) -> list:
-    """Filenames of the photos attached to a receipt, in upload order."""
+    """Filenames of the attachments (photos or PDFs) on a receipt, in upload order."""
     d = _receipt_photo_dir(receipt_id)
     if not os.path.isdir(d):
         return []
-    names = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in _PHOTO_EXTS]
+    names = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in _ATTACH_EXTS]
     return sorted(names, key=lambda n: (int(os.path.splitext(n)[0]) if os.path.splitext(n)[0].isdigit() else 1 << 30, n))
 
 
@@ -1060,23 +1062,27 @@ def delete_receipt(receipt_id: int, _: User = Depends(require_staff), s: Session
 @app.post("/materials/receipts/{receipt_id}/photos")
 async def add_receipt_photo(receipt_id: int, file: UploadFile = File(...),
                             _: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Attach a photo of the delivery/scale ticket (or the load) to a receipt —
-    image only, 15 MB max, up to 12 per receipt (staff)."""
+    """Attach a delivery/scale ticket to a receipt — a photo (JPG/PNG/HEIC…) or a
+    PDF, 15 MB max, up to 12 per receipt (staff)."""
     r = s.get(MaterialReceipt, receipt_id)
     if not r:
         raise HTTPException(404, "Receipt not found")
     ext = os.path.splitext(file.filename or "")[1].lower()
-    is_img = (file.content_type or "").lower().startswith("image/") or ext in _PHOTO_EXTS
-    if not is_img:
-        raise HTTPException(422, "Attach an image (JPG, PNG, HEIC…).")
+    ctype = (file.content_type or "").lower()
+    ok = (ctype.startswith("image/") or ctype == "application/pdf"
+          or ext in _ATTACH_EXTS)
+    if not ok:
+        raise HTTPException(422, "Attach a photo (JPG, PNG, HEIC…) or a PDF.")
     existing = _receipt_photos(receipt_id)
     if len(existing) >= 12:
-        raise HTTPException(409, "That receipt already has the maximum of 12 photos.")
+        raise HTTPException(409, "That receipt already has the maximum of 12 attachments.")
     data = await file.read()
     if len(data) > 15 * 1024 * 1024:
-        raise HTTPException(413, "That image is too large (15 MB max).")
+        raise HTTPException(413, "That file is too large (15 MB max).")
     nums = [int(os.path.splitext(n)[0]) for n in existing if os.path.splitext(n)[0].isdigit()]
-    fname = f"{(max(nums) + 1) if nums else 1}{ext or '.jpg'}"
+    if ext not in _ATTACH_EXTS:
+        ext = ".pdf" if ctype == "application/pdf" else ".jpg"
+    fname = f"{(max(nums) + 1) if nums else 1}{ext}"
     with open(os.path.join(_receipt_photo_dir(receipt_id, create=True), fname), "wb") as fh:
         fh.write(data)
     mat = s.get(Material, r.material_id)
