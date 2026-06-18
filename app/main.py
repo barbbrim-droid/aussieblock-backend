@@ -734,6 +734,7 @@ _MATERIAL_SPEC = {
     "Mac Matrix Fiber": ("fiber",         "lb",  False),
     "Air Entrainer":    ("air_entrainer", "oz",  False),
     "Water Reducer":    ("water_reducer", "oz",  False),
+    "E5 LFA":           ("e5_lfa",        "oz",  False),
 }
 # Silos (on-hand draw-down) vs usage-only (just used + cost). order = display order.
 DEFAULT_MATERIALS = [
@@ -744,6 +745,7 @@ DEFAULT_MATERIALS = [
     {"name": "Mac Matrix Fiber", "unit": "lb",  "track_inventory": False},
     {"name": "Air Entrainer",    "unit": "oz",  "track_inventory": False},
     {"name": "Water Reducer",    "unit": "oz",  "track_inventory": False},
+    {"name": "E5 LFA",           "unit": "oz",  "track_inventory": False},
 ]
 
 
@@ -802,7 +804,7 @@ def _ticket_actuals(o: Order) -> dict:
     except (ValueError, TypeError):
         return {}
     out = {}
-    for key in ("cement", "slag", "rock", "sand", "fiber", "air_entrainer", "water_reducer"):
+    for key in ("cement", "slag", "rock", "sand", "fiber", "air_entrainer", "water_reducer", "e5_lfa"):
         v = pricing._num((md.get(key) or {}).get("actual"))
         if v > 0:
             out[key] = v

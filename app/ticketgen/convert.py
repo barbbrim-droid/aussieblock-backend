@@ -95,7 +95,7 @@ def _mix_design_from(materials) -> dict:
     a 'unit' (lb for fiber, oz for liquids) since their cost rate is per that unit."""
     md = {k: {"design": "", "target": "", "actual": ""}
           for k in ["rock", "sand", "cement", "slag", "air", "water",
-                    "fiber", "air_entrainer", "water_reducer"]}
+                    "fiber", "air_entrainer", "water_reducer", "e5_lfa"]}
     cem = [0.0, 0.0, 0.0]   # recipe / target / actual lb
     slag = [0.0, 0.0, 0.0]
     for row in materials or []:
@@ -116,6 +116,10 @@ def _mix_design_from(materials) -> dict:
             cem[0] += rec; cem[1] += sv; cem[2] += av
         elif "fiber" in n or "matrix" in n:
             md["fiber"] = adx
+        # E5 Liquid Fly Ash — match before plain "water" (some sheets print "liquid
+        # fly ash"; "fly ash" alone also counts).
+        elif re.search(r"\be5\b|liquid\s*fly\s*ash|\blfa\b|fly\s*ash", n):
+            md["e5_lfa"] = adx
         # Water reducer must be checked BEFORE plain water (the name contains "water").
         elif re.search(r"reduc|glenium|polyheed|pozzolith|wrda|daracem|\bwr\b|\badva\b|plastol|mira", n):
             md["water_reducer"] = adx
