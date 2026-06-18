@@ -33,6 +33,9 @@ _COLUMN_MIGRATIONS = {
     # Materials gained a unit, a flat cost rate ($/unit), and an inventory flag so
     # gravel/sand/admixtures can be tracked by actual usage + cost without a silo.
     "material": {"unit": "VARCHAR DEFAULT 'ton'", "cost_rate": "FLOAT DEFAULT 0", "track_inventory": "BOOLEAN DEFAULT 1"},
+    # A pour's batch tickets live on its loads — keep each load's parsed weights so
+    # the silo tracker can draw cement/slag/admixtures down from real ticket actuals.
+    "load": {"batch_data": "VARCHAR"},
     "order": {
         "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR", "use_for": "VARCHAR", "project": "VARCHAR", "batch_ticket": "VARCHAR", "batch_data": "VARCHAR", "batch_ticket_print": "VARCHAR", "archived": "BOOLEAN DEFAULT 0", "driver": "VARCHAR",
         "hauler": "VARCHAR", "mileage": "FLOAT", "price_override": "FLOAT", "fiber_rate": "FLOAT",

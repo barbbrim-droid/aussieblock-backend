@@ -138,6 +138,7 @@ class Load(SQLModel, table=True):
     status: str = "scheduled"                    # same stages as an order
     progress: float = 0.0
     batch_ticket: Optional[str] = None           # this load's branded ticket filename
+    batch_data: Optional[str] = None             # parsed protocol weights (JSON) for the silo tracker
 
 
 class FuelTransaction(SQLModel, table=True):

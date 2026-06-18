@@ -792,15 +792,15 @@ def _design_for(mix: str, designs: list):
     return None
 
 
-def _ticket_actuals(o: Order) -> dict:
-    """Actual batched amounts off the order's batch ticket, keyed by mix-design key
-    (cement/slag/rock/sand/fiber/air_entrainer/water_reducer) in the value's native
-    unit as printed (lb for solids, oz for liquid admixtures). Empty when the order
-    has no batch ticket on file."""
-    if not o.batch_data:
+def _actuals_from_bd(bd: str) -> dict:
+    """Actual batched amounts from one batch_data JSON blob, keyed by mix-design key
+    (cement/slag/rock/sand/fiber/air_entrainer/water_reducer/e5_lfa) in the value's
+    native unit as printed (lb for solids, oz for liquid admixtures). Empty when the
+    blob is missing or unparseable."""
+    if not bd:
         return {}
     try:
-        md = (json.loads(o.batch_data) or {}).get("mix_design") or {}
+        md = (json.loads(bd) or {}).get("mix_design") or {}
     except (ValueError, TypeError):
         return {}
     out = {}
@@ -808,6 +808,18 @@ def _ticket_actuals(o: Order) -> dict:
         v = pricing._num((md.get(key) or {}).get("actual"))
         if v > 0:
             out[key] = v
+    return out
+
+
+def _ticket_actuals(o: Order, s: Session) -> dict:
+    """Actual batched amounts for an order, SUMMED across its own batch ticket and —
+    for a continuous pour — every per-load batch ticket. A pour's tickets live on the
+    loads (the order itself has no batch_data), so the silo tracker must add them up
+    here or it sees nothing. Empty when no ticket is on file anywhere."""
+    out = dict(_actuals_from_bd(o.batch_data))
+    for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+        for k, v in _actuals_from_bd(ld.batch_data).items():
+            out[k] = out.get(k, 0.0) + v
     return out
 
 
@@ -831,7 +843,7 @@ def _materials_summary(s: Session) -> dict:
     completed, unmapped = [], {}
     for o in s.exec(select(Order).where(Order.status == "complete")).all():
         done = o.completed_at or ""
-        actuals = _ticket_actuals(o)
+        actuals = _ticket_actuals(o, s)
         yds = pricing._num(_billable_yards(o, s))
         d = _design_for(o.mix, designs) if yds > 0 else None
         completed.append({"done": done, "actuals": actuals, "yds": yds, "design": d})
@@ -1676,15 +1688,20 @@ async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(.
     if ticket_convert.available():
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            branded = ticket_convert.convert(raw, name, customer_name=cust, site=o.site,
-                                             order_mix=o.mix, order_qty=ld.qty,
-                                             price_sheet=pricing.load_sheet(),
-                                             order_admixtures=o.admixtures or "")
+            branded, parsed_bd = ticket_convert.convert(
+                raw, name, customer_name=cust, site=o.site,
+                order_mix=o.mix, order_qty=ld.qty,
+                price_sheet=pricing.load_sheet(),
+                order_admixtures=o.admixtures or "", return_data=True)
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
                     fh.write(branded)
                 ld.batch_ticket = fname
+                # Keep the parsed weights so this load draws the silos down from real
+                # ticket actuals (cement/slag + admixtures), like the order ticket does.
+                if parsed_bd:
+                    ld.batch_data = json.dumps(parsed_bd)
                 s.add(ld); s.commit(); s.refresh(ld)
         except Exception as e:
             print("load batch-ticket branding failed:", e)
@@ -1738,10 +1755,51 @@ def delete_load_batch_ticket(ref: str, seq: int, _: User = Depends(require_staff
             os.remove(orig)
         except OSError:
             pass
-    if ld.batch_ticket:
+    if ld.batch_ticket or ld.batch_data:
         ld.batch_ticket = None
+        ld.batch_data = None
         s.add(ld); s.commit()
     return _order_json(o, s)
+
+
+@app.post("/materials/backfill-load-tickets")
+def backfill_load_tickets(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Re-parse the stored ORIGINAL of every load batch ticket that has no saved
+    weights yet (e.g. uploaded before per-load batch_data existed) and fill it in,
+    so the silo tracker draws those pours down from real ticket actuals without
+    staff re-uploading anything. Idempotent; skips loads already parsed and photos
+    (only typed protocols carry per-material weights). Needs the vision key."""
+    if not ticket_convert.available():
+        raise HTTPException(503, "Ticket reader unavailable (ANTHROPIC_API_KEY not set).")
+    bdir = _batch_ticket_dir()
+    filled, skipped, failed = 0, 0, 0
+    for ld in s.exec(select(Load).where(Load.batch_ticket.is_not(None),
+                                        Load.batch_data.is_(None))).all():
+        o = s.get(Order, ld.order_id)
+        if not o:
+            skipped += 1; continue
+        prefix = _load_ticket_prefix(o.ref, ld.seq)
+        origs = glob.glob(os.path.join(bdir, f"{prefix}_original.*"))
+        if not origs:
+            skipped += 1; continue
+        try:
+            with open(origs[0], "rb") as fh:
+                raw = fh.read()
+            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            _, parsed_bd = ticket_convert.convert(
+                raw, os.path.basename(origs[0]), customer_name=cust, site=o.site,
+                order_mix=o.mix, order_qty=ld.qty, price_sheet=pricing.load_sheet(),
+                order_admixtures=o.admixtures or "", return_data=True)
+            if parsed_bd:
+                ld.batch_data = json.dumps(parsed_bd)
+                s.add(ld); s.commit()
+                filled += 1
+            else:
+                skipped += 1   # handwritten photo / no per-material weights
+        except Exception as e:
+            print(f"backfill load {o.ref} L{ld.seq} failed:", e)
+            failed += 1
+    return {"filled": filled, "skipped": skipped, "failed": failed}
 
 
 @app.post("/orders/{ref}/archive")
