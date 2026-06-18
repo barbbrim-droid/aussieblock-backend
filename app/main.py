@@ -812,52 +812,60 @@ def _ticket_actuals(o: Order) -> dict:
 
 
 def _materials_summary(s: Session) -> dict:
-    """Per-material usage + cost. Usage comes ONLY from the ACTUAL batched amounts
-    on completed orders' batch tickets — including the cement/slag silo draw-down
-    (no mix-design estimate). Cost = actual used × the material's cost rate. Also
-    returns the mixes of completed orders that have no batched cement/slag weight
-    on file, so they don't draw the silos down until their ticket is uploaded."""
+    """Per-material usage + cost. Cement & slag are silos (on-hand draw-down): each
+    completed order draws them down from the ACTUAL batched cement/slag weight on its
+    ticket, or — when it has no parsed ticket — falls back to the mix-design lb/yd ×
+    billable yards estimate, so completing an order draws material down even before
+    its ticket is uploaded. Aggregates and admixtures are actual-only (ticket needed).
+    Cost = used × the material's cost rate. Also returns mixes of completed orders
+    that can't draw down at all (no ticket weight AND no mix design to estimate)."""
     _ensure_materials(s)
+    designs = s.exec(select(MixDesign)).all()
     mats = sorted(s.exec(select(Material)).all(),
                   key=lambda m: next((i for i, d in enumerate(DEFAULT_MATERIALS)
                                       if d["name"] == m.name), 99))
     cutoffs = [m.counted_on for m in mats if m.counted_on]
     earliest = min(cutoffs) if cutoffs else ""
-    # Resolve each completed order once: its completion date and ticket actuals.
-    completed, untracked = [], {}
+    # Resolve each completed order once: its date, ticket actuals, and (for the
+    # cement/slag estimate fallback) its billable yards + matched mix design.
+    completed, unmapped = [], {}
     for o in s.exec(select(Order).where(Order.status == "complete")).all():
         done = o.completed_at or ""
         actuals = _ticket_actuals(o)
         yds = pricing._num(_billable_yards(o, s))
-        completed.append({"done": done, "actuals": actuals})
-        # A completed order with yards but no batched cement/slag weight on file
-        # isn't drawing the silos down — surface its mix so staff can upload that
-        # order's batch ticket (re-uploading re-parses + stores the real weights).
-        if yds > 0 and not actuals.get("cement") and not actuals.get("slag"):
+        d = _design_for(o.mix, designs) if yds > 0 else None
+        completed.append({"done": done, "actuals": actuals, "yds": yds, "design": d})
+        # An order with yards but no cement actual AND no mix design can't draw the
+        # cement/slag silos down — surface its mix so staff can add a design for it.
+        if yds > 0 and not actuals.get("cement") and not actuals.get("slag") and not d:
             if not earliest or done >= earliest:
-                untracked[o.mix] = round(untracked.get(o.mix, 0.0) + yds, 2)
+                unmapped[o.mix] = round(unmapped.get(o.mix, 0.0) + yds, 2)
 
+    _EST_FIELD = {"cement": "cement_lb_yd", "slag": "slag_lb_yd"}
     items, total_cost = [], 0.0
     for m in mats:
         key, unit, to_ton = _MATERIAL_SPEC.get(m.name, ("", m.unit or "ton", (m.unit or "ton") == "ton"))
         cutoff = m.counted_on or ""
-        used_native = 0.0
+        used_native = used_ticket_native = 0.0
         for c in completed:
             if cutoff and c["done"] < cutoff:
                 continue
             a = c["actuals"].get(key)
             if a:
-                used_native += a
+                used_native += a; used_ticket_native += a
+            elif m.track_inventory and key in _EST_FIELD and c["design"] and c["yds"] > 0:
+                used_native += c["yds"] * (getattr(c["design"], _EST_FIELD[key]) or 0)
         conv = TONS_PER_LB if to_ton else 1.0
         used = used_native * conv
+        used_ticket = used_ticket_native * conv
         cost = used * (m.cost_rate or 0)
         total_cost += cost
         item = {
             "id": m.id, "name": m.name, "unit": unit,
             "cost_rate": m.cost_rate or 0, "track_inventory": bool(m.track_inventory),
             "counted_on": m.counted_on,
-            "used_amount": round(used, 2), "used_ticket_amount": round(used, 2),
-            "used_estimate_amount": 0,
+            "used_amount": round(used, 2), "used_ticket_amount": round(used_ticket, 2),
+            "used_estimate_amount": round(used - used_ticket, 2),
             "cost": round(cost, 2),
         }
         if m.track_inventory:
@@ -875,7 +883,7 @@ def _materials_summary(s: Session) -> dict:
             })
         items.append(item)
     return {"materials": items, "total_cost": round(total_cost, 2),
-            "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(untracked.items())]}
+            "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())]}
 
 
 _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"}
