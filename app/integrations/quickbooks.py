@@ -490,6 +490,14 @@ def sync_ar_from_quickbooks() -> dict:
                       "Set QBO_* in .env to enable live sync.",
         }
 
+    # Refresh the customer roster FIRST, so a brand-new QuickBooks customer (and any
+    # invoices already on it) is picked up this run instead of waiting for a manual
+    # import. A hiccup here shouldn't block the A/R sync, so it's best-effort.
+    try:
+        import_customers_from_quickbooks()
+    except Exception as e:
+        print("customer import during A/R sync failed:", e)
+
     with httpx.Client(timeout=30) as client:
         token = _access_token(client)
         raw = _query_invoices(client, token)
