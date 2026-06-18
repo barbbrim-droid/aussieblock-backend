@@ -121,7 +121,9 @@ def _mix_design_from(materials) -> dict:
         elif re.search(r"\be5\b|liquid\s*fly\s*ash|\blfa\b|fly\s*ash", n):
             md["e5_lfa"] = adx
         # Water reducer must be checked BEFORE plain water (the name contains "water").
-        elif re.search(r"reduc|glenium|polyheed|pozzolith|wrda|daracem|\bwr\b|\badva\b|plastol|mira", n):
+        # "Master/Macier X-Seed 66" is this plant's water reducer (read off the ticket
+        # either way), so match the distinctive "x-seed" token regardless of prefix.
+        elif re.search(r"reduc|glenium|polyheed|pozzolith|wrda|daracem|\bwr\b|\badva\b|plastol|mira|x[\s-]*seed", n):
             md["water_reducer"] = adx
         elif re.search(r"entrain|daravair|darex|micro\s*air|airex|\bae\b", n):
             md["air_entrainer"] = adx
