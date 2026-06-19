@@ -305,6 +305,27 @@ def render_ticket(data, out_path):
     pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
     pdf.cell(half - 3, 3, f"({mw_lb:.1f} lb  -  at max w/c {d['max_wc']})", align="R")
 
+    # ---------- terms & conditions + caustic warning ----------
+    try:
+        from .delivery_ticket import TERMS, WARNING
+    except ImportError:                       # standalone (PyInstaller) context
+        from delivery_ticket import TERMS, WARNING
+    pdf.set_y(fy + box_h + 2)
+    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6); pdf.set_text_color(*INK)
+    pdf.cell(W, 3, "TERMS & CONDITIONS", ln=1)
+    pdf.set_x(10); pdf.set_font("DejaVu", "", 5.2); pdf.set_text_color(*GREY)
+    pdf.multi_cell(W, 2.3, TERMS, align="J")
+    pdf.ln(0.8)
+    ay = pdf.get_y()
+    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6.5); pdf.set_text_color(*INK)
+    pdf.cell(72, 4, "Water added on site by request of / authorized by:")
+    pdf.set_draw_color(201, 205, 211); pdf.set_line_width(0.2)
+    pdf.line(82, ay + 3.4, 10 + W, ay + 3.4)
+    pdf.ln(5)
+    pdf.set_draw_color(*RED); pdf.set_line_width(0.4); pdf.set_fill_color(252, 232, 230)
+    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6.4); pdf.set_text_color(*RED)
+    pdf.multi_cell(W, 3.0, WARNING, border=1, align="C", fill=True)
+
     pdf.output(out_path)
     return out_path
 
