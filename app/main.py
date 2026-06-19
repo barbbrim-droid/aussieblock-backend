@@ -303,7 +303,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.7-driver-own-load-ticket"
+APP_VERSION = "2026-06-19.8-driver-pour-signoff"
 
 
 @app.get("/version")
@@ -1360,11 +1360,21 @@ def _billable_yards(o: Order, s: Session) -> str:
     return o.qty
 
 
-def _is_driver_of(o: Order, user: User) -> bool:
-    """True when this driver login is the assigned driver on the order (matched by
-    name: the driver's User.company vs Order.driver, case/space-insensitive)."""
-    return (user.role == "driver" and bool(o.driver) and bool(user.company)
-            and o.driver.strip().lower() == user.company.strip().lower())
+def _is_driver_of(o: Order, user: User, s: Session = None) -> bool:
+    """True when this driver login is a driver on the order — the order-level driver,
+    or (for a continuous pour, which is unassigned at the order level) the driver of
+    any of its loads. Matched by name: User.company vs the driver field. Pass the
+    session to enable the per-load check (omit it for an order-level-only check)."""
+    if user.role != "driver" or not user.company:
+        return False
+    me = user.company.strip().lower()
+    if o.driver and o.driver.strip().lower() == me:
+        return True
+    if s is not None:
+        for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+            if ld.driver and ld.driver.strip().lower() == me:
+                return True
+    return False
 
 
 def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_miles: bool = True) -> dict:
@@ -1543,7 +1553,7 @@ def get_batch_ticket(ref: str, variant: str = Query("view"),
     """Download an order's batch-ticket PDF (staff, or anyone on that company).
     variant='print' serves the light copy if one exists (else falls back)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user, s)):
         raise HTTPException(404, "Order not found")
     if variant == "original":
         matches = glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*"))
@@ -1683,7 +1693,7 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
     order — completing is the batch-plant operator's call; this just records the
     sign-off (proof of delivery). Driver may only sign their own assigned order."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or not _is_driver_of(o, user):
+    if not o or not _is_driver_of(o, user, s):
         raise HTTPException(404, "Order not found")
     if o.status == "requested":
         raise HTTPException(409, "This delivery hasn't been confirmed yet.")
@@ -1721,7 +1731,7 @@ def set_driver_notes(ref: str, body: DriverNotesIn, user: User = Depends(get_cur
     """Driver's on-site notes (site access, who received it, issues, etc.). The
     assigned driver or any staff user may set it; visible to dispatch on the board."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and not _is_driver_of(o, user)):
+    if not o or (user.role != "staff" and not _is_driver_of(o, user, s)):
         raise HTTPException(404, "Order not found")
     o.driver_notes = (body.notes or "").strip() or None
     s.add(o); s.commit(); s.refresh(o)
@@ -1732,7 +1742,7 @@ def set_driver_notes(ref: str, body: DriverNotesIn, user: User = Depends(get_cur
 def get_signature(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """View the captured signature image (staff, the owning company, or the driver)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user, s)):
         raise HTTPException(404, "Order not found")
     if not o.signature:
         raise HTTPException(404, "No signature on this order yet.")
@@ -1749,7 +1759,7 @@ def batch_ticket_images(ref: str, user: User = Depends(get_current_user), s: Ses
     INSIDE the app (an <iframe> PDF won't render on Android; images always do).
     Staff, the owning company, or the assigned driver."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user, s)):
         raise HTTPException(404, "Order not found")
     if not o.batch_ticket:
         raise HTTPException(404, "No batch ticket for this order yet.")
@@ -1882,7 +1892,7 @@ def load_batch_ticket_images(ref: str, seq: int, user: User = Depends(get_curren
     # so authorize a driver who drove THIS load, not just the order's driver.
     drives_load = (user.role == "driver" and bool(user.company) and bool(ld.driver)
                    and ld.driver.strip().lower() == user.company.strip().lower())
-    if user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user) and not drives_load:
+    if user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user, s) and not drives_load:
         raise HTTPException(404, "Order not found")
     path = os.path.join(_batch_ticket_dir(), ld.batch_ticket)
     if not os.path.exists(path):
