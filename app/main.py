@@ -303,7 +303,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.5-driver-app-notes"
+APP_VERSION = "2026-06-19.6-driver-load-tickets"
 
 
 @app.get("/version")
@@ -1863,6 +1863,36 @@ def get_load_batch_ticket(ref: str, seq: int, variant: str = Query("view"),
     return FileResponse(path, media_type=_media_type(path),
                         filename=f"batch-ticket-{ref}-L{seq}{os.path.splitext(path)[1]}",
                         headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+@app.get("/orders/{ref}/loads/{seq}/batch-ticket-images")
+def load_batch_ticket_images(ref: str, seq: int, user: User = Depends(get_current_user),
+                             s: Session = Depends(get_session)):
+    """A load's batch ticket rendered to PNG page images (data URLs) — for showing
+    it INSIDE the app, including on the driver tablet for a continuous pour (where
+    the ticket lives on the load, not the order). Staff, the owning company, or the
+    assigned driver."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+        raise HTTPException(404, "Order not found")
+    ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+    if not ld or not ld.batch_ticket:
+        raise HTTPException(404, "No batch ticket for this load yet.")
+    path = os.path.join(_batch_ticket_dir(), ld.batch_ticket)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The batch ticket file is missing.")
+    import base64
+    pages = []
+    if path.lower().endswith(".pdf"):
+        import fitz
+        doc = fitz.open(path)
+        for pg in doc:
+            pages.append("data:image/png;base64," + base64.b64encode(pg.get_pixmap(dpi=110).tobytes("png")).decode())
+        doc.close()
+    else:
+        with open(path, "rb") as fh:
+            pages.append(f"data:{_media_type(path)};base64," + base64.b64encode(fh.read()).decode())
+    return {"pages": pages}
 
 
 @app.delete("/orders/{ref}/loads/{seq}/batch-ticket")
