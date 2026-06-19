@@ -303,7 +303,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.6-driver-load-tickets"
+APP_VERSION = "2026-06-19.7-driver-own-load-ticket"
 
 
 @app.get("/version")
@@ -1873,11 +1873,17 @@ def load_batch_ticket_images(ref: str, seq: int, user: User = Depends(get_curren
     the ticket lives on the load, not the order). Staff, the owning company, or the
     assigned driver."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user)):
+    if not o:
         raise HTTPException(404, "Order not found")
     ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
     if not ld or not ld.batch_ticket:
         raise HTTPException(404, "No batch ticket for this load yet.")
+    # A pour is usually unassigned at the order level (drivers live on the loads),
+    # so authorize a driver who drove THIS load, not just the order's driver.
+    drives_load = (user.role == "driver" and bool(user.company) and bool(ld.driver)
+                   and ld.driver.strip().lower() == user.company.strip().lower())
+    if user.role != "staff" and o.customer_id != user.customer_id and not _is_driver_of(o, user) and not drives_load:
+        raise HTTPException(404, "Order not found")
     path = os.path.join(_batch_ticket_dir(), ld.batch_ticket)
     if not os.path.exists(path):
         raise HTTPException(404, "The batch ticket file is missing.")
