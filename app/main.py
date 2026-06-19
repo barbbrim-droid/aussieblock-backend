@@ -300,6 +300,16 @@ def health():
     return {"ok": True}
 
 
+# Deploy marker — bump APP_VERSION on each backend change so we can confirm from
+# the outside which build is actually live (the API surface alone doesn't reveal it).
+APP_VERSION = "2026-06-19.1-costs-parallel-bounded"
+
+
+@app.get("/version")
+def version():
+    return {"version": APP_VERSION}
+
+
 # ── Authentication ──────────────────────────────────────────────────────────
 @app.post("/auth/login")
 def login(form: OAuth2PasswordRequestForm = Depends(), s: Session = Depends(get_session)):
