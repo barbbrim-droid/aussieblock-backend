@@ -4,6 +4,11 @@ qbo_tokens.json
 *.db
 *.db-journal
 
+# ── Runtime upload dirs (live on the Render persistent disk, not in git) ──
+batch_tickets/
+material_photos/
+knowledge/
+
 # ── Python ──
 venv/
 __pycache__/
