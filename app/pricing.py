@@ -148,12 +148,16 @@ def _adx_lbs(name: str, order_admixtures: str, materials) -> float:
 
 
 def _adx_present(name: str, order_admixtures: str, materials) -> bool:
-    n = _norm(name)
-    if n and n in _norm(order_admixtures):
+    """True when this admixture was used — named in the order's admixtures text OR
+    batched on the ticket (materials). Matching ignores spaces so a sheet entry
+    'Master Set Delvo' matches the tracked/printed 'Masterset Delvo' / 'MasterSet
+    DELVO', and a short 'Delvo' still matches either."""
+    n = _norm(name).replace(" ", "")
+    if n and n in _norm(order_admixtures).replace(" ", ""):
         return True
     for mat in (materials or []):
         mat_name = mat[0] if isinstance(mat, (list, tuple)) else str(mat)
-        if n and n in _norm(mat_name):
+        if n and n in _norm(mat_name).replace(" ", ""):
             return True
     return False
 

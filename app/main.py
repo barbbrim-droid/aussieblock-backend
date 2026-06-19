@@ -1350,7 +1350,14 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
     # bill the ACTUAL yards delivered (loads for a pour, batch-ticket delivered for
     # a single order), falling back to the ordered qty — see _billable_yards.
     billable = _billable_yards(o, s)
+    # Admixtures actually batched on the ticket(s), by tracked-material name — so
+    # plant-added ones (e.g. Masterset Delvo) bill even though they're not in the
+    # order's admixtures text. _ticket_actuals reliably maps the ticket row to its
+    # key (e.g. a Delvo/retarder row -> 'retarder'); map back to the material name.
+    _key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
+    batched_adx = [_key_name[k] for k in _ticket_actuals(o, s) if k in _key_name]
     cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable,
+                                 materials=batched_adx,
                                  order_admixtures=o.admixtures or "", unit_override=o.price_override,
                                  fiber_rate_override=o.fiber_rate)
     # mileage: use the stored value, else auto-compute once and cache it on the order
