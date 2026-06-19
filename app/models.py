@@ -173,7 +173,7 @@ class Material(SQLModel, table=True):
     """A tracked raw material. Cementitious ones (Portland, Slag) are kept in silos
     with on-hand = opening balance + tons received − tons used, counted from
     `counted_on`; the fill gauge + reorder alert read off that. Aggregates and
-    admixtures (Gravel, Sand, Mac Matrix Fiber, Air Entrainer, Water Reducer) set
+    admixtures (Gravel, Sand, Mac Matrix Fiber, Masterset Delvo, Water Reducer) set
     `track_inventory=False` and are tracked by actual batched usage + cost only.
     Usage cost = actual amount used × `cost_rate` ($ per `unit`)."""
     id: Optional[int] = Field(default=None, primary_key=True)

@@ -732,7 +732,7 @@ _MATERIAL_SPEC = {
     "Gravel":           ("rock",          "ton", True),
     "Sand":             ("sand",          "ton", True),
     "Mac Matrix Fiber": ("fiber",         "lb",  False),
-    "Air Entrainer":    ("air_entrainer", "oz",  False),
+    "Masterset Delvo":  ("retarder",      "oz",  False),
     "Water Reducer":    ("water_reducer", "oz",  False),
     "E5 LFA":           ("e5_lfa",        "oz",  False),
 }
@@ -743,7 +743,7 @@ DEFAULT_MATERIALS = [
     {"name": "Gravel",           "unit": "ton", "track_inventory": False},
     {"name": "Sand",             "unit": "ton", "track_inventory": False},
     {"name": "Mac Matrix Fiber", "unit": "lb",  "track_inventory": False},
-    {"name": "Air Entrainer",    "unit": "oz",  "track_inventory": False},
+    {"name": "Masterset Delvo",  "unit": "oz",  "track_inventory": False},
     {"name": "Water Reducer",    "unit": "oz",  "track_inventory": False},
     {"name": "E5 LFA",           "unit": "oz",  "track_inventory": False},
 ]
@@ -755,7 +755,16 @@ def _ensure_materials(s: Session) -> None:
     already-seeded production DB on deploy. Runs in production too; idempotent."""
     today = _business_today().isoformat()
     changed = False
-    have = {(m.name or "").strip().lower() for m in s.exec(select(Material)).all()}
+    # Rename a retired material in place so it's REPLACED (keeping its id, cost rate
+    # and history), not duplicated alongside the new one. Air Entrainer → Masterset
+    # Delvo (the plant tracks the retarder, not air entrainer).
+    _RENAMES = {"air entrainer": "Masterset Delvo"}
+    existing_mats = s.exec(select(Material)).all()
+    have = {(m.name or "").strip().lower() for m in existing_mats}
+    for m in existing_mats:
+        new = _RENAMES.get((m.name or "").strip().lower())
+        if new and new.strip().lower() not in have:
+            m.name = new; s.add(m); have.add(new.strip().lower()); changed = True
     for spec in DEFAULT_MATERIALS:
         if spec["name"].strip().lower() not in have:
             # Inventory silos count from today; usage-only materials count all-time
@@ -794,7 +803,7 @@ def _design_for(mix: str, designs: list):
 
 def _actuals_from_bd(bd: str) -> dict:
     """Actual batched amounts from one batch_data JSON blob, keyed by mix-design key
-    (cement/slag/rock/sand/fiber/air_entrainer/water_reducer/e5_lfa) in the value's
+    (cement/slag/rock/sand/fiber/retarder/water_reducer/e5_lfa) in the value's
     native unit as printed (lb for solids, oz for liquid admixtures). Empty when the
     blob is missing or unparseable."""
     if not bd:
@@ -804,7 +813,7 @@ def _actuals_from_bd(bd: str) -> dict:
     except (ValueError, TypeError):
         return {}
     out = {}
-    for key in ("cement", "slag", "rock", "sand", "fiber", "air_entrainer", "water_reducer", "e5_lfa"):
+    for key in ("cement", "slag", "rock", "sand", "fiber", "retarder", "water_reducer", "e5_lfa"):
         v = pricing._num((md.get(key) or {}).get("actual"))
         if v > 0:
             out[key] = v

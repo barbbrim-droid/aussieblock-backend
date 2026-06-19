@@ -90,12 +90,12 @@ def _mix_design_from(materials) -> dict:
     """Collapse the protocol's material rows into the app's mix-design grid, keeping
     Portland cement and slag as SEPARATE rows so the materials tracker can read each
     one's actual batched weight. 'Slag Cement' counts as slag (checked before cement).
-    Aggregates (rock/sand) and admixtures (fiber/air entrainer/water reducer) carry
+    Aggregates (rock/sand) and admixtures (fiber/retarder/water reducer) carry
     their actual too — the tracker draws usage + cost off these. Admixture cells keep
     a 'unit' (lb for fiber, oz for liquids) since their cost rate is per that unit."""
     md = {k: {"design": "", "target": "", "actual": ""}
           for k in ["rock", "sand", "cement", "slag", "air", "water",
-                    "fiber", "air_entrainer", "water_reducer", "e5_lfa"]}
+                    "fiber", "retarder", "water_reducer", "e5_lfa"]}
     cem = [0.0, 0.0, 0.0]   # recipe / target / actual lb
     slag = [0.0, 0.0, 0.0]
     for row in materials or []:
@@ -125,8 +125,10 @@ def _mix_design_from(materials) -> dict:
         # either way), so match the distinctive "x-seed" token regardless of prefix.
         elif re.search(r"reduc|glenium|polyheed|pozzolith|wrda|daracem|\bwr\b|\badva\b|plastol|mira|x[\s-]*seed", n):
             md["water_reducer"] = adx
-        elif re.search(r"entrain|daravair|darex|micro\s*air|airex|\bae\b", n):
-            md["air_entrainer"] = adx
+        # Set retarder — this plant uses "MasterSet DELVO" (a Type D retarder); also
+        # catch generic retarder/stabilizer names.
+        elif re.search(r"delvo|retard|stabiliz|recover|\bdtd\b", n):
+            md["retarder"] = adx
         elif "water" in n:
             md["water"] = cell
     if cem[1] or cem[2]:
