@@ -239,15 +239,7 @@ def render_delivery_ticket(data, out_path):
     pdf.cell(W, 3, "TERMS & CONDITIONS", ln=1)
     pdf.set_x(10); pdf.set_font("DejaVu", "", 5.2); pdf.set_text_color(*GREY)
     pdf.multi_cell(W, 2.3, d.get("terms") or TERMS, align="J")
-
-    # water-added authorization sign-off line
-    pdf.ln(0.8)
-    ay = pdf.get_y()
-    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6.5); pdf.set_text_color(*INK)
-    pdf.cell(72, 4, "Water added on site by request of / authorized by:")
-    pdf.set_draw_color(*LINE); pdf.set_line_width(0.2)
-    pdf.line(82, ay + 3.4, 10 + W, ay + 3.4)
-    pdf.ln(5)
+    pdf.ln(2)
 
     # ---- caustic safety warning ----
     pdf.set_draw_color(*WARN_RED); pdf.set_line_width(0.4); pdf.set_fill_color(*WARN_BG)
