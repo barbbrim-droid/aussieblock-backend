@@ -1778,18 +1778,24 @@ def delete_load_batch_ticket(ref: str, seq: int, _: User = Depends(require_staff
 
 
 @app.post("/materials/backfill-load-tickets")
-def backfill_load_tickets(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+def backfill_load_tickets(force: bool = False, _: User = Depends(require_staff),
+                          s: Session = Depends(get_session)):
     """Re-parse the stored ORIGINAL of every load batch ticket that has no saved
     weights yet (e.g. uploaded before per-load batch_data existed) and fill it in,
     so the silo tracker draws those pours down from real ticket actuals without
     staff re-uploading anything. Idempotent; skips loads already parsed and photos
-    (only typed protocols carry per-material weights). Needs the vision key."""
+    (only typed protocols carry per-material weights). Needs the vision key.
+
+    `force=true` re-parses loads that ALREADY have weights too — use it after a
+    parser change (e.g. a new admixture mapping) so existing tickets pick it up."""
     if not ticket_convert.available():
         raise HTTPException(503, "Ticket reader unavailable (ANTHROPIC_API_KEY not set).")
     bdir = _batch_ticket_dir()
     filled, skipped, failed = 0, 0, 0
-    for ld in s.exec(select(Load).where(Load.batch_ticket.is_not(None),
-                                        Load.batch_data.is_(None))).all():
+    q = select(Load).where(Load.batch_ticket.is_not(None))
+    if not force:
+        q = q.where(Load.batch_data.is_(None))
+    for ld in s.exec(q).all():
         o = s.get(Order, ld.order_id)
         if not o:
             skipped += 1; continue
