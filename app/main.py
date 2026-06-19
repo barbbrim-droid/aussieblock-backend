@@ -10,7 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from typing import List, Optional
 import glob
 import json
@@ -1408,13 +1408,20 @@ def orders_pricing_bulk(body: BulkPricingIn, user: User = Depends(get_current_us
     # result on each order, and commit once — later opens then have nothing to fetch.
     need = sorted({o.site for o in orders if o.mileage is None and o.site})
     if need:
-        def _mi(site):
-            try:
-                return site, pricing.road_miles(site)
-            except Exception:
-                return site, None
+        miles = {}
         with ThreadPoolExecutor(max_workers=min(16, len(need))) as ex:
-            miles = dict(ex.map(_mi, need))
+            futs = {ex.submit(pricing.road_miles, site): site for site in need}
+            try:
+                # Hard overall budget: whatever doesn't resolve in time is left
+                # uncached and picked up on a later open, so this request can never
+                # hang the Costs screen even if an address lookup is slow.
+                for fut in as_completed(futs, timeout=12):
+                    try:
+                        miles[futs[fut]] = fut.result()
+                    except Exception:
+                        pass
+            except TimeoutError:
+                pass
         changed = False
         for o in orders:
             if o.mileage is None and miles.get(o.site) is not None:
