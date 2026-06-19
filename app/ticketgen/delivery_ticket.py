@@ -19,6 +19,28 @@ ORANGE = (231, 115, 42)
 SHADE  = (239, 237, 232)
 GREY   = (107, 114, 128)
 LINE   = (201, 205, 211)
+WARN_RED = (193, 32, 32)
+WARN_BG  = (252, 232, 230)
+
+# Boilerplate printed at the bottom of every ticket. Either can be overridden per
+# render by passing data["terms"] / data["warning"].
+TERMS = (
+    "Purchaser must provide suitable roadways/approaches to the delivery point; we reserve the right to "
+    "stop delivery if approaches are unsatisfactory. For delivery beyond the curb line, we assume no liability "
+    "for damage to sidewalks, driveways, or property, and Purchaser indemnifies and holds us harmless against "
+    "all resulting liability, loss, and expense. This concrete meets the mix standard designated above; if "
+    "altered by the customer, if water is added, or if not placed and cured per ASTM specifications, it may not "
+    "perform as designed and the customer assumes that risk. Aussieblock Ready Mix assumes no liability for "
+    "architectural finishes, including polished floors, colored concrete, and exposed aggregate. Purchaser "
+    "assumes all responsibility for strength, slump, and quality when water or other material is added on site. "
+    "Free unloading time is 5 min/yd after arrival; excess billed at $150.00/hr. Customer waives all rights of "
+    "personal-property exemption under Texas law, is responsible for any wrecker fees on this delivery, and may "
+    "be charged a fuel adjustment per load."
+)
+WARNING = (
+    "⚠ WARNING — CAUSTIC; IRRITATING TO SKIN & EYES. Take every precaution to avoid contact. "
+    "If contact occurs, wash the area immediately; if burning persists, seek medical attention."
+)
 
 
 def _res(name):
@@ -211,8 +233,29 @@ def render_delivery_ticket(data, out_path):
     pdf.set_xy(13, fy + 20); pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
     pdf.cell(W - 6, 3, "Excess water added at customer's request is the customer's responsibility for strength, slump and quality of concrete.")
 
-    pdf.set_y(fy + box_h + 2)
-    pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
+    # ---- terms & conditions ----
+    pdf.set_y(fy + box_h + 1.5)
+    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6); pdf.set_text_color(*INK)
+    pdf.cell(W, 3, "TERMS & CONDITIONS", ln=1)
+    pdf.set_x(10); pdf.set_font("DejaVu", "", 5.2); pdf.set_text_color(*GREY)
+    pdf.multi_cell(W, 2.3, d.get("terms") or TERMS, align="J")
+
+    # water-added authorization sign-off line
+    pdf.ln(0.8)
+    ay = pdf.get_y()
+    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6.5); pdf.set_text_color(*INK)
+    pdf.cell(72, 4, "Water added on site by request of / authorized by:")
+    pdf.set_draw_color(*LINE); pdf.set_line_width(0.2)
+    pdf.line(82, ay + 3.4, 10 + W, ay + 3.4)
+    pdf.ln(5)
+
+    # ---- caustic safety warning ----
+    pdf.set_draw_color(*WARN_RED); pdf.set_line_width(0.4); pdf.set_fill_color(*WARN_BG)
+    pdf.set_x(10); pdf.set_font("DejaVu", "B", 6.4); pdf.set_text_color(*WARN_RED)
+    pdf.multi_cell(W, 3.0, d.get("warning") or WARNING, border=1, align="C", fill=True)
+
+    pdf.ln(1)
+    pdf.set_x(10); pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
     pdf.cell(W, 3, c.get("emails", ""), align="C")
 
     pdf.output(out_path)
