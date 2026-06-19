@@ -257,6 +257,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "signed_by": o.signed_by,
         "signed_at": o.signed_at,
         "water_added": o.water_added,
+        "driver_notes": o.driver_notes,
         "has_signature": bool(o.signature),
         "prepay_required": o.prepay_required,
         "prepaid": o.prepaid,
@@ -302,7 +303,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.4-material-usage-filter"
+APP_VERSION = "2026-06-19.5-driver-app-notes"
 
 
 @app.get("/version")
@@ -1707,6 +1708,23 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
     # status is left as-is — the operator completes the order when they decide.
     s.add(o); s.commit(); s.refresh(o)
     _stamp_signature_on_ticket(o, s)   # add the signature to the batch-ticket PDF if one's uploaded
+    return _order_json(o, s)
+
+
+class DriverNotesIn(BaseModel):
+    notes: Optional[str] = None   # free text; null/blank clears it
+
+
+@app.put("/orders/{ref}/driver-notes")
+def set_driver_notes(ref: str, body: DriverNotesIn, user: User = Depends(get_current_user),
+                     s: Session = Depends(get_session)):
+    """Driver's on-site notes (site access, who received it, issues, etc.). The
+    assigned driver or any staff user may set it; visible to dispatch on the board."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and not _is_driver_of(o, user)):
+        raise HTTPException(404, "Order not found")
+    o.driver_notes = (body.notes or "").strip() or None
+    s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
 

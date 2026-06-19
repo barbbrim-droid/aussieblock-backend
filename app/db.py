@@ -56,7 +56,7 @@ _COLUMN_MIGRATIONS = {
         "prepay_required": "BOOLEAN DEFAULT 0", "prepay_amount": "FLOAT",
         "prepay_invoice_id": "VARCHAR", "prepaid": "BOOLEAN DEFAULT 0",
         "signed_by": "VARCHAR", "signature": "VARCHAR", "signed_at": "VARCHAR", "water_added": "VARCHAR",
-        "site_lat": "FLOAT", "site_lng": "FLOAT", "completed_at": "VARCHAR",
+        "site_lat": "FLOAT", "site_lng": "FLOAT", "completed_at": "VARCHAR", "driver_notes": "VARCHAR",
     },
 }
 

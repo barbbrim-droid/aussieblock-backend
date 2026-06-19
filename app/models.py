@@ -100,6 +100,7 @@ class Order(SQLModel, table=True):
     signed_at: Optional[str] = None             # ISO timestamp of the sign-off
     water_added: Optional[str] = None           # gallons of water added on site (driver records at sign-off)
     completed_at: Optional[str] = None           # ISO date the order was marked complete (drives material draw-down)
+    driver_notes: Optional[str] = None           # free notes the driver records on site (visible to dispatch)
 
 
 class Invoice(SQLModel, table=True):
