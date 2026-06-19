@@ -10,6 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 import glob
 import json
@@ -1339,10 +1340,12 @@ def _is_driver_of(o: Order, user: User) -> bool:
             and o.driver.strip().lower() == user.company.strip().lower())
 
 
-def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict) -> dict:
+def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_miles: bool = True) -> dict:
     """Build the pricing payload for one order (customer bill + delivery/haul cost).
     Caches a freshly-computed mileage on the order but does NOT commit — the caller
-    commits (once) so a bulk run doesn't fire a write per order."""
+    commits (once) so a bulk run doesn't fire a write per order. compute_miles=False
+    skips the (slow) road-miles lookup and uses only the stored value — the bulk path
+    prefetches mileages in parallel up front, so it must not look them up again here."""
     cust = s.get(Customer, o.customer_id).name if o.customer_id else ""
     # bill the ACTUAL yards delivered (loads for a pour, batch-ticket delivered for
     # a single order), falling back to the ordered qty — see _billable_yards.
@@ -1358,7 +1361,7 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict) -> dict:
                                  fiber_rate_override=o.fiber_rate)
     # mileage: use the stored value, else auto-compute once and cache it on the order
     mi = o.mileage
-    if mi is None:
+    if mi is None and compute_miles:
         mi = pricing.road_miles(o.site)
         if mi is not None:
             o.mileage = mi
@@ -1399,10 +1402,29 @@ def orders_pricing_bulk(body: BulkPricingIn, user: User = Depends(get_current_us
     orders = s.exec(q).all()
     sheet = pricing.load_sheet()
     key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
+    # Pre-compute any missing haul mileages in PARALLEL (each is a ~Google lookup).
+    # Doing them one-by-one inside the loop is what made the Costs screen take ages
+    # on first open. Dedupe by address so repeat job sites cost one lookup, cache the
+    # result on each order, and commit once — later opens then have nothing to fetch.
+    need = sorted({o.site for o in orders if o.mileage is None and o.site})
+    if need:
+        def _mi(site):
+            try:
+                return site, pricing.road_miles(site)
+            except Exception:
+                return site, None
+        with ThreadPoolExecutor(max_workers=min(16, len(need))) as ex:
+            miles = dict(ex.map(_mi, need))
+        changed = False
+        for o in orders:
+            if o.mileage is None and miles.get(o.site) is not None:
+                o.mileage = miles[o.site]; s.add(o); changed = True
+        if changed:
+            s.commit()
     out = {}
     for o in orders:
         try:
-            out[o.ref] = _pricing_for(o, s, sheet, key_name)
+            out[o.ref] = _pricing_for(o, s, sheet, key_name, compute_miles=False)
         except Exception:
             out[o.ref] = {"error": True}
     s.commit()   # one commit for any mileages cached across the whole batch
