@@ -221,6 +221,8 @@ def _load_json(ld: Load, s: Session, ref: str) -> dict:
         "status": ld.status, "progress": round(ld.progress, 3),
         "has_batch_ticket": bool(ld.batch_ticket),
         "has_original": has_orig,
+        "signed_by": ld.signed_by, "signed_at": ld.signed_at,
+        "water_added": ld.water_added, "has_signature": bool(ld.signature),
         "truck_position": ({"lat": t.lat, "lng": t.lng, "heading": t.heading}
                            if t and t.lat is not None else None),
     }
@@ -303,7 +305,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.8-driver-pour-signoff"
+APP_VERSION = "2026-06-19.9-per-load-signoff"
 
 
 @app.get("/version")
@@ -1605,31 +1607,35 @@ def _signature_dir() -> str:
 
 
 def _stamp_signature_on_ticket(o: Order, s: Session) -> None:
-    """Stamp the customer sign-off (signature image + water added + signed-by/date)
-    onto the order's batch-ticket PDF when both the PDF and a signature exist —
-    placed at the bottom of the LAST page, just under the existing content so it
-    never covers the batch data (only falls back to a new page if the ticket fills
-    the whole sheet). Runs on sign-off AND on each batch-ticket upload so the
-    uploaded ticket always carries the signature. Best-effort (never raises);
-    idempotent in practice (uploads rewrite the PDF before stamping; an order signs
-    once)."""
-    if not (o.batch_ticket and o.batch_ticket.lower().endswith(".pdf") and o.signature):
+    """Stamp the order's customer sign-off onto its batch-ticket PDF (no-op if either
+    is missing). Runs on sign-off AND on each batch-ticket upload."""
+    if not o.batch_ticket:
         return
-    pdf_path = os.path.join(_batch_ticket_dir(), o.batch_ticket)
-    sig_path = os.path.join(_signature_dir(), o.signature)
+    _stamp_signature_pdf(os.path.join(_batch_ticket_dir(), o.batch_ticket),
+                         o.signature, o.signed_by, o.signed_at, o.water_added)
+
+
+def _stamp_signature_pdf(pdf_path: str, signature: str, signed_by: str,
+                         signed_at_iso: str, water_added: str) -> None:
+    """Stamp a customer sign-off (signature image + water added + signed-by/date)
+    onto a batch-ticket PDF — placed at the bottom of the LAST page, just under the
+    existing content so it never covers the batch data. Best-effort (never raises)."""
+    if not (pdf_path and pdf_path.lower().endswith(".pdf") and signature):
+        return
+    sig_path = os.path.join(_signature_dir(), signature)
     if not (os.path.exists(pdf_path) and os.path.exists(sig_path)):
         return
     try:
         import fitz   # PyMuPDF
         navy, grey = (0.05, 0.07, 0.09), (0.4, 0.4, 0.46)
-        signed_at = o.signed_at or ""
+        signed_at = signed_at_iso or ""
         try:
-            signed_at = datetime.fromisoformat(o.signed_at).strftime("%b %d, %Y %I:%M %p UTC")
+            signed_at = datetime.fromisoformat(signed_at_iso).strftime("%b %d, %Y %I:%M %p UTC")
         except (ValueError, TypeError):
             pass
-        meta = f"Signed by {o.signed_by or '—'}"
-        if o.water_added:
-            meta += f"      Water added on site: {o.water_added} gal"
+        meta = f"Signed by {signed_by or '—'}"
+        if water_added:
+            meta += f"      Water added on site: {water_added} gal"
         if signed_at:
             meta += f"      {signed_at}"
 
@@ -1718,6 +1724,50 @@ async def sign_off_order(ref: str, file: UploadFile = File(...),
     # status is left as-is — the operator completes the order when they decide.
     s.add(o); s.commit(); s.refresh(o)
     _stamp_signature_on_ticket(o, s)   # add the signature to the batch-ticket PDF if one's uploaded
+    return _order_json(o, s)
+
+
+@app.post("/orders/{ref}/loads/{seq}/signoff")
+async def sign_off_load(ref: str, seq: int, file: UploadFile = File(...),
+                        signed_by: str = Query(...),
+                        water_added: str = Query(""),
+                        user: User = Depends(require_driver),
+                        s: Session = Depends(get_session)):
+    """Capture the customer's signature for ONE load of a continuous pour, so each
+    truck is signed for as it's delivered (a pour has many loads/drivers — one
+    order-level signature can't cover them). Driver must have driven this load."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+    if not ld:
+        raise HTTPException(404, "Load not found")
+    drives_load = (bool(user.company) and bool(ld.driver)
+                   and ld.driver.strip().lower() == user.company.strip().lower())
+    if not drives_load and not _is_driver_of(o, user, s):
+        raise HTTPException(404, "Order not found")
+    if ld.signature:
+        raise HTTPException(409, "This load has already been signed.")
+    name = (signed_by or "").strip()
+    if not name:
+        raise HTTPException(422, "Enter who signed for the delivery.")
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Signature image is too large.")
+    ctype = (file.content_type or "").lower()
+    if not (ctype.startswith("image/") or raw[:8] == b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(422, "Signature must be an image.")
+    fname = f"{_load_ticket_prefix(ref, seq)}_signature.png"
+    with open(os.path.join(_signature_dir(), fname), "wb") as fh:
+        fh.write(raw)
+    ld.signature = fname
+    ld.signed_by = name
+    ld.water_added = (water_added or "").strip() or None
+    ld.signed_at = datetime.utcnow().isoformat()
+    s.add(ld); s.commit(); s.refresh(ld)
+    if ld.batch_ticket:
+        _stamp_signature_pdf(os.path.join(_batch_ticket_dir(), ld.batch_ticket),
+                             ld.signature, ld.signed_by, ld.signed_at, ld.water_added)
     return _order_json(o, s)
 
 

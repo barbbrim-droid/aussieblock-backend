@@ -140,6 +140,11 @@ class Load(SQLModel, table=True):
     progress: float = 0.0
     batch_ticket: Optional[str] = None           # this load's branded ticket filename
     batch_data: Optional[str] = None             # parsed protocol weights (JSON) for the silo tracker
+    # Per-load proof of delivery — the customer signs off each truck as it's poured.
+    signed_by: Optional[str] = None              # printed name of who signed for this load
+    signature: Optional[str] = None              # stored signature image filename
+    signed_at: Optional[str] = None              # ISO timestamp of the sign-off
+    water_added: Optional[str] = None            # gallons of water added on site for this load
 
 
 class FuelTransaction(SQLModel, table=True):
