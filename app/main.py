@@ -302,7 +302,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.3-drop-redundant-water-line"
+APP_VERSION = "2026-06-19.4-material-usage-filter"
 
 
 @app.get("/version")
@@ -843,14 +843,19 @@ def _ticket_actuals(o: Order, s: Session) -> dict:
     return out
 
 
-def _materials_summary(s: Session) -> dict:
+def _materials_summary(s: Session, frm: str = None, to: str = None) -> dict:
     """Per-material usage + cost. Cement & slag are silos (on-hand draw-down): each
     completed order draws them down from the ACTUAL batched cement/slag weight on its
     ticket, or — when it has no parsed ticket — falls back to the mix-design lb/yd ×
     billable yards estimate, so completing an order draws material down even before
     its ticket is uploaded. Aggregates and admixtures are actual-only (ticket needed).
     Cost = used × the material's cost rate. Also returns mixes of completed orders
-    that can't draw down at all (no ticket weight AND no mix design to estimate)."""
+    that can't draw down at all (no ticket weight AND no mix design to estimate).
+
+    frm/to (yyyy-mm-dd, optional) restrict the USAGE/cost figures to orders completed
+    in that window — for "material used on a given day / range". Silo on-hand and
+    received tons stay computed over the full cutoff (the true current balance) so the
+    window only ever narrows what's shown as used, never the live inventory level."""
     _ensure_materials(s)
     designs = s.exec(select(MixDesign)).all()
     mats = sorted(s.exec(select(Material)).all(),
@@ -878,18 +883,26 @@ def _materials_summary(s: Session) -> dict:
     for m in mats:
         key, unit, to_ton = _MATERIAL_SPEC.get(m.name, ("", m.unit or "ton", (m.unit or "ton") == "ton"))
         cutoff = m.counted_on or ""
-        used_native = used_ticket_native = 0.0
+        # used_native = within the requested window (what's shown as "used"/cost);
+        # bal_native = cutoff..now regardless of window, used only for the silo balance.
+        used_native = used_ticket_native = bal_native = 0.0
         for c in completed:
-            if cutoff and c["done"] < cutoff:
+            done = c["done"]
+            if cutoff and done < cutoff:
                 continue
             a = c["actuals"].get(key)
-            if a:
-                used_native += a; used_ticket_native += a
-            elif m.track_inventory and key in _EST_FIELD and c["design"] and c["yds"] > 0:
-                used_native += c["yds"] * (getattr(c["design"], _EST_FIELD[key]) or 0)
+            ticket = a if a else 0.0
+            est = (c["yds"] * (getattr(c["design"], _EST_FIELD[key]) or 0)
+                   if (not a and m.track_inventory and key in _EST_FIELD and c["design"] and c["yds"] > 0)
+                   else 0.0)
+            bal_native += ticket + est
+            if (not frm or done >= frm) and (not to or done <= to):
+                used_native += ticket + est
+                used_ticket_native += ticket
         conv = TONS_PER_LB if to_ton else 1.0
         used = used_native * conv
         used_ticket = used_ticket_native * conv
+        balance_used = bal_native * conv
         cost = used * (m.cost_rate or 0)
         total_cost += cost
         item = {
@@ -904,7 +917,7 @@ def _materials_summary(s: Session) -> dict:
             received = sum((r.tons or 0) for r in s.exec(
                 select(MaterialReceipt).where(MaterialReceipt.material_id == m.id)).all()
                 if (r.received_on or "") >= cutoff)
-            on_hand = (m.opening_tons or 0) + received - used
+            on_hand = (m.opening_tons or 0) + received - balance_used
             item.update({
                 "capacity_tons": m.capacity_tons, "reorder_tons": m.reorder_tons,
                 "opening_tons": m.opening_tons, "received_tons": round(received, 2),
@@ -953,9 +966,12 @@ def _receipt_json(r: MaterialReceipt, mat_name: str) -> dict:
 
 
 @app.get("/materials")
-def get_materials(_: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Silo levels (on-hand, capacity, reorder flag) for cement & slag (staff)."""
-    return _materials_summary(s)
+def get_materials(_: User = Depends(require_staff), s: Session = Depends(get_session),
+                  frm: Optional[str] = Query(None, alias="from"),
+                  to: Optional[str] = Query(None)):
+    """Silo levels + per-material usage/cost (staff). Optional from/to (yyyy-mm-dd)
+    narrow the usage figures to orders completed in that window."""
+    return _materials_summary(s, frm=frm, to=to)
 
 
 class MaterialIn(BaseModel):
