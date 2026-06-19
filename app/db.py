@@ -2,7 +2,7 @@
 import os
 
 from sqlmodel import SQLModel, create_engine, Session
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from . import config
 
@@ -12,6 +12,20 @@ DB_PATH = config.data_path("aussieblock.db")
 DB_URL = f"sqlite:///{DB_PATH}"
 # check_same_thread=False lets the background GPS poller share the connection.
 engine = create_engine(DB_URL, echo=False, connect_args={"check_same_thread": False})
+
+
+# SQLite concurrency: by default a write locks the whole database and blocks
+# readers, so a burst of writes (e.g. the Costs screen pricing many orders at
+# once, each caching its mileage) would make the dispatch board's read poll fail
+# with "database is locked". WAL lets readers keep reading during a write, and
+# busy_timeout makes a blocked writer wait instead of erroring out immediately.
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas(dbapi_conn, _record):
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=10000")   # ms — wait up to 10s for a lock
+    cur.execute("PRAGMA synchronous=NORMAL")    # safe with WAL, much faster writes
+    cur.close()
 
 
 def init_db() -> None:

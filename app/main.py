@@ -10,7 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
-from typing import Optional
+from typing import List, Optional
 import glob
 import json
 import os
@@ -1339,13 +1339,10 @@ def _is_driver_of(o: Order, user: User) -> bool:
             and o.driver.strip().lower() == user.company.strip().lower())
 
 
-@app.get("/orders/{ref}/pricing")
-def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
-    """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
-    o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
-        raise HTTPException(404, "Order not found")
-    sheet = pricing.load_sheet()
+def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict) -> dict:
+    """Build the pricing payload for one order (customer bill + delivery/haul cost).
+    Caches a freshly-computed mileage on the order but does NOT commit — the caller
+    commits (once) so a bulk run doesn't fire a write per order."""
     cust = s.get(Customer, o.customer_id).name if o.customer_id else ""
     # bill the ACTUAL yards delivered (loads for a pour, batch-ticket delivered for
     # a single order), falling back to the ordered qty — see _billable_yards.
@@ -1354,8 +1351,7 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
     # plant-added ones (e.g. Masterset Delvo) bill even though they're not in the
     # order's admixtures text. _ticket_actuals reliably maps the ticket row to its
     # key (e.g. a Delvo/retarder row -> 'retarder'); map back to the material name.
-    _key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
-    batched_adx = [_key_name[k] for k in _ticket_actuals(o, s) if k in _key_name]
+    batched_adx = [key_name[k] for k in _ticket_actuals(o, s) if k in key_name]
     cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable,
                                  materials=batched_adx,
                                  order_admixtures=o.admixtures or "", unit_override=o.price_override,
@@ -1366,11 +1362,51 @@ def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session =
         mi = pricing.road_miles(o.site)
         if mi is not None:
             o.mileage = mi
-            s.add(o); s.commit()
+            s.add(o)
     dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
     return {"customer": cp, "delivery": dl, "billed_qty": billable,
             "ordered_qty": o.qty, "price_override": o.price_override}
+
+
+@app.get("/orders/{ref}/pricing")
+def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+        raise HTTPException(404, "Order not found")
+    key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
+    payload = _pricing_for(o, s, pricing.load_sheet(), key_name)
+    s.commit()   # persist a freshly-cached mileage, if any
+    return payload
+
+
+class BulkPricingIn(BaseModel):
+    refs: Optional[List[str]] = None   # limit to these orders; None/empty = all completed
+
+
+@app.post("/orders/pricing-bulk")
+def orders_pricing_bulk(body: BulkPricingIn, user: User = Depends(get_current_user),
+                        s: Session = Depends(get_session)):
+    """Pricing for many completed orders in ONE request — the Costs screen uses this
+    instead of firing one request per order, which used to flood the server and lock
+    the database. Returns { ref: pricingPayload } for every order the user may see."""
+    q = select(Order).where(Order.status == "complete")
+    if user.role != "staff":
+        q = q.where(Order.customer_id == user.customer_id)
+    if body.refs:
+        q = q.where(Order.ref.in_(body.refs))
+    orders = s.exec(q).all()
+    sheet = pricing.load_sheet()
+    key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
+    out = {}
+    for o in orders:
+        try:
+            out[o.ref] = _pricing_for(o, s, sheet, key_name)
+        except Exception:
+            out[o.ref] = {"error": True}
+    s.commit()   # one commit for any mileages cached across the whole batch
+    return out
 
 
 class PriceOverrideIn(BaseModel):
