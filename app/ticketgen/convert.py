@@ -158,7 +158,7 @@ def _batch_data_from(d: dict) -> dict:
 
 def convert(data: bytes, filename: str, customer_name: str = None, site: str = None,
             order_mix: str = None, order_qty=None, price_sheet: dict = None,
-            order_admixtures: str = "", return_data: bool = False):
+            order_admixtures: str = "", return_data: bool = False, load_label: str = None):
     """Read the uploaded ticket and render the branded PDF. Returns PDF bytes, or
     (pdf_bytes, batch_data) when return_data=True — batch_data is the parsed nested
     record for a typed protocol (with cement & slag actuals), else None.
@@ -182,6 +182,8 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
                     d["order"]["customer"] = customer_name   # order is authoritative for who it's for
                 if site:
                     d["order"]["site_addr"] = site           # …and for the job-site address
+                if load_label:
+                    d["order"]["load_no"] = load_label       # "3 of 6" — which load of the pour
             generator.render_ticket(d, out.name)
             try:
                 batch_data = _batch_data_from(d)   # cement & slag actuals for the silo tracker
@@ -198,6 +200,8 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
                 # was read off the paper (handwriting is easy to misread).
                 d["job_address"] = site
                 d["site"] = site
+            if load_label:
+                d["load"] = load_label        # "3 of 6" — which load of the pour
             delivery_ticket.render_delivery_ticket(d, out.name)
         with open(out.name, "rb") as fh:
             pdf = fh.read()

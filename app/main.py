@@ -305,7 +305,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-19.9-per-load-signoff"
+APP_VERSION = "2026-06-21.1-load-numbers"
 
 
 @app.get("/version")
@@ -1879,11 +1879,14 @@ async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(.
     if ticket_convert.available():
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            # "Load N of M" so the customer's ticket shows which load it is.
+            total_loads = len(s.exec(select(Load).where(Load.order_id == o.id)).all())
+            label = f"{seq} of {total_loads}" if total_loads > 1 else str(seq)
             branded, parsed_bd = ticket_convert.convert(
                 raw, name, customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
-                order_admixtures=o.admixtures or "", return_data=True)
+                order_admixtures=o.admixtures or "", return_data=True, load_label=label)
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
