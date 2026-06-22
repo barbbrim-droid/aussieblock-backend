@@ -144,3 +144,14 @@ def list_readings(limit: int = Query(100, ge=1, le=1000),
         q = q.where(MixerReading.truck_label == truck.strip())
     q = q.order_by(MixerReading.received_at.desc(), MixerReading.id.desc()).limit(limit)
     return [_reading_json(r) for r in s.exec(q).all()]
+
+
+@router.delete("/readings/{load_uid}")
+def delete_reading(load_uid: str, _: None = Depends(require_device_key),
+                   s: Session = Depends(get_session)):
+    """Delete one reading by load_uid (needs X-Device-Key) — for clearing bench/test
+    rows. Idempotent: returns ok even if it was already gone."""
+    r = s.exec(select(MixerReading).where(MixerReading.load_uid == load_uid)).first()
+    if r:
+        s.delete(r); s.commit()
+    return {"ok": True, "removed": load_uid, "existed": r is not None}
