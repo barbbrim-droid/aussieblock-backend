@@ -194,20 +194,20 @@ def _to_generator_data(p, cfg):
     concrete_slump = f"{req} in (+/- 1.5 in)" if req else (pr.get("slump", "") or "-")
     qty = o.get("qty", "") or ""
     yards = _num(qty) or _num((cfg.get("_pricing") or {}).get("order_qty")) or 0
-    # TxDOT: Mac Matrix Fiber is dosed per the ORDER, not the dornerBatch protocol,
-    # so the read materials won't include it. When the order carries it (and the
-    # protocol didn't already list a fiber), add it as a materials row — dosage
-    # (lbs/yd) × yards — so the certified ticket reflects it. Hand-added to the
-    # batch at spec, so set == actual (0% variance).
+    # TxDOT: MasterFiber MAC 330 is dosed per the ORDER, not the dornerBatch
+    # protocol, so the read materials won't include it. When the order carries it
+    # (and the protocol didn't already list a fiber), add it as a materials row —
+    # dosage (lbs/yd) × yards — so the certified ticket reflects it. Hand-added to
+    # the batch at spec, so set == actual (0% variance).
     order_adx = (cfg.get("_pricing") or {}).get("order_admixtures", "") or ""
     has_fiber_row = any("fiber" in (mm[0] or "").lower() or "matrix" in (mm[0] or "").lower() for mm in mats)
-    if re.search(r"fiber", order_adx, re.I) and not has_fiber_row and yards:
-        dm = re.search(r"fiber[^\d]*([\d.]+)\s*lb", order_adx, re.I)
-        dose = float(dm.group(1)) if dm else 4.5   # plant standard 4.5 lb/yd
-        lim, lab = _astm("Mac Matrix Fiber", "lb", cfg)
+    if re.search(r"fiber|mac\s*330|masterfiber", order_adx, re.I) and not has_fiber_row and yards:
+        dm = re.search(r"(?:fiber|mac\s*330)[^\d]*([\d.]+)\s*lb", order_adx, re.I)
+        dose = float(dm.group(1)) if dm else 4.0   # TxDOT MasterFiber MAC 330 dose: 4 lb/yd
+        lim, lab = _astm("MasterFiber MAC 330", "lb", cfg)
         total = dose * yards
-        # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (MAC 360 FF macrofiber)
-        mats.append(("Mac Matrix Fiber", "lb", 56.8, dose, total, total, lim, lab))
+        # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (MAC 330 macro-synthetic fiber)
+        mats.append(("MasterFiber MAC 330", "lb", 56.8, dose, total, total, lim, lab))
     data = {
         "report_date": prod_date or _uk_to_us_date(p.get("report_date", "")) or "",
         "sales_tax_pct": cfg.get("sales_tax_pct", 8.25),

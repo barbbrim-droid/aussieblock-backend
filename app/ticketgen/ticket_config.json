@@ -43,6 +43,8 @@
     "Mac Matrix": 56.8,
     "MacMatrix": 56.8,
     "MAC 360": 56.8,
+    "MAC 330": 56.8,
+    "MasterFiber": 56.8,
     "Macrofiber": 56.8,
     "Fiber": 56.8,
     "GGBFS": 177.2,
@@ -73,7 +75,7 @@
     {"material": "Fine Aggregate (Sand)", "source": "Black Diamond Endeavors", "dms": "", "mpl": ""},
     {"material": "Water Reducer (Type A)", "source": "Master X-Seed 66", "dms": "DMS-4640", "mpl": "99470"},
     {"material": "Set Retarder (Type D)", "source": "MasterSet DELVO", "dms": "DMS-4640", "mpl": "99470"},
-    {"material": "Mac Matrix Fiber", "source": "MacMatrix 360", "dms": "DMS-4660", "mpl": ""}
+    {"material": "Macro-Synthetic Fiber", "source": "MasterFiber MAC 330", "dms": "DMS-4660", "mpl": ""}
   ],
   "photo_rotate": 0
 }
