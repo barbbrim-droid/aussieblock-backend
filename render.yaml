@@ -36,3 +36,5 @@ services:
         sync: false
       - key: QBO_REALM_ID
         sync: false
+      - key: MIXER_DEVICE_KEY        # shared secret the on-truck mixer devices send in X-Device-Key
+        sync: false

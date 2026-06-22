@@ -35,7 +35,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -131,6 +131,7 @@ from .integrations.sms import send_sms
 from .ticketgen import convert as ticket_convert
 from . import pricing
 from . import config
+from . import mixer
 
 
 @asynccontextmanager
@@ -154,6 +155,9 @@ app = FastAPI(title="Aussieblock Ready Mix API", version="0.1.0", lifespan=lifes
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+
+# Mixer-drum telemetry (device-authenticated, separate from the dispatch flow).
+app.include_router(mixer.router)
 
 
 LOAD_SIZE_YD = 10.0   # one truck-load; orders over this are continuous pours, split into loads

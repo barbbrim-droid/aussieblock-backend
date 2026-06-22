@@ -218,3 +218,28 @@ class MixDesign(SQLModel, table=True):
     mix: str = Field(index=True, unique=True)    # e.g. "3500 PSI"
     cement_lb_yd: float = 0.0                    # Portland cement, lb per cubic yard
     slag_lb_yd: float = 0.0                      # slag, lb per cubic yard
+
+
+class MixerReading(SQLModel, table=True):
+    """One load's telemetry from a truck's mixer-drum sensor (revolutions,
+    pressure, temperature…). Posted by the on-truck device to /api/mixer/load.
+    Standalone: it never touches the Order/Load/Truck flow — it's best-effort
+    linked to a Truck by label for display, but stands on its own otherwise."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    load_uid: str = Field(index=True, unique=True)     # device-assigned id; dedupes resends
+    truck_label: Optional[str] = None                  # the truck_id the device reported (matched to Truck.label)
+    truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")   # linked Truck, if one matched
+    started_at: Optional[datetime] = None              # load start (from device epoch seconds)
+    ended_at: Optional[datetime] = None                # load end (from device epoch seconds)
+    gallons: Optional[float] = None                    # water added
+    total_revs: Optional[int] = None                   # drum revolutions over the load
+    charge_revs: Optional[int] = None                  # revolutions while charging
+    discharge_revs: Optional[int] = None               # revolutions while discharging
+    max_rpm: Optional[float] = None
+    avg_rpm: Optional[float] = None
+    pressure_idx_avg: Optional[float] = None           # hydraulic pressure index (slump proxy)
+    pressure_idx_max: Optional[float] = None
+    mix_temp_c: Optional[float] = None
+    mix_temp_f: Optional[float] = None
+    fw: Optional[str] = None                           # device firmware version
+    received_at: datetime = Field(default_factory=datetime.utcnow)   # when the server stored it
