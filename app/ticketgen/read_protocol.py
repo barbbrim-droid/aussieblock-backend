@@ -45,7 +45,7 @@ def _astm(name, unit, cfg):
     elif any(k in n for k in ["cem", "slag", "portland", "binder", "fly ash", "ash"]):
         pct = t.get("cement", 1)
     elif "fl" in u or "oz" in u or any(k in n for k in ["add", "lfa", "seed", "admix",
-                                                        "plast", "retard", "reduc", "fiber"]):
+                                                        "plast", "retard", "reduc", "fiber", "matrix"]):
         pct = t.get("admixture", 3)
     else:
         pct = t.get("aggregate", 2)   # gravel / sand / aggregate
@@ -201,13 +201,33 @@ def _to_generator_data(p, cfg):
     # the batch at spec, so set == actual (0% variance).
     order_adx = (cfg.get("_pricing") or {}).get("order_admixtures", "") or ""
     has_fiber_row = any("fiber" in (mm[0] or "").lower() or "matrix" in (mm[0] or "").lower() for mm in mats)
-    if re.search(r"fiber|mac\s*330|masterfiber", order_adx, re.I) and not has_fiber_row and yards:
-        dm = re.search(r"(?:fiber|mac\s*330)[^\d]*([\d.]+)\s*lb", order_adx, re.I)
-        dose = float(dm.group(1)) if dm else 4.0   # TxDOT MasterFiber MAC 330 dose: 4 lb/yd
-        lim, lab = _astm("MasterFiber MAC 330", "lb", cfg)
-        total = dose * yards
-        # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (MAC 330 macro-synthetic fiber)
-        mats.append(("MasterFiber MAC 330", "lb", 56.8, dose, total, total, lim, lab))
+    chosen_fiber = None
+    if not has_fiber_row and yards:
+        for part in order_adx.split(","):
+            if not re.search(r"fiber|matrix|mac\s*3\d0|masterfiber", part, re.I):
+                continue
+            # Which fiber product the order selected -> ticket name + standard dose.
+            # Default to MAC 330 (the TxDOT standard); use Mac Matrix 360 only when
+            # the order explicitly names "360" / "Matrix".
+            is360 = bool(re.search(r"360|matrix", part, re.I))
+            chosen_fiber = "Mac Matrix 360" if is360 else "MasterFiber MAC 330"
+            std = 4.5 if is360 else 4.0            # MacMatrix 360 = 4.5 lb/yd; MAC 330 = 4 lb/yd
+            # Dose from the order segment if given (digit-safe: skips the 330/360 in
+            # the name), else the product's standard.
+            dm = re.search(r"([\d.]+)\s*lb", part, re.I)
+            dose = float(dm.group(1)) if dm else std
+            lim, lab = _astm(chosen_fiber, "lb", cfg)
+            total = dose * yards
+            # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (macro-synthetic fiber)
+            mats.append((chosen_fiber, "lb", 56.8, dose, total, total, lim, lab))
+            break
+    # MPL materials table reflects the fiber product actually used on this ticket.
+    mpl = [dict(r) for r in (cfg.get("material_mpl", []) or [])]
+    if chosen_fiber:
+        for r in mpl:
+            if "fiber" in (str(r.get("material", "")) + str(r.get("source", ""))).lower():
+                r["source"] = chosen_fiber
+                break
     data = {
         "report_date": prod_date or _uk_to_us_date(p.get("report_date", "")) or "",
         "sales_tax_pct": cfg.get("sales_tax_pct", 8.25),
@@ -230,7 +250,7 @@ def _to_generator_data(p, cfg):
         },
         "batches": batches,
         "materials": mats,
-        "mpl": cfg.get("material_mpl", []),
+        "mpl": mpl,
         "totals": {
             "Water": (_num(t.get("water_sum")), _num(t.get("water_per"))),
             "Binder": (binder_lb, _num(t.get("binder_per"))),

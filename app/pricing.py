@@ -140,10 +140,20 @@ def _mix_matches(sheet_mix, order_mix) -> bool:
 
 def _adx_lbs(name: str, order_admixtures: str, materials) -> float:
     """Total lbs of an admixture: prefer 'Name: X lbs/yd' on the order; else the
-    batched actual from the protocol materials."""
-    m = re.search(re.escape(name) + r"[^\d]*([\d.]+)\s*lb", order_admixtures or "", re.I)
-    if m:
-        return float(m.group(1))   # lbs/yd dosage (caller multiplies by yards)
+    batched actual from the protocol materials. Reads the dose from the matching
+    comma-segment (not anchored to the name) so a product label with digits — e.g.
+    'MasterFiber MAC 330: 4 lbs/yd' or 'Mac Matrix 360: 4.5 lbs/yd' — yields the
+    real dose (4 / 4.5), never the 330/360 in the name."""
+    nkey = _norm(name).replace(" ", "")
+    for part in (order_admixtures or "").split(","):
+        pn = _norm(part).replace(" ", "")
+        is_match = (nkey and nkey in pn)
+        if name.lower() == "fiber":   # any fiber product counts (360, MAC 330, …)
+            is_match = is_match or bool(re.search(r"fiber|matrix|mac3\d0", pn))
+        if is_match:
+            m = re.search(r"([\d.]+)\s*lb", part, re.I)
+            if m:
+                return float(m.group(1))   # lbs/yd dosage (caller multiplies by yards)
     return 0.0
 
 
