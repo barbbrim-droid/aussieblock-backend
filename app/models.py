@@ -270,3 +270,16 @@ class MixerReading(SQLModel, table=True):
     # Set to an Order.ref once this reading is claimed by a completed order (so its
     # water is totalled into exactly one job's ticket and never double-counted).
     order_ref: Optional[str] = Field(default=None, index=True)
+
+
+class MixerReset(SQLModel, table=True):
+    """A staff-pressed 'zero the totals' marker for one truck's mixer display.
+    Display-only: the readings endpoint shows 0 for the metric on any reading
+    received at/before `reset_at`, so the Mixer panel reads 0 until the next load
+    posts. It never deletes readings or changes a ticket's captured water — those
+    stay accurate for billing. One row per (truck_label, metric); metric is
+    'water' (gallons) or 'drum' (revolutions)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    truck_label: str = Field(index=True)
+    metric: str = Field(index=True)                                 # "water" | "drum"
+    reset_at: datetime = Field(default_factory=datetime.utcnow)     # readings up to here read 0

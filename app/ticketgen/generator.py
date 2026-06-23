@@ -306,19 +306,45 @@ def render_ticket(data, out_path):
     pdf.cell(half - 3, 3, f"({mw_lb:.1f} lb  -  at max w/c {d['max_wc']})", align="R")
 
     # ---------- terms & conditions + caustic warning ----------
+    # Auto page-break is off, so this block has no bottom anchor: on a tall ticket
+    # (extra material rows, a long MPL list) it flowed off the page and the caustic
+    # warning got clipped. Pin it to the bottom of the sheet instead, and if the
+    # content above crowds it, shrink the terms line-height to fit — so the warning
+    # always prints in full and never overlaps the signature boxes.
+    from fpdf.enums import MethodReturnValue
     try:
         from .delivery_ticket import TERMS, WARNING
     except ImportError:                       # standalone (PyInstaller) context
         from delivery_ticket import TERMS, WARNING
-    pdf.set_y(fy + box_h + 2)
+
+    BOT_MARGIN = 6.0                       # clear space kept at the very bottom edge
+    HDR_H, GAP_H, WARN_LH = 3.0, 2.0, 3.0
+    content_bottom = fy + box_h + 2        # where the signature / max-water boxes end
+
+    def _block_h(term_lh):
+        pdf.set_font("DejaVu", "", 5.2)
+        th = pdf.multi_cell(W, term_lh, TERMS, align="J", dry_run=True, output=MethodReturnValue.HEIGHT)
+        pdf.set_font("DejaVu", "B", 6.4)
+        wh = pdf.multi_cell(W, WARN_LH, WARNING, dry_run=True, output=MethodReturnValue.HEIGHT)
+        return HDR_H + th + GAP_H + wh, th, wh
+
+    term_lh = 2.3
+    block_h, th, wh = _block_h(term_lh)
+    avail = pdf.h - BOT_MARGIN - content_bottom
+    if block_h > avail and avail > 0:      # too tight — compress the (tall) terms text
+        term_lh = max(1.8, (avail - (HDR_H + GAP_H + wh)) / max(th / term_lh, 0.1))
+        block_h, th, wh = _block_h(term_lh)
+
+    top = max(content_bottom, pdf.h - BOT_MARGIN - block_h)   # pin to page bottom
+    pdf.set_y(top)
     pdf.set_x(10); pdf.set_font("DejaVu", "B", 6); pdf.set_text_color(*INK)
-    pdf.cell(W, 3, "TERMS & CONDITIONS", ln=1)
+    pdf.cell(W, HDR_H, "TERMS & CONDITIONS", ln=1)
     pdf.set_x(10); pdf.set_font("DejaVu", "", 5.2); pdf.set_text_color(*GREY)
-    pdf.multi_cell(W, 2.3, TERMS, align="J")
-    pdf.ln(2)
+    pdf.multi_cell(W, term_lh, TERMS, align="J")
+    pdf.ln(GAP_H)
     pdf.set_draw_color(*RED); pdf.set_line_width(0.4); pdf.set_fill_color(252, 232, 230)
     pdf.set_x(10); pdf.set_font("DejaVu", "B", 6.4); pdf.set_text_color(*RED)
-    pdf.multi_cell(W, 3.0, WARNING, border=1, align="C", fill=True)
+    pdf.multi_cell(W, WARN_LH, WARNING, border=1, align="C", fill=True)
 
     pdf.output(out_path)
     return out_path

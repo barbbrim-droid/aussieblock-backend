@@ -18,8 +18,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from .auth import require_staff
 from .db import get_session
-from .models import MixerReading, Truck
+from .models import MixerReading, MixerReset, Truck, User
 
 router = APIRouter(prefix="/api/mixer", tags=["mixer"])
 
@@ -134,16 +135,61 @@ def post_load(body: MixerLoadIn, _: None = Depends(require_device_key),
     return {"ok": True, "duplicate": False, "reading": _reading_json(r)}
 
 
+def _apply_resets(j: dict, received_at, resets: dict) -> dict:
+    """Zero a reading's water/drum figures if staff reset that truck's total at or
+    after this reading was received (display-only — the stored row is untouched)."""
+    label = j.get("truck")
+    if not received_at or not label:
+        return j
+    wr = resets.get((label, "water"))
+    if wr and wr >= received_at:
+        j["gallons"] = 0
+    dr = resets.get((label, "drum"))
+    if dr and dr >= received_at:
+        j["total_revs"] = j["charge_revs"] = j["discharge_revs"] = 0
+    return j
+
+
 @router.get("/readings")
 def list_readings(limit: int = Query(100, ge=1, le=1000),
                   truck: Optional[str] = None,
                   s: Session = Depends(get_session)):
-    """Newest-first mixer readings, optionally filtered to one truck label."""
+    """Newest-first mixer readings, optionally filtered to one truck label. Honors
+    any staff 'zero totals' resets (a metric reads 0 until a newer load posts)."""
     q = select(MixerReading)
     if truck and truck.strip():
         q = q.where(MixerReading.truck_label == truck.strip())
     q = q.order_by(MixerReading.received_at.desc(), MixerReading.id.desc()).limit(limit)
-    return [_reading_json(r) for r in s.exec(q).all()]
+    resets = {(x.truck_label, x.metric): x.reset_at for x in s.exec(select(MixerReset)).all()}
+    return [_apply_resets(_reading_json(r), r.received_at, resets) for r in s.exec(q).all()]
+
+
+class MixerResetIn(BaseModel):
+    truck: str                # truck label whose total to zero
+    metric: str               # "water" | "drum"
+
+
+@router.post("/reset")
+def reset_total(body: MixerResetIn, _: User = Depends(require_staff),
+                s: Session = Depends(get_session)):
+    """Zero one truck's displayed water OR drum total (staff only). Records the
+    reset time; the Mixer panel then shows 0 for that metric until the truck posts
+    a newer load. Does not delete readings or alter any ticket's captured water."""
+    truck = (body.truck or "").strip()
+    metric = (body.metric or "").strip().lower()
+    if not truck:
+        raise HTTPException(422, "truck is required")
+    if metric not in ("water", "drum"):
+        raise HTTPException(422, "metric must be 'water' or 'drum'")
+    row = s.exec(select(MixerReset).where(
+        MixerReset.truck_label == truck, MixerReset.metric == metric)).first()
+    now = datetime.utcnow()
+    if row:
+        row.reset_at = now
+    else:
+        row = MixerReset(truck_label=truck, metric=metric, reset_at=now)
+    s.add(row); s.commit()
+    return {"ok": True, "truck": truck, "metric": metric, "reset_at": now.isoformat()}
 
 
 @router.delete("/readings/{load_uid}")
