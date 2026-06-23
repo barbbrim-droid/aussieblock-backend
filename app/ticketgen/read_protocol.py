@@ -111,9 +111,11 @@ def read_protocol(path, cfg):
     key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("No Anthropic API key in config.json.")
-    client = anthropic.Anthropic(api_key=key)
+    # Extra retries (with the SDK's exponential backoff) ride out transient
+    # 529 "Overloaded" responses, which large/dense scans hit far more often.
+    client = anthropic.Anthropic(api_key=key, max_retries=6)
     msg = client.messages.create(
-        model=cfg.get("vision_model", "claude-opus-4-8"),
+        model=cfg.get("vision_model", "claude-sonnet-4-6"),
         max_tokens=2048, tools=[TOOL],
         tool_choice={"type": "tool", "name": "emit_protocol"},
         messages=[{"role": "user", "content": [

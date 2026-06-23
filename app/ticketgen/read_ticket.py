@@ -116,7 +116,8 @@ def read_ticket(path, cfg):
         raise RuntimeError("No Anthropic API key. Set anthropic_api_key in config.json.")
     model = cfg.get("vision_model", "claude-sonnet-4-6")
     rotate = cfg.get("photo_rotate", 270)
-    client = anthropic.Anthropic(api_key=key)
+    # Extra retries ride out transient 529 "Overloaded" responses.
+    client = anthropic.Anthropic(api_key=key, max_retries=6)
     msg = client.messages.create(
         model=model,
         max_tokens=1024,
