@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.18-esp32-fuel-ingest"
+APP_VERSION = "2026-06-23.19-fuel-cleanup"
 
 
 @app.get("/version")
@@ -2436,6 +2436,24 @@ def post_fuel_fill(body: FuelFillIn, _: None = Depends(mixer.require_device_key)
     s.add(ft); s.commit(); s.refresh(ft)
     print(f"POST /api/fuel/fill  truck={veh or '?'} gal={body.gallons} -> id={ft.id} truck_id={truck_id}")
     return {"ok": True, "duplicate": False, "id": ft.id, "truck_id": truck_id}
+
+
+@app.delete("/fuel/unmatched/{vehicle_no}")
+def delete_unmatched_fuel(vehicle_no: str, k: str = Query(""),
+                          s: Session = Depends(get_session)):
+    """Delete UNMATCHED fuel fills for a vehicle number (e.g. a test or mistyped
+    entry). Secret-code gated. Only removes fills not linked to a truck, so real
+    per-truck history is never touched."""
+    if k != "ab-vision-7f3a9c2e":
+        raise HTTPException(404, "Not found")
+    targets = veh_keys(vehicle_no)
+    n = 0
+    for ft in s.exec(select(FuelTransaction).where(FuelTransaction.truck_id.is_(None))).all():
+        if veh_keys(ft.vehicle_no) & targets:
+            s.delete(ft)
+            n += 1
+    s.commit()
+    return {"ok": True, "deleted": n}
 
 
 @app.get("/fuel")
