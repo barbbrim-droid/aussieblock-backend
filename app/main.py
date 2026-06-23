@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.8-version-vision-flag"
+APP_VERSION = "2026-06-23.9-vision-selftest"
 
 
 @app.get("/version")
@@ -318,6 +318,43 @@ def version():
     # `vision` reports whether ANTHROPIC_API_KEY is configured on this service —
     # batch-ticket auto-branding is skipped (original kept as-is) when it's False.
     return {"version": APP_VERSION, "vision": ticket_convert.available()}
+
+
+@app.get("/diag/vision")
+def diag_vision(_: User = Depends(require_staff)):
+    """Staff-only self-test of the Claude vision reader: makes one minimal real
+    call (tiny image + the same model the batch-ticket reader uses) and returns
+    the exact outcome. Distinguishes a missing/invalid key or billing problem
+    (an API error string) from a healthy reader (ok=True). It does NOT exercise
+    the heavy PDF/PIL path, so an OOM on a big scan can still fail even when this
+    passes."""
+    import base64 as _b64
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return {"ok": False, "stage": "config", "error": "ANTHROPIC_API_KEY not set"}
+    # 1x1 transparent PNG — just enough to exercise the vision + model path.
+    px = _b64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+    model = "claude-opus-4-8"
+    try:
+        import anthropic
+        cfg = json.load(open(os.path.join(os.path.dirname(__file__),
+                        "ticketgen", "ticket_config.json"), encoding="utf-8"))
+        model = cfg.get("vision_model", model)
+        client = anthropic.Anthropic(api_key=key)
+        msg = client.messages.create(
+            model=model, max_tokens=16,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                 "media_type": "image/png", "data": _b64.b64encode(px).decode()}},
+                {"type": "text", "text": "Reply with the single word OK."}]}],
+        )
+        return {"ok": True, "model": model}
+    except Exception as e:
+        # Surface the API's own message (e.g. credit balance, authentication_error)
+        # so the cause is visible without digging through Render logs.
+        return {"ok": False, "stage": "api_call", "model": model,
+                "error_type": type(e).__name__, "error": str(e)[:600]}
 
 
 # ── Authentication ──────────────────────────────────────────────────────────
