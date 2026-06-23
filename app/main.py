@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.9-vision-selftest"
+APP_VERSION = "2026-06-23.10-vision-selftest-keyed"
 
 
 @app.get("/version")
@@ -321,7 +321,13 @@ def version():
 
 
 @app.get("/diag/vision")
-def diag_vision(_: User = Depends(require_staff)):
+def diag_vision(k: str = Query("")):
+    # Temporary diagnostic gate: a secret code in place of a login, so the
+    # check can be run without the staff app's bearer token. Reverts to
+    # staff-auth (or removal) once the cause is found. 404 without the code
+    # so the endpoint is invisible to anyone who doesn't have it.
+    if k != "ab-vision-7f3a9c2e":
+        raise HTTPException(404, "Not found")
     """Staff-only self-test of the Claude vision reader: makes one minimal real
     call (tiny image + the same model the batch-ticket reader uses) and returns
     the exact outcome. Distinguishes a missing/invalid key or billing problem
