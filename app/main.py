@@ -141,9 +141,9 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(qbo_sync_loop()),   # periodic QuickBooks A/R sync
-        asyncio.create_task(fuel_poll_loop()),  # periodic FluidSecure fuel pull (API)
-        asyncio.create_task(fuel_email_loop()), # ingest FluidSecure fuel CSVs from email
     ]
+    # FluidSecure retired 2026-06-23 — fuel now comes from the on-truck ESP32
+    # meters via POST /api/fuel/fill. The poll/email loops are no longer started.
     yield
     for t in tasks:
         t.cancel()
@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.17-po-start-0011"
+APP_VERSION = "2026-06-23.18-esp32-fuel-ingest"
 
 
 @app.get("/version")
@@ -2394,9 +2394,53 @@ def _yards_by_truck(s: Session) -> dict:
     return yards
 
 
+class FuelFillIn(BaseModel):
+    """One fuel fill as the on-truck ESP32 meter reports it. Everything but
+    truck_id is optional so a partial read still posts."""
+    truck_id: Optional[str] = None      # truck label/number the device knows (e.g. "4554")
+    gallons: Optional[float] = None
+    pulses: Optional[int] = None
+    uptime_ms: Optional[int] = None
+    occurred_at: Optional[float] = None  # epoch seconds; defaults to receipt time
+
+
+@app.post("/api/fuel/fill")
+def post_fuel_fill(body: FuelFillIn, _: None = Depends(mixer.require_device_key),
+                   s: Session = Depends(get_session)):
+    """Record one fuel fill from an on-truck ESP32 meter (device only — needs the
+    X-Device-Key header, same secret as the mixer). Replaces FluidSecure as the
+    fuel source. Idempotent on external_id so a resend can't double-count."""
+    veh = (str(body.truck_id).strip() if body.truck_id is not None else "")
+    # external_id uniquely identifies a fill: device + boot-uptime + pulse total.
+    ext = f"esp:{veh or '?'}|{body.uptime_ms if body.uptime_ms is not None else '?'}|{body.pulses if body.pulses is not None else '?'}"
+    existing = s.exec(select(FuelTransaction).where(FuelTransaction.external_id == ext)).first()
+    if existing:
+        return {"ok": True, "duplicate": True, "id": existing.id, "truck_id": existing.truck_id}
+    # Map to a truck by label (or the legacy fluidsecure id), tolerant of an RTS
+    # prefix/spacing — '4554', 'RTS4554' and 'RTS 4554' all match.
+    truck_id = None
+    targets = veh_keys(veh)
+    if targets:
+        for t in s.exec(select(Truck)).all():
+            if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
+                truck_id = t.id
+                break
+    try:
+        when = datetime.utcfromtimestamp(float(body.occurred_at)) if body.occurred_at else datetime.utcnow()
+    except (ValueError, OSError, OverflowError):
+        when = datetime.utcnow()
+    ft = FuelTransaction(
+        external_id=ext, truck_id=truck_id, vehicle_no=veh or None,
+        gallons=body.gallons, fuel_type="Diesel", occurred_at=when,
+        raw=json.dumps(body.model_dump()))
+    s.add(ft); s.commit(); s.refresh(ft)
+    print(f"POST /api/fuel/fill  truck={veh or '?'} gal={body.gallons} -> id={ft.id} truck_id={truck_id}")
+    return {"ok": True, "duplicate": False, "id": ft.id, "truck_id": truck_id}
+
+
 @app.get("/fuel")
 def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Per-truck fuel usage rolled up from FluidSecure transactions (staff only),
+    """Per-truck fuel usage rolled up from on-truck fuel-meter fills (staff only),
     with cost (gallons × the $/gal in the price sheet) and per-yard efficiency
     (gallons and fuel-$ per delivered yard). `unmatched` collects fills for vehicle
     numbers no truck is mapped to yet — map that number on the truck to pull them in."""
