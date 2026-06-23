@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.15-vision-sonnet-retries"
+APP_VERSION = "2026-06-23.16-remove-diag"
 
 
 @app.get("/version")
@@ -318,123 +318,6 @@ def version():
     # `vision` reports whether ANTHROPIC_API_KEY is configured on this service —
     # batch-ticket auto-branding is skipped (original kept as-is) when it's False.
     return {"version": APP_VERSION, "vision": ticket_convert.available()}
-
-
-@app.get("/diag/vision")
-def diag_vision(k: str = Query(""), model: str = Query("")):
-    # Temporary diagnostic gate: a secret code in place of a login, so the
-    # check can be run without the staff app's bearer token. Reverts to
-    # staff-auth (or removal) once the cause is found. 404 without the code
-    # so the endpoint is invisible to anyone who doesn't have it.
-    if k != "ab-vision-7f3a9c2e":
-        raise HTTPException(404, "Not found")
-    """Staff-only self-test of the Claude vision reader: makes one minimal real
-    call (tiny image + the same model the batch-ticket reader uses) and returns
-    the exact outcome. Distinguishes a missing/invalid key or billing problem
-    (an API error string) from a healthy reader (ok=True). It does NOT exercise
-    the heavy PDF/PIL path, so an OOM on a big scan can still fail even when this
-    passes."""
-    import base64 as _b64
-    import io as _io
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        return {"ok": False, "stage": "config", "error": "ANTHROPIC_API_KEY not set"}
-    model = "claude-opus-4-8"
-    try:
-        # Build a real, valid JPEG (white with a black bar) the same way the
-        # batch-ticket reader does — a tiny placeholder image is rejected by the
-        # API, so generate a properly-sized one to exercise the true path.
-        from PIL import Image, ImageDraw
-        im = Image.new("RGB", (200, 80), "white")
-        ImageDraw.Draw(im).rectangle([20, 30, 180, 50], fill="black")
-        buf = _io.BytesIO(); im.save(buf, "JPEG", quality=85)
-        data = _b64.b64encode(buf.getvalue()).decode()
-
-        import anthropic
-        cfg = json.load(open(os.path.join(os.path.dirname(__file__),
-                        "ticketgen", "ticket_config.json"), encoding="utf-8"))
-        # Query override lets us test alternative models before changing config.
-        model = model or cfg.get("vision_model", model)
-        client = anthropic.Anthropic(api_key=key)
-        msg = client.messages.create(
-            model=model, max_tokens=16,
-            messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64",
-                 "media_type": "image/jpeg", "data": data}},
-                {"type": "text", "text": "Reply with the single word OK."}]}],
-        )
-        txt = next((b.text for b in msg.content if b.type == "text"), "")
-        return {"ok": True, "model": model, "reply": txt.strip()[:40]}
-    except Exception as e:
-        # Surface the API's own message (e.g. credit balance, authentication_error)
-        # so the cause is visible without digging through Render logs.
-        return {"ok": False, "stage": "api_call", "model": model,
-                "error_type": type(e).__name__, "error": str(e)[:600]}
-
-
-@app.get("/diag/reconvert")
-def diag_reconvert(k: str = Query(""), ref: str = Query(""), seq: int = Query(0),
-                   s: Session = Depends(get_session)):
-    """Re-run the REAL batch-ticket conversion on a stored original and return the
-    exact failure (with traceback) — the same error the upload endpoint swallows
-    into the Render log. No ref → list every order/load whose branding never
-    succeeded (still showing the original). Secret-code gated like /diag/vision."""
-    if k != "ab-vision-7f3a9c2e":
-        raise HTTPException(404, "Not found")
-    import glob as _glob, traceback as _tb
-    _ORIG_SUFFIXES = ("_original.pdf", "_original.jpg", "_original.jpeg",
-                      "_original.png", "_original.webp", "_original.heic")
-    bdir = _batch_ticket_dir()
-
-    if not ref:
-        # Recent orders with their stored ticket state, so the failing one is
-        # visible even if it isn't on the simple _original suffix.
-        orders = s.exec(select(Order).order_by(Order.id.desc()).limit(25)).all()
-        recent = []
-        for o in orders:
-            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            recent.append({"ref": o.ref, "customer": cust, "status": o.status,
-                           "batch_ticket": o.batch_ticket,
-                           "unbranded": bool((o.batch_ticket or "").endswith(_ORIG_SUFFIXES)),
-                           "has_data": bool(o.batch_data)})
-        # Actual files in the batch-ticket dir (originals + branded), newest first.
-        try:
-            files = sorted(os.listdir(bdir))
-            origs = [f for f in files if "_original." in f]
-        except OSError:
-            files, origs = [], []
-        return {"recent_orders": recent, "original_files": origs,
-                "all_files_count": len(files),
-                "hint": "call again with ?ref=<ref> (and &seq=<n> for a pour load)"}
-
-    if not ticket_convert.available():
-        return {"ok": False, "error": "ANTHROPIC_API_KEY not set"}
-    o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o:
-        return {"ok": False, "error": f"order {ref} not found"}
-    prefix = _load_ticket_prefix(ref, seq) if seq else ref
-    matches = _glob.glob(os.path.join(bdir, f"{prefix}_original.*"))
-    if not matches:
-        return {"ok": False, "error": f"no stored original for {prefix}"}
-    path = matches[0]
-    with open(path, "rb") as fh:
-        raw = fh.read()
-    try:
-        cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-        qty = (s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)
-                      ).first().qty if seq else o.qty)
-        branded, parsed_bd = ticket_convert.convert(
-            raw, os.path.basename(path), customer_name=cust, site=o.site,
-            order_mix=o.mix, order_qty=qty, price_sheet=pricing.load_sheet(),
-            order_admixtures=o.admixtures or "", return_data=True,
-            load_label=(str(seq) if seq else None), mixer_water=o.mixer_water_gal)
-        return {"ok": True, "ref": ref, "seq": seq, "file": os.path.basename(path),
-                "size_kb": round(len(raw) / 1024), "branded_kb": round(len(branded or b"") / 1024),
-                "has_data": bool(parsed_bd)}
-    except Exception as e:
-        return {"ok": False, "ref": ref, "seq": seq, "file": os.path.basename(path),
-                "size_kb": round(len(raw) / 1024), "error_type": type(e).__name__,
-                "error": str(e)[:600], "trace": _tb.format_exc()[-2000:]}
 
 
 # ── Authentication ──────────────────────────────────────────────────────────
