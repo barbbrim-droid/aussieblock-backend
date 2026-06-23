@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.20-driver-manual-fuel"
+APP_VERSION = "2026-06-23.21-fuel-mileage"
 
 
 @app.get("/version")
@@ -2456,39 +2456,42 @@ def delete_unmatched_fuel(vehicle_no: str, k: str = Query(""),
     return {"ok": True, "deleted": n}
 
 
-class ManualFuelIn(BaseModel):
-    truck_no: str                      # truck number the driver typed (e.g. "4554")
-    gallons: float
-    odometer: Optional[float] = None
+class FuelMileageIn(BaseModel):
+    truck_no: str                  # truck number the driver typed (e.g. "4554")
+    odometer: float                # current mileage; gallons come from the meter
 
 
-@app.post("/fuel/manual")
-def post_manual_fuel(body: ManualFuelIn, user: User = Depends(get_current_user),
-                     s: Session = Depends(get_session)):
-    """Log a fuel fill entered by hand in the driver app (any logged-in user).
-    Maps to a truck by number; shows up in the Fuel screen like a meter fill."""
+@app.post("/fuel/mileage")
+def attach_fuel_mileage(body: FuelMileageIn, user: User = Depends(get_current_user),
+                        s: Session = Depends(get_session)):
+    """Driver adds the current mileage to their truck's most recent fuel fill — the
+    gallons come from the on-truck ESP meter, not typed. Used by the driver app."""
     veh = (body.truck_no or "").strip()
     if not veh:
         raise HTTPException(422, "Enter your truck number")
-    if body.gallons is None or body.gallons <= 0:
-        raise HTTPException(422, "Enter the gallons filled")
-    truck_id = None
+    if body.odometer is None or body.odometer <= 0:
+        raise HTTPException(422, "Enter the current mileage")
     targets = veh_keys(veh)
-    if targets:
-        for t in s.exec(select(Truck)).all():
-            if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
-                truck_id = t.id
-                break
-    now = datetime.utcnow()
-    ext = f"manual:{veh}|{now.isoformat()}|{body.gallons}"
-    ft = FuelTransaction(
-        external_id=ext, truck_id=truck_id, vehicle_no=veh, gallons=body.gallons,
-        fuel_type="Diesel", odometer=body.odometer,
-        driver=(user.company or user.email or "driver"), occurred_at=now,
-        raw=json.dumps({"manual": True, "by": user.email, **body.model_dump()}))
-    s.add(ft); s.commit(); s.refresh(ft)
-    print(f"POST /fuel/manual  truck={veh} gal={body.gallons} by={user.email} -> matched={truck_id is not None}")
-    return {"ok": True, "id": ft.id, "matched": truck_id is not None}
+    truck_id = None
+    for t in s.exec(select(Truck)).all():
+        if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
+            truck_id = t.id
+            break
+    # That truck's fills (matched by truck or, if unmapped, by vehicle number).
+    mine = [f for f in s.exec(select(FuelTransaction)).all()
+            if (truck_id and f.truck_id == truck_id) or (veh_keys(f.vehicle_no) & targets)]
+    if not mine:
+        # No meter fill to attach to yet — tell the driver to finish pumping.
+        return {"ok": False, "reason": "no_fill"}
+    latest = max(mine, key=lambda f: (f.occurred_at or f.created_at or datetime.min))
+    latest.odometer = body.odometer
+    if not latest.driver:
+        latest.driver = user.company or user.email
+    s.add(latest); s.commit(); s.refresh(latest)
+    when = latest.occurred_at or latest.created_at
+    print(f"POST /fuel/mileage  truck={veh} odo={body.odometer} by={user.email} -> fill {latest.id} ({latest.gallons} gal)")
+    return {"ok": True, "gallons": latest.gallons, "odometer": latest.odometer,
+            "occurred_at": when.isoformat() if when else None}
 
 
 @app.get("/fuel")
