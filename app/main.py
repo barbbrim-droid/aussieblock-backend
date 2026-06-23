@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.16-remove-diag"
+APP_VERSION = "2026-06-23.17-po-start-0011"
 
 
 @app.get("/version")
@@ -1195,15 +1195,20 @@ def delete_receipt_photo(receipt_id: int, name: str, _: User = Depends(require_s
 # ── Cement / slag purchase orders ────────────────────────────────────────────
 # A PO is what you send a supplier; deliveries are receipts linked by po_id, so
 # received tons, status, and invoice-match all roll up from the receiving log.
+PO_START_NUMBER = 11   # the numbering begins at AB-CEM-0011
+
+
 def _next_po_number(s: Session) -> str:
-    """Next PO number, e.g. 'AB-CEM-0007', continuing from the highest existing one.
-    Derived from the max (not a stored counter) so it can never collide."""
+    """Next PO number, e.g. 'AB-CEM-0011', continuing from the highest existing one
+    but never below PO_START_NUMBER. Derived from the max (not a stored counter)
+    so it can never collide."""
     nums = []
     for po in s.exec(select(PurchaseOrder)).all():
         tail = (po.po_number or "").split("-")[-1]
         if tail.isdigit():
             nums.append(int(tail))
-    return f"AB-CEM-{(max(nums) + 1) if nums else 1:04d}"
+    nxt = max((max(nums) + 1) if nums else 1, PO_START_NUMBER)
+    return f"AB-CEM-{nxt:04d}"
 
 
 def _po_json(po: PurchaseOrder, s: Session, mat_names: dict) -> dict:
