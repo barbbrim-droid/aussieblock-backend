@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.5-geofence-2mile"
+APP_VERSION = "2026-06-23.6-drivers-list"
 
 
 @app.get("/version")
@@ -2706,6 +2706,20 @@ def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_sess
         out.append({"email": u.email, "role": u.role, "phone": u.phone,
                     "customer_id": u.customer_id, "company": company, "project": u.project})
     return out
+
+
+@app.get("/drivers")
+def list_drivers(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Driver names for the dispatch assignment dropdowns: the distinct names of all
+    'driver' logins (User.company). Staff-accessible (dispatch needs it, not just
+    finance). Add a driver by creating their Driver login in Manage Staff and they
+    show up here automatically."""
+    names = set()
+    for u in s.exec(select(User).where(User.role == "driver")).all():
+        nm = (u.company or "").strip()
+        if nm:
+            names.add(nm)
+    return sorted(names, key=str.lower)
 
 
 @app.delete("/staff/{email}")
