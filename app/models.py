@@ -99,6 +99,9 @@ class Order(SQLModel, table=True):
     signature: Optional[str] = None             # stored signature image filename
     signed_at: Optional[str] = None             # ISO timestamp of the sign-off
     water_added: Optional[str] = None           # gallons of water added on site (driver records at sign-off)
+    # On-site water (gal) totalled from the truck's mixer sensor, frozen onto the
+    # order when it's completed. Shown on the batch ticket. None = not captured yet.
+    mixer_water_gal: Optional[float] = None
     completed_at: Optional[str] = None           # ISO date the order was marked complete (drives material draw-down)
     driver_notes: Optional[str] = None           # free notes the driver records on site (visible to dispatch)
 
@@ -243,3 +246,6 @@ class MixerReading(SQLModel, table=True):
     mix_temp_f: Optional[float] = None
     fw: Optional[str] = None                           # device firmware version
     received_at: datetime = Field(default_factory=datetime.utcnow)   # when the server stored it
+    # Set to an Order.ref once this reading is claimed by a completed order (so its
+    # water is totalled into exactly one job's ticket and never double-counted).
+    order_ref: Optional[str] = Field(default=None, index=True)

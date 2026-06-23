@@ -263,6 +263,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "signed_by": o.signed_by,
         "signed_at": o.signed_at,
         "water_added": o.water_added,
+        "mixer_water_gal": o.mixer_water_gal,
         "driver_notes": o.driver_notes,
         "has_signature": bool(o.signature),
         "prepay_required": o.prepay_required,
@@ -650,25 +651,31 @@ def _has_original(ref: str, batch_ticket: str | None) -> bool:
     return bool(glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*")))
 
 
-def _mixer_job_water(truck_id: int | None, s: Session):
-    """On-site water (gal) the truck's mixer sensor logged for the job — the latest
-    'Job Complete' reading (load_uid 'job…') for that truck within the last 18h.
-    Shown on the branded batch ticket. Matched by truck label only, so it's an
-    approximate truck↔order match; returns None when there's no recent reading."""
-    if not truck_id:
-        return None
-    t = s.get(Truck, truck_id)
+def _capture_mixer_water(o, s) -> None:
+    """When an order is completed, total the truck's on-site mixer water for this job
+    — the auto-posted 'truck…' readings not yet claimed by an order — freeze it onto
+    the order, and tag those readings with this order so the next job can't
+    double-count them. Idempotent: a no-op once the order already has a total. The
+    caller commits."""
+    if o.mixer_water_gal is not None or not o.truck_id:
+        return
+    t = s.get(Truck, o.truck_id)
     if not t or not t.label:
-        return None
-    cutoff = datetime.utcnow() - timedelta(hours=18)
-    r = s.exec(
-        select(MixerReading)
-        .where(MixerReading.truck_label == t.label,
-               MixerReading.load_uid.like("job%"),
-               MixerReading.received_at >= cutoff)
-        .order_by(MixerReading.received_at.desc())
-    ).first()
-    return r.gallons if r else None
+        return
+    rows = s.exec(
+        select(MixerReading).where(
+            MixerReading.truck_label == t.label,
+            MixerReading.order_ref.is_(None),
+            MixerReading.load_uid.like("truck%"),
+        )
+    ).all()
+    if not rows:
+        return
+    o.mixer_water_gal = round(sum(r.gallons or 0 for r in rows), 1)
+    for r in rows:
+        r.order_ref = o.ref
+        s.add(r)
+    s.add(o)
 
 
 # ── Knowledge Center ─────────────────────────────────────────────────────────
@@ -1301,7 +1308,7 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
                 order_mix=o.mix, order_qty=o.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True,
-                mixer_water=_mixer_job_water(o.truck_id, s))
+                mixer_water=o.mixer_water_gal)
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
@@ -1913,7 +1920,7 @@ async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(.
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True, load_label=label,
-                mixer_water=_mixer_job_water(ld.truck_id, s))
+                mixer_water=o.mixer_water_gal)
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
@@ -2803,6 +2810,9 @@ def set_order_status(
     # cement/slag silo draw-down (usage counts orders completed since the count).
     if status == "complete" and not o.completed_at:
         o.completed_at = _business_today().isoformat()
+    # Freeze the truck's on-site mixer water onto the order at completion (for the ticket).
+    if status == "complete":
+        _capture_mixer_water(o, s)
     # When dispatch confirms On site, LEARN where the truck is parked as this job's
     # location — replaces the inaccurate address geocode and is reused next time.
     if status == "onsite" and o.truck_id:
