@@ -310,12 +310,14 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.7-driver-no-email"
+APP_VERSION = "2026-06-23.8-version-vision-flag"
 
 
 @app.get("/version")
 def version():
-    return {"version": APP_VERSION}
+    # `vision` reports whether ANTHROPIC_API_KEY is configured on this service —
+    # batch-ticket auto-branding is skipped (original kept as-is) when it's False.
+    return {"version": APP_VERSION, "vision": ticket_convert.available()}
 
 
 # ── Authentication ──────────────────────────────────────────────────────────
