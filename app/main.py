@@ -650,6 +650,27 @@ def _has_original(ref: str, batch_ticket: str | None) -> bool:
     return bool(glob.glob(os.path.join(_batch_ticket_dir(), f"{ref}_original.*")))
 
 
+def _mixer_job_water(truck_id: int | None, s: Session):
+    """On-site water (gal) the truck's mixer sensor logged for the job — the latest
+    'Job Complete' reading (load_uid 'job…') for that truck within the last 18h.
+    Shown on the branded batch ticket. Matched by truck label only, so it's an
+    approximate truck↔order match; returns None when there's no recent reading."""
+    if not truck_id:
+        return None
+    t = s.get(Truck, truck_id)
+    if not t or not t.label:
+        return None
+    cutoff = datetime.utcnow() - timedelta(hours=18)
+    r = s.exec(
+        select(MixerReading)
+        .where(MixerReading.truck_label == t.label,
+               MixerReading.load_uid.like("job%"),
+               MixerReading.received_at >= cutoff)
+        .order_by(MixerReading.received_at.desc())
+    ).first()
+    return r.gallons if r else None
+
+
 # ── Knowledge Center ─────────────────────────────────────────────────────────
 # A shared library of PDFs (spec sheets, safety, how-tos). The office uploads
 # them; every logged-in user (workers, admins, customers) can list & view.
@@ -1279,7 +1300,8 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
                 raw, name, customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=o.qty,
                 price_sheet=pricing.load_sheet(),
-                order_admixtures=o.admixtures or "", return_data=True)
+                order_admixtures=o.admixtures or "", return_data=True,
+                mixer_water=_mixer_job_water(o.truck_id, s))
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:
@@ -1890,7 +1912,8 @@ async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(.
                 raw, name, customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
-                order_admixtures=o.admixtures or "", return_data=True, load_label=label)
+                order_admixtures=o.admixtures or "", return_data=True, load_label=label,
+                mixer_water=_mixer_job_water(ld.truck_id, s))
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(bdir, fname), "wb") as fh:

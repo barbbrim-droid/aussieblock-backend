@@ -273,6 +273,15 @@ def _to_generator_data(p, cfg):
         "yards": yards,
         "req_slump": req_slump,
     }
+    # Water added on site, measured by the truck's mixer sensor (Job Complete
+    # button). Shown as its own line in the process block. None = no reading.
+    mw = cfg.get("_mixer_water")
+    if mw is not None:
+        try:
+            data["process"]["Water added (mixer)"] = f"{float(mw):.1f} gal"
+        except (TypeError, ValueError):
+            pass
+
     # Pricing block, from the price sheet + order context (set by convert()).
     px = cfg.get("_pricing") or {}
     if px.get("sheet"):

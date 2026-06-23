@@ -158,7 +158,8 @@ def _batch_data_from(d: dict) -> dict:
 
 def convert(data: bytes, filename: str, customer_name: str = None, site: str = None,
             order_mix: str = None, order_qty=None, price_sheet: dict = None,
-            order_admixtures: str = "", return_data: bool = False, load_label: str = None):
+            order_admixtures: str = "", return_data: bool = False, load_label: str = None,
+            mixer_water=None):
     """Read the uploaded ticket and render the branded PDF. Returns PDF bytes, or
     (pdf_bytes, batch_data) when return_data=True — batch_data is the parsed nested
     record for a typed protocol (with cement & slag actuals), else None.
@@ -168,6 +169,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
     cfg["_pricing"] = {"sheet": price_sheet, "mix": order_mix,
                        "customer": customer_name, "order_qty": order_qty,
                        "order_admixtures": order_admixtures}
+    cfg["_mixer_water"] = mixer_water   # gal of on-site water from the mixer sensor (or None)
     img = _to_image_file(data, filename)
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     out.close()
