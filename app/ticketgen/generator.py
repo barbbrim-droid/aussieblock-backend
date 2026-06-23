@@ -53,9 +53,28 @@ def render_ticket(data, out_path):
     pdf.add_font("DejaVu","B",_res("DejaVuSans-Bold.ttf"))
     pdf.add_page()
     W = pdf.w - 20  # usable width ~ 195.9mm
-    RH = 4.6        # data row height (roomier)
     BAR = 5.6       # section header bar height
     GAP = 2.2       # gap before each section
+
+    # ---- fit-to-one-page: ease the data row height down on a tall ticket ----
+    # Auto page-break is off and the whole ticket is laid out top-down on one Letter
+    # sheet. A TxDOT ticket adds the MPL block, which on a full mix pushes the
+    # signature + terms + caustic warning off the bottom (the disclaimer got clipped).
+    # Count the rows whose height scales with RH and, if the roomy 4.6 mm default
+    # would overflow, shrink RH (to a 3.8 mm floor) so everything — disclaimer
+    # included — fits. Tickets that already fit keep the full 4.6 mm. The terms block
+    # below also pins to the page bottom and self-shrinks as a final backstop.
+    _rcp = (d.get("order", {}).get("recipe", "") or "").lower()
+    _is_txdot = "txdot" in _rcp or "class " in _rcp
+    _mpl_rows = ((len(d.get("mpl") or []) + 1) // 2) if (d.get("mpl") and _is_txdot) else 0
+    _scaled_rows = (8                                              # ORDER INFORMATION
+                    + 5                                            # BATCHES (header + 4)
+                    + max(len(d.get("materials") or []), MIN_MATERIAL_ROWS)  # BATCH INFORMATION
+                    + 1 + max(len(d.get("totals") or {}), len(d.get("process") or {}))  # totals/process
+                    + _mpl_rows)                                   # MPL (TxDOT only)
+    _fixed = 109.0 if _mpl_rows else 101.0          # non-row furniture (header, bars, sig box…)
+    _target_bottom = pdf.h - 6.0 - 26.0             # page minus bottom margin minus terms+warning block
+    RH = max(3.8, min(4.6, (_target_bottom - _fixed) / max(_scaled_rows, 1)))
 
     # ---------- top band: logo (left) / company / weather ----------
     top_y = pdf.get_y()
