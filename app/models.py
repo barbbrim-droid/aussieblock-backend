@@ -283,3 +283,11 @@ class MixerReset(SQLModel, table=True):
     truck_label: str = Field(index=True)
     metric: str = Field(index=True)                                 # "water" | "drum"
     reset_at: datetime = Field(default_factory=datetime.utcnow)     # readings up to here read 0
+
+
+class Driver(SQLModel, table=True):
+    """A name-only driver roster entry — a driver who can be ASSIGNED to orders/loads
+    (shows in the dispatch dropdowns) but has no login/email. Drivers WITH a tablet
+    login are User rows (role='driver'); GET /drivers merges both lists by name."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)                                   # matches Order.driver

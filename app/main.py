@@ -35,7 +35,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.6-drivers-list"
+APP_VERSION = "2026-06-23.7-driver-no-email"
 
 
 @app.get("/version")
@@ -2708,18 +2708,59 @@ def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_sess
     return out
 
 
+def _driver_names(s: Session) -> list[str]:
+    """All assignable driver names, distinct (case-insensitive, first casing wins):
+    the names of 'driver' logins (User.company) PLUS the name-only Driver roster."""
+    seen, out = set(), []
+    def add(nm):
+        nm = (nm or "").strip()
+        if nm and nm.lower() not in seen:
+            seen.add(nm.lower()); out.append(nm)
+    for u in s.exec(select(User).where(User.role == "driver")).all():
+        add(u.company)
+    for d in s.exec(select(Driver)).all():
+        add(d.name)
+    return sorted(out, key=str.lower)
+
+
 @app.get("/drivers")
 def list_drivers(_: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Driver names for the dispatch assignment dropdowns: the distinct names of all
-    'driver' logins (User.company). Staff-accessible (dispatch needs it, not just
-    finance). Add a driver by creating their Driver login in Manage Staff and they
-    show up here automatically."""
-    names = set()
-    for u in s.exec(select(User).where(User.role == "driver")).all():
-        nm = (u.company or "").strip()
-        if nm:
-            names.add(nm)
-    return sorted(names, key=str.lower)
+    """Driver names for the dispatch assignment dropdowns. Staff-accessible (dispatch
+    needs it, not just finance). A driver appears here either by having a Driver login
+    (Manage Staff) or as a name-only roster entry added via POST /drivers."""
+    return _driver_names(s)
+
+
+class DriverIn(BaseModel):
+    name: str
+
+
+@app.post("/drivers")
+def add_driver(body: DriverIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Add a name-only driver (no login/email) to the roster — assignable on orders.
+    Idempotent on name (case-insensitive); a name that already exists (roster OR a
+    driver login) is a no-op. Returns the full merged driver-name list."""
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    if name.lower() not in {n.lower() for n in _driver_names(s)}:
+        s.add(Driver(name=name)); s.commit()
+    return _driver_names(s)
+
+
+@app.delete("/drivers/{name}")
+def delete_driver(name: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove a name-only roster driver. Drivers WITH a login are removed via
+    Manage Staff (DELETE /staff) instead — this only clears roster entries.
+    Idempotent: ok even if the name wasn't on the roster."""
+    target = (name or "").strip().lower()
+    removed = 0
+    for d in s.exec(select(Driver)).all():
+        if (d.name or "").strip().lower() == target:
+            s.delete(d); removed += 1
+    if removed:
+        s.commit()
+    return {"ok": True, "removed": name, "count": removed}
 
 
 @app.delete("/staff/{email}")
