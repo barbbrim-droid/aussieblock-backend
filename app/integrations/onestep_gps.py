@@ -111,6 +111,30 @@ def _stopped_seconds(truck_id) -> float:
     return (datetime.utcnow() - st["since"]).total_seconds()
 
 
+# GEOFENCE DWELL — how long a truck has been continuously inside the job geofence
+# (moving or parked). The clock starts on entry and resets the moment it leaves, so
+# a drive-through that exits before SITE_ARRIVAL_DWELL_SECONDS never trips On site.
+_geofence_state: dict = {}   # truck_id -> {"lat","lng","since"}  (lat/lng = the site centre it's dwelling at)
+
+
+def _geofence_dwell_seconds(truck: Truck, site) -> float:
+    """Seconds the truck has been continuously within JOB_GEOFENCE_M of `site`.
+    Returns 0 when it's outside the fence, and restarts the clock if it's now
+    dwelling around a different site centre (a new job)."""
+    if truck.id is None or truck.lat is None or truck.lng is None:
+        return 0.0
+    within = _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M
+    if not within:
+        _geofence_state.pop(truck.id, None)   # left the fence -> reset
+        return 0.0
+    st = _geofence_state.get(truck.id)
+    # Start (or restart) the clock on entry, or if the tracked site centre moved.
+    if st is None or _haversine_m(site[0], site[1], st["lat"], st["lng"]) > config.JOB_GEOFENCE_M:
+        _geofence_state[truck.id] = {"lat": site[0], "lng": site[1], "since": datetime.utcnow()}
+        return 0.0
+    return (datetime.utcnow() - st["since"]).total_seconds()
+
+
 def _norm_site(addr) -> str:
     """Normalize a job address for matching (so the same site learns its location)."""
     return "".join(ch for ch in str(addr or "").lower() if ch.isalnum())
@@ -402,10 +426,11 @@ async def _update_enroute_progress() -> None:
 
 
 async def _advance_on_site_arrival() -> None:
-    """Auto-advance an en-route order to On site once its truck enters the job-site
-    geofence (JOB_GEOFENCE_M around the geocoded address). The 300 m radius absorbs
-    small address inaccuracies; stop-detection (arrival_pending) still backs up a
-    badly-wrong address that the truck never gets within range of."""
+    """Auto-advance an en-route order to On site once its truck has stayed inside the
+    job-site geofence (JOB_GEOFENCE_M ≈ 1/2 mile around the geocoded address) for
+    SITE_ARRIVAL_DWELL_SECONDS. The generous radius absorbs address inaccuracies; the
+    dwell time keeps a drive-through from tripping it, and stop-detection
+    (arrival_pending) still backs up a badly-wrong address it never gets near."""
     with Session(engine) as s:
         orders = s.exec(select(Order).where(Order.status == "enroute")).all()
         changed = False
@@ -418,23 +443,22 @@ async def _advance_on_site_arrival() -> None:
             site = _site_center(s, o) or await _geocode(o.site)
             if not site:
                 continue
-            within = _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M
-            # Must be STOPPED in the geofence (not just driving through it) — a
-            # drive-by never accrues stop time, so it no longer trips On site.
-            if within and _stopped_seconds(truck.id) >= config.SITE_ARRIVAL_STOP_SECONDS:
+            # Must STAY inside the geofence the full dwell (a drive-by leaves first).
+            if _geofence_dwell_seconds(truck, site) >= config.SITE_ARRIVAL_DWELL_SECONDS:
                 o.status = "onsite"
                 o.progress = 1.0
                 learn_site_location(o, truck)   # pin the real parked spot for next time
                 s.add(o)
                 changed = True
-                print(f"Geofence+stop: {truck.label} parked at {o.ref} site -> On site.")
+                print(f"Geofence dwell: {truck.label} held at {o.ref} site -> On site.")
         if changed:
             s.commit()
 
 
 async def _advance_loads_on_site_arrival() -> None:
-    """Auto-advance an en-route pour LOAD to On site once its truck enters the job
-    geofence (JOB_GEOFENCE_M around the order's geocoded address)."""
+    """Auto-advance an en-route pour LOAD to On site once its truck has stayed inside
+    the job geofence (JOB_GEOFENCE_M ≈ 1/2 mile around the order's geocoded address)
+    for SITE_ARRIVAL_DWELL_SECONDS."""
     with Session(engine) as s:
         loads = s.exec(select(Load).where(Load.status == "enroute")).all()
         changed = False
@@ -450,14 +474,13 @@ async def _advance_loads_on_site_arrival() -> None:
             site = _site_center(s, o) or await _geocode(o.site)
             if not site:
                 continue
-            within = _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M
-            if within and _stopped_seconds(truck.id) >= config.SITE_ARRIVAL_STOP_SECONDS:
+            if _geofence_dwell_seconds(truck, site) >= config.SITE_ARRIVAL_DWELL_SECONDS:
                 ld.status = "onsite"
                 ld.progress = 1.0
                 learn_site_location(o, truck)   # learn the job pin from the parked truck
                 s.add(ld); s.add(o)
                 changed = True
-                print(f"Geofence+stop: {truck.label} parked at {o.ref} -> load #{ld.seq} On site.")
+                print(f"Geofence dwell: {truck.label} held at {o.ref} -> load #{ld.seq} On site.")
                 _rollup(s, o.id)
         if changed:
             s.commit()
