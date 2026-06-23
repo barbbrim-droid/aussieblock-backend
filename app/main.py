@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.12-vision-selftest-modelparam"
+APP_VERSION = "2026-06-23.13-reconvert-diag"
 
 
 @app.get("/version")
@@ -370,6 +370,63 @@ def diag_vision(k: str = Query(""), model: str = Query("")):
         # so the cause is visible without digging through Render logs.
         return {"ok": False, "stage": "api_call", "model": model,
                 "error_type": type(e).__name__, "error": str(e)[:600]}
+
+
+@app.get("/diag/reconvert")
+def diag_reconvert(k: str = Query(""), ref: str = Query(""), seq: int = Query(0),
+                   s: Session = Depends(get_session)):
+    """Re-run the REAL batch-ticket conversion on a stored original and return the
+    exact failure (with traceback) — the same error the upload endpoint swallows
+    into the Render log. No ref → list every order/load whose branding never
+    succeeded (still showing the original). Secret-code gated like /diag/vision."""
+    if k != "ab-vision-7f3a9c2e":
+        raise HTTPException(404, "Not found")
+    import glob as _glob, traceback as _tb
+    _ORIG_SUFFIXES = ("_original.pdf", "_original.jpg", "_original.jpeg",
+                      "_original.png", "_original.webp", "_original.heic")
+    bdir = _batch_ticket_dir()
+
+    if not ref:
+        orders = s.exec(select(Order).where(Order.batch_ticket.is_not(None))).all()
+        ofail = [o.ref for o in orders
+                 if (o.batch_ticket or "").endswith(_ORIG_SUFFIXES)]
+        loads = s.exec(select(Load).where(Load.batch_ticket.is_not(None))).all()
+        lfail = []
+        for ld in loads:
+            if (ld.batch_ticket or "").endswith(_ORIG_SUFFIXES):
+                o = s.get(Order, ld.order_id)
+                lfail.append({"ref": o.ref if o else None, "seq": ld.seq})
+        return {"unbranded_orders": ofail, "unbranded_loads": lfail,
+                "hint": "call again with ?ref=<ref> (and &seq=<n> for a pour load)"}
+
+    if not ticket_convert.available():
+        return {"ok": False, "error": "ANTHROPIC_API_KEY not set"}
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o:
+        return {"ok": False, "error": f"order {ref} not found"}
+    prefix = _load_ticket_prefix(ref, seq) if seq else ref
+    matches = _glob.glob(os.path.join(bdir, f"{prefix}_original.*"))
+    if not matches:
+        return {"ok": False, "error": f"no stored original for {prefix}"}
+    path = matches[0]
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    try:
+        cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+        qty = (s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)
+                      ).first().qty if seq else o.qty)
+        branded, parsed_bd = ticket_convert.convert(
+            raw, os.path.basename(path), customer_name=cust, site=o.site,
+            order_mix=o.mix, order_qty=qty, price_sheet=pricing.load_sheet(),
+            order_admixtures=o.admixtures or "", return_data=True,
+            load_label=(str(seq) if seq else None), mixer_water=o.mixer_water_gal)
+        return {"ok": True, "ref": ref, "seq": seq, "file": os.path.basename(path),
+                "size_kb": round(len(raw) / 1024), "branded_kb": round(len(branded or b"") / 1024),
+                "has_data": bool(parsed_bd)}
+    except Exception as e:
+        return {"ok": False, "ref": ref, "seq": seq, "file": os.path.basename(path),
+                "size_kb": round(len(raw) / 1024), "error_type": type(e).__name__,
+                "error": str(e)[:600], "trace": _tb.format_exc()[-2000:]}
 
 
 # ── Authentication ──────────────────────────────────────────────────────────
