@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.13-reconvert-diag"
+APP_VERSION = "2026-06-23.14-reconvert-list"
 
 
 @app.get("/version")
@@ -387,16 +387,24 @@ def diag_reconvert(k: str = Query(""), ref: str = Query(""), seq: int = Query(0)
     bdir = _batch_ticket_dir()
 
     if not ref:
-        orders = s.exec(select(Order).where(Order.batch_ticket.is_not(None))).all()
-        ofail = [o.ref for o in orders
-                 if (o.batch_ticket or "").endswith(_ORIG_SUFFIXES)]
-        loads = s.exec(select(Load).where(Load.batch_ticket.is_not(None))).all()
-        lfail = []
-        for ld in loads:
-            if (ld.batch_ticket or "").endswith(_ORIG_SUFFIXES):
-                o = s.get(Order, ld.order_id)
-                lfail.append({"ref": o.ref if o else None, "seq": ld.seq})
-        return {"unbranded_orders": ofail, "unbranded_loads": lfail,
+        # Recent orders with their stored ticket state, so the failing one is
+        # visible even if it isn't on the simple _original suffix.
+        orders = s.exec(select(Order).order_by(Order.id.desc()).limit(25)).all()
+        recent = []
+        for o in orders:
+            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            recent.append({"ref": o.ref, "customer": cust, "status": o.status,
+                           "batch_ticket": o.batch_ticket,
+                           "unbranded": bool((o.batch_ticket or "").endswith(_ORIG_SUFFIXES)),
+                           "has_data": bool(o.batch_data)})
+        # Actual files in the batch-ticket dir (originals + branded), newest first.
+        try:
+            files = sorted(os.listdir(bdir))
+            origs = [f for f in files if "_original." in f]
+        except OSError:
+            files, origs = [], []
+        return {"recent_orders": recent, "original_files": origs,
+                "all_files_count": len(files),
                 "hint": "call again with ?ref=<ref> (and &seq=<n> for a pour load)"}
 
     if not ticket_convert.available():
