@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.11-vision-selftest-realimg"
+APP_VERSION = "2026-06-23.12-vision-selftest-modelparam"
 
 
 @app.get("/version")
@@ -321,7 +321,7 @@ def version():
 
 
 @app.get("/diag/vision")
-def diag_vision(k: str = Query("")):
+def diag_vision(k: str = Query(""), model: str = Query("")):
     # Temporary diagnostic gate: a secret code in place of a login, so the
     # check can be run without the staff app's bearer token. Reverts to
     # staff-auth (or removal) once the cause is found. 404 without the code
@@ -353,7 +353,8 @@ def diag_vision(k: str = Query("")):
         import anthropic
         cfg = json.load(open(os.path.join(os.path.dirname(__file__),
                         "ticketgen", "ticket_config.json"), encoding="utf-8"))
-        model = cfg.get("vision_model", model)
+        # Query override lets us test alternative models before changing config.
+        model = model or cfg.get("vision_model", model)
         client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
             model=model, max_tokens=16,
