@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.4-geofence-1mile"
+APP_VERSION = "2026-06-23.5-geofence-2mile"
 
 
 @app.get("/version")
