@@ -154,12 +154,12 @@ ARRIVAL_MOVE_M = float(os.getenv("ARRIVAL_MOVE_M", "75"))                # movem
 # than JOB_GEOFENCE_M so the truck's final drive-in to park (anywhere inside the
 # arrival geofence) is never mistaken for leaving — i.e. enter at the geofence
 # radius, only count as left once it's this far out (hysteresis).
-RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "1000"))
+RETURN_LEAVE_SITE_M = float(os.getenv("RETURN_LEAVE_SITE_M", "1800"))
 # Job-site geofence radius (meters). An en-route truck that stays within this
 # distance of the geocoded job address for SITE_ARRIVAL_DWELL_SECONDS auto-advances
-# the order to "On site". 805 m ≈ 1/2 mile — a generous radius that absorbs address/
+# the order to "On site". 1609 m ≈ 1 mile — a generous radius that absorbs address/
 # geocode inaccuracies; the dwell time below keeps a drive-through from tripping it.
-JOB_GEOFENCE_M = float(os.getenv("JOB_GEOFENCE_M", "805"))
+JOB_GEOFENCE_M = float(os.getenv("JOB_GEOFENCE_M", "1609"))
 # A truck must STAY inside the job geofence this long (continuous presence, moving or
 # parked) before it auto-advances to "On site" — so a truck merely DRIVING PAST the
 # job leaves before the timer elapses and no longer trips it. 180 s = 3 minutes.
