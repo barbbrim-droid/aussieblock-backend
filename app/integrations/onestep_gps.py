@@ -227,6 +227,10 @@ def _advance_return(s: Session, truck: Truck) -> None:
                     o.completed_at = datetime.utcnow().date().isoformat()
                 _job_loc.pop(o.id, None)
                 s.add(o)
+                # Freeze the truck's on-site mixer water onto the order at completion
+                # (same as the operator's manual Complete). Lazy import avoids a cycle.
+                from ..main import _capture_mixer_water
+                _capture_mixer_water(o, s)
                 print(f"Back at yard: {truck.label} -> order {o.ref} complete.")
 
 
