@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.10-vision-selftest-keyed"
+APP_VERSION = "2026-06-23.11-vision-selftest-realimg"
 
 
 @app.get("/version")
@@ -335,14 +335,21 @@ def diag_vision(k: str = Query("")):
     the heavy PDF/PIL path, so an OOM on a big scan can still fail even when this
     passes."""
     import base64 as _b64
+    import io as _io
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return {"ok": False, "stage": "config", "error": "ANTHROPIC_API_KEY not set"}
-    # 1x1 transparent PNG — just enough to exercise the vision + model path.
-    px = _b64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
     model = "claude-opus-4-8"
     try:
+        # Build a real, valid JPEG (white with a black bar) the same way the
+        # batch-ticket reader does — a tiny placeholder image is rejected by the
+        # API, so generate a properly-sized one to exercise the true path.
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (200, 80), "white")
+        ImageDraw.Draw(im).rectangle([20, 30, 180, 50], fill="black")
+        buf = _io.BytesIO(); im.save(buf, "JPEG", quality=85)
+        data = _b64.b64encode(buf.getvalue()).decode()
+
         import anthropic
         cfg = json.load(open(os.path.join(os.path.dirname(__file__),
                         "ticketgen", "ticket_config.json"), encoding="utf-8"))
@@ -352,10 +359,11 @@ def diag_vision(k: str = Query("")):
             model=model, max_tokens=16,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64",
-                 "media_type": "image/png", "data": _b64.b64encode(px).decode()}},
+                 "media_type": "image/jpeg", "data": data}},
                 {"type": "text", "text": "Reply with the single word OK."}]}],
         )
-        return {"ok": True, "model": model}
+        txt = next((b.text for b in msg.content if b.type == "text"), "")
+        return {"ok": True, "model": model, "reply": txt.strip()[:40]}
     except Exception as e:
         # Surface the API's own message (e.g. credit balance, authentication_error)
         # so the cause is visible without digging through Render logs.
