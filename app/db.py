@@ -61,6 +61,7 @@ _COLUMN_MIGRATIONS = {
         "mixer_water_gal": "FLOAT",
     },
     "mixerreading": {"order_ref": "VARCHAR"},
+    "materialreceipt": {"po_id": "INTEGER"},   # links a delivery to its cement PO
 }
 
 

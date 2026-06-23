@@ -211,6 +211,27 @@ class MaterialReceipt(SQLModel, table=True):
     invoice_matched: bool = False                # reconciled against the supplier invoice
     notes: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # The cement/slag PO this delivery fills, if any (set when received against a PO).
+    po_id: Optional[int] = Field(default=None, foreign_key="purchaseorder.id", index=True)
+
+
+class PurchaseOrder(SQLModel, table=True):
+    """A cement/slag purchase order to a supplier. Its deliveries are
+    MaterialReceipts linked by po_id; received tons, status (Open/Partial/Received)
+    and invoice-match all roll up from those receipts."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    po_number: str = Field(index=True, unique=True)   # auto, e.g. "AB-CEM-0001"
+    vendor: str
+    material_id: Optional[int] = Field(default=None, foreign_key="material.id")   # silo/material ordered
+    tons_ordered: float = 0.0
+    fob_price: Optional[float] = None                 # $/ton (FOB plant)
+    freight_terms: Optional[str] = None               # "Vendor Delivered" | "Self Pickup"
+    freight_cost: Optional[float] = None              # $/ton, when vendor-delivered
+    expected: Optional[str] = None                    # ISO date wanted
+    dest: Optional[str] = None                        # silo / destination
+    notes: Optional[str] = None
+    status: str = "open"                              # open | closed | cancelled (manual override)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class MixDesign(SQLModel, table=True):

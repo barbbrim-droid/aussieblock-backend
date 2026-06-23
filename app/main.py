@@ -35,7 +35,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -997,7 +997,7 @@ def _receipt_json(r: MaterialReceipt, mat_name: str) -> dict:
             "ticket_no": r.ticket_no, "invoice_no": r.invoice_no,
             "unit_cost": r.unit_cost, "total_cost": r.total_cost,
             "invoice_matched": r.invoice_matched, "notes": r.notes,
-            "photos": _receipt_photos(r.id)}
+            "po_id": r.po_id, "photos": _receipt_photos(r.id)}
 
 
 @app.get("/materials")
@@ -1073,6 +1073,7 @@ class ReceiptIn(BaseModel):
     total_cost: Optional[float] = None
     invoice_matched: bool = False
     notes: Optional[str] = None
+    po_id: Optional[int] = None                   # the cement PO this delivery fills
 
 
 @app.post("/materials/receipts")
@@ -1102,6 +1103,7 @@ class ReceiptPatch(BaseModel):
     total_cost: Optional[float] = None
     invoice_matched: Optional[bool] = None
     notes: Optional[str] = None
+    po_id: Optional[int] = None
 
 
 @app.patch("/materials/receipts/{receipt_id}")
@@ -1186,6 +1188,134 @@ def delete_receipt_photo(receipt_id: int, name: str, _: User = Depends(require_s
     r = s.get(MaterialReceipt, receipt_id)
     mat = s.get(Material, r.material_id) if r else None
     return _receipt_json(r, mat.name if mat else "") if r else {"ok": True}
+
+
+# ── Cement / slag purchase orders ────────────────────────────────────────────
+# A PO is what you send a supplier; deliveries are receipts linked by po_id, so
+# received tons, status, and invoice-match all roll up from the receiving log.
+def _next_po_number(s: Session) -> str:
+    """Next PO number, e.g. 'AB-CEM-0007', continuing from the highest existing one.
+    Derived from the max (not a stored counter) so it can never collide."""
+    nums = []
+    for po in s.exec(select(PurchaseOrder)).all():
+        tail = (po.po_number or "").split("-")[-1]
+        if tail.isdigit():
+            nums.append(int(tail))
+    return f"AB-CEM-{(max(nums) + 1) if nums else 1:04d}"
+
+
+def _po_json(po: PurchaseOrder, s: Session, mat_names: dict) -> dict:
+    receipts = s.exec(select(MaterialReceipt).where(MaterialReceipt.po_id == po.id)).all()
+    received = round(sum(r.tons or 0 for r in receipts), 2)
+    ordered = po.tons_ordered or 0.0
+    inv_total = len(receipts)
+    inv_matched = sum(1 for r in receipts if r.invoice_matched)
+    if po.status in ("closed", "cancelled"):
+        eff = po.status.capitalize()
+    elif received <= 0:
+        eff = "Open"
+    elif received < ordered - 0.01:
+        eff = "Partial"
+    else:
+        eff = "Received"
+    unit_all = (po.fob_price or 0.0) + ((po.freight_cost or 0.0) if po.freight_terms == "Vendor Delivered" else 0.0)
+    return {
+        "id": po.id, "po_number": po.po_number, "vendor": po.vendor,
+        "material_id": po.material_id, "material": mat_names.get(po.material_id, ""),
+        "tons_ordered": ordered, "received_tons": received,
+        "remaining": round(max(ordered - received, 0.0), 2),
+        "fob_price": po.fob_price, "freight_terms": po.freight_terms, "freight_cost": po.freight_cost,
+        "unit_all": round(unit_all, 2), "committed": round(ordered * unit_all, 2),
+        "expected": po.expected, "dest": po.dest, "notes": po.notes,
+        "status": eff, "raw_status": po.status,
+        "created_at": po.created_at.isoformat() if po.created_at else None,
+        "deliveries": inv_total, "invoices_matched": inv_matched,
+        "fully_matched": inv_total > 0 and inv_matched == inv_total,
+    }
+
+
+class POIn(BaseModel):
+    vendor: str
+    material_id: Optional[int] = None
+    tons_ordered: float
+    fob_price: Optional[float] = None
+    freight_terms: Optional[str] = None
+    freight_cost: Optional[float] = None
+    expected: Optional[str] = None
+    dest: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class POPatch(BaseModel):
+    vendor: Optional[str] = None
+    material_id: Optional[int] = None
+    tons_ordered: Optional[float] = None
+    fob_price: Optional[float] = None
+    freight_terms: Optional[str] = None
+    freight_cost: Optional[float] = None
+    expected: Optional[str] = None
+    dest: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None   # open | closed | cancelled
+
+
+@app.get("/materials/pos")
+def list_pos(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Cement/slag purchase orders, newest first, with rolled-up status (staff)."""
+    _ensure_materials(s)
+    names = {m.id: m.name for m in s.exec(select(Material)).all()}
+    pos = s.exec(select(PurchaseOrder)).all()
+    pos.sort(key=lambda p: (p.created_at or datetime.min), reverse=True)
+    return [_po_json(p, s, names) for p in pos]
+
+
+@app.post("/materials/pos")
+def create_po(body: POIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Create a cement/slag PO — auto-numbered AB-CEM-NNNN (staff)."""
+    if not (body.vendor or "").strip():
+        raise HTTPException(422, "Vendor is required")
+    if body.tons_ordered is None or body.tons_ordered <= 0:
+        raise HTTPException(422, "Tons ordered must be a positive number")
+    if body.material_id is not None and not s.get(Material, body.material_id):
+        raise HTTPException(404, "Material not found")
+    po = PurchaseOrder(po_number=_next_po_number(s), vendor=body.vendor.strip(),
+                       material_id=body.material_id, tons_ordered=body.tons_ordered,
+                       fob_price=body.fob_price, freight_terms=body.freight_terms,
+                       freight_cost=body.freight_cost, expected=body.expected,
+                       dest=(body.dest or "").strip() or None,
+                       notes=(body.notes or "").strip() or None)
+    s.add(po); s.commit(); s.refresh(po)
+    names = {m.id: m.name for m in s.exec(select(Material)).all()}
+    return _po_json(po, s, names)
+
+
+@app.patch("/materials/pos/{po_id}")
+def edit_po(po_id: int, body: POPatch, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Edit a PO or set its status (open/closed/cancelled) (staff)."""
+    po = s.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+    data = body.model_dump(exclude_unset=True)
+    if "status" in data and data["status"] not in ("open", "closed", "cancelled"):
+        raise HTTPException(422, "status must be open, closed, or cancelled")
+    for f, v in data.items():
+        setattr(po, f, v)
+    s.add(po); s.commit(); s.refresh(po)
+    names = {m.id: m.name for m in s.exec(select(Material)).all()}
+    return _po_json(po, s, names)
+
+
+@app.delete("/materials/pos/{po_id}")
+def delete_po(po_id: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Delete a PO. Its deliveries stay in the receiving log but are unlinked (staff)."""
+    po = s.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+    for r in s.exec(select(MaterialReceipt).where(MaterialReceipt.po_id == po_id)).all():
+        r.po_id = None
+        s.add(r)
+    s.delete(po); s.commit()
+    return {"ok": True, "removed": po_id}
 
 
 @app.get("/materials/mix-designs")
