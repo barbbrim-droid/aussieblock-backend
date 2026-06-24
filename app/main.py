@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.22-shared-pump-claim"
+APP_VERSION = "2026-06-23.23-fuel-purge"
 
 
 @app.get("/version")
@@ -2439,13 +2439,21 @@ def post_fuel_fill(body: FuelFillIn, _: None = Depends(mixer.require_device_key)
 
 
 @app.delete("/fuel/unmatched/{vehicle_no}")
-def delete_unmatched_fuel(vehicle_no: str, k: str = Query(""),
+def delete_unmatched_fuel(vehicle_no: str, k: str = Query(""), purge: int = Query(0),
                           s: Session = Depends(get_session)):
-    """Delete UNMATCHED fuel fills for a vehicle number (e.g. a test or mistyped
-    entry). Secret-code gated. Only removes fills not linked to a truck, so real
-    per-truck history is never touched."""
+    """Delete fuel fills. Secret-code gated. Default: only UNMATCHED fills for the
+    given vehicle number (a test/mistyped entry), so real per-truck history stays
+    safe. With ?purge=1: delete ALL fuel transactions (one-shot clear of test data
+    — use only before real fills exist)."""
     if k != "ab-vision-7f3a9c2e":
         raise HTTPException(404, "Not found")
+    if purge:
+        rows = s.exec(select(FuelTransaction)).all()
+        n = len(rows)
+        for ft in rows:
+            s.delete(ft)
+        s.commit()
+        return {"ok": True, "deleted": n, "purged_all": True}
     targets = veh_keys(vehicle_no)
     n = 0
     for ft in s.exec(select(FuelTransaction).where(FuelTransaction.truck_id.is_(None))).all():
