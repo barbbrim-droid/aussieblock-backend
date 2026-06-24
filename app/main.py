@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.21-fuel-mileage"
+APP_VERSION = "2026-06-23.22-shared-pump-claim"
 
 
 @app.get("/version")
@@ -2464,34 +2464,39 @@ class FuelMileageIn(BaseModel):
 @app.post("/fuel/mileage")
 def attach_fuel_mileage(body: FuelMileageIn, user: User = Depends(get_current_user),
                         s: Session = Depends(get_session)):
-    """Driver adds the current mileage to their truck's most recent fuel fill — the
-    gallons come from the on-truck ESP meter, not typed. Used by the driver app."""
+    """Shared-pump fuel claim: the driver enters their truck number + current
+    mileage, and we tag the most recent UNCLAIMED pump fill (gallons from the ESP
+    meter) to their truck. The pump meter posts fills as truck "PUMP" (unclaimed);
+    the driver assigns them here. Used by the driver app."""
     veh = (body.truck_no or "").strip()
     if not veh:
         raise HTTPException(422, "Enter your truck number")
     if body.odometer is None or body.odometer <= 0:
         raise HTTPException(422, "Enter the current mileage")
+    # The driver's truck must exist (so the fill lands on a real truck).
     targets = veh_keys(veh)
-    truck_id = None
+    truck = None
     for t in s.exec(select(Truck)).all():
         if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
-            truck_id = t.id
+            truck = t
             break
-    # That truck's fills (matched by truck or, if unmapped, by vehicle number).
-    mine = [f for f in s.exec(select(FuelTransaction)).all()
-            if (truck_id and f.truck_id == truck_id) or (veh_keys(f.vehicle_no) & targets)]
-    if not mine:
-        # No meter fill to attach to yet — tell the driver to finish pumping.
+    if truck is None:
+        return {"ok": False, "reason": "no_truck"}
+    # Most recent unclaimed fill (not yet assigned to a truck) — that's the pump
+    # fill this driver just made.
+    unclaimed = s.exec(select(FuelTransaction).where(FuelTransaction.truck_id.is_(None))).all()
+    if not unclaimed:
         return {"ok": False, "reason": "no_fill"}
-    latest = max(mine, key=lambda f: (f.occurred_at or f.created_at or datetime.min))
+    latest = max(unclaimed, key=lambda f: (f.occurred_at or f.created_at or datetime.min))
+    latest.truck_id = truck.id
+    latest.vehicle_no = truck.label or veh
     latest.odometer = body.odometer
-    if not latest.driver:
-        latest.driver = user.company or user.email
+    latest.driver = user.company or user.email
     s.add(latest); s.commit(); s.refresh(latest)
     when = latest.occurred_at or latest.created_at
-    print(f"POST /fuel/mileage  truck={veh} odo={body.odometer} by={user.email} -> fill {latest.id} ({latest.gallons} gal)")
+    print(f"POST /fuel/mileage  CLAIM truck={truck.label} odo={body.odometer} by={user.email} -> fill {latest.id} ({latest.gallons} gal)")
     return {"ok": True, "gallons": latest.gallons, "odometer": latest.odometer,
-            "occurred_at": when.isoformat() if when else None}
+            "truck": truck.label, "occurred_at": when.isoformat() if when else None}
 
 
 @app.get("/fuel")
