@@ -2541,7 +2541,7 @@ def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_sess
     yards_by_truck = _yards_by_truck(s)
     by_truck: dict = {}
     products: dict = {}   # product name -> its current $/gal, for the price editor
-    unmatched = {"gallons": 0.0, "cost": 0.0, "fills": 0, "vehicles": set()}
+    unmatched = {"gallons": 0.0, "cost": 0.0, "fills": 0, "vehicles": set(), "list": []}
     for t in txns:
         gal = t.gallons or 0.0
         cost = gal * pricing.fuel_price_for(sheet, t.fuel_type)
@@ -2553,6 +2553,9 @@ def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_sess
             unmatched["fills"] += 1
             if t.vehicle_no:
                 unmatched["vehicles"].add(t.vehicle_no)
+            unmatched["list"].append({"id": t.id, "vehicle_no": t.vehicle_no, "gallons": t.gallons,
+                                      "when": t.occurred_at, "driver": t.driver,
+                                      "odometer": t.odometer, "fuel_type": t.fuel_type})
             continue
         agg = by_truck.setdefault(t.truck_id, {"gallons": 0.0, "cost": 0.0, "fills": 0,
                                                "last_fill": None, "last_odometer": None})
@@ -2589,7 +2592,9 @@ def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_sess
             "cost_per_yd": round(fleet["cost"] / fleet["yards"], 2) if fleet["yards"] else None,
         },
         "unmatched": {"gallons": round(unmatched["gallons"], 1), "cost": round(unmatched["cost"], 2),
-                      "fills": unmatched["fills"], "vehicles": sorted(unmatched["vehicles"])},
+                      "fills": unmatched["fills"], "vehicles": sorted(unmatched["vehicles"]),
+                      "list": sorted(unmatched["list"],
+                                     key=lambda f: f["when"] or datetime.min, reverse=True)},
         "products": [{"product": p, "price": pr} for p, pr in sorted(products.items())],
         "fuel_price_default": pricing._num(sheet.get("fuel_price_default")),
         "live": config.USE_FLUIDSECURE,
@@ -2656,11 +2661,68 @@ def truck_fuel(label: str, _: User = Depends(require_staff), s: Session = Depend
         "label": truck.label,
         "fuel_vehicle": truck.fluidsecure_vehicle_id,
         "fills": [
-            {"when": t.occurred_at, "gallons": t.gallons, "fuel_type": t.fuel_type,
-             "odometer": t.odometer, "driver": t.driver, "pin": t.pin}
+            {"id": t.id, "when": t.occurred_at, "gallons": t.gallons, "fuel_type": t.fuel_type,
+             "odometer": t.odometer, "driver": t.driver, "pin": t.pin, "vehicle_no": t.vehicle_no}
             for t in txns
         ],
     }
+
+
+class FuelFillEditIn(BaseModel):
+    """Staff correction to one fuel fill. Every field is optional — omit a field to
+    leave it unchanged. `truck_label` reassigns the fill to a different truck;
+    pass "" to move it back to Unmatched."""
+    truck_label: Optional[str] = None   # None = leave as-is; "" = unmatch; else assign to that truck
+    gallons: Optional[float] = None
+    odometer: Optional[float] = None
+
+
+@app.patch("/fuel/{fill_id}")
+def edit_fuel_fill(fill_id: int, body: FuelFillEditIn, _: User = Depends(require_staff),
+                   s: Session = Depends(get_session)):
+    """Edit one fuel fill (staff): reassign it to the right truck (e.g. a driver
+    claimed the pump fill on the wrong truck), or correct the gallons/odometer.
+    Pass truck_label="" to send it back to Unmatched."""
+    ft = s.get(FuelTransaction, fill_id)
+    if not ft:
+        raise HTTPException(404, "No such fuel fill")
+    if body.truck_label is not None:
+        lbl = body.truck_label.strip()
+        if lbl == "":
+            ft.truck_id = None          # back to Unmatched
+        else:
+            # exact label first, then tolerant number match (RTS prefix/spacing)
+            truck = s.exec(select(Truck).where(Truck.label == lbl)).first()
+            if not truck:
+                targets = veh_keys(lbl)
+                for t in s.exec(select(Truck)).all():
+                    if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
+                        truck = t
+                        break
+            if not truck:
+                raise HTTPException(404, f"No truck '{lbl}'")
+            ft.truck_id = truck.id
+            ft.vehicle_no = truck.label or ft.vehicle_no
+    if body.gallons is not None:
+        ft.gallons = body.gallons
+    if body.odometer is not None:
+        ft.odometer = body.odometer
+    s.add(ft); s.commit(); s.refresh(ft)
+    print(f"PATCH /fuel/{fill_id}  -> truck_id={ft.truck_id} gal={ft.gallons} odo={ft.odometer}")
+    return {"ok": True, "id": ft.id, "truck_id": ft.truck_id,
+            "gallons": ft.gallons, "odometer": ft.odometer}
+
+
+@app.delete("/fuel/{fill_id}")
+def delete_fuel_fill(fill_id: int, _: User = Depends(require_staff),
+                     s: Session = Depends(get_session)):
+    """Delete one fuel fill by id (staff) — e.g. a duplicate or a fill logged in
+    error. Idempotent: returns ok even if it was already gone."""
+    ft = s.get(FuelTransaction, fill_id)
+    if ft:
+        s.delete(ft); s.commit()
+        print(f"DELETE /fuel/{fill_id}  removed (truck_id={ft.truck_id} gal={ft.gallons})")
+    return {"ok": True, "deleted": fill_id}
 
 
 # Keep billing fresh without depending on the background loop: opening billing
