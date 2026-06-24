@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-23.24-fuel-del-matched"
+APP_VERSION = "2026-06-24.25-diag-mixer"
 
 
 @app.get("/version")
@@ -318,6 +318,24 @@ def version():
     # `vision` reports whether ANTHROPIC_API_KEY is configured on this service —
     # batch-ticket auto-branding is skipped (original kept as-is) when it's False.
     return {"version": APP_VERSION, "vision": ticket_convert.available()}
+
+
+@app.get("/diag/mixer")
+def diag_mixer(k: str = Query(""), s: Session = Depends(get_session)):
+    """Each truck's most recent mixer/water reading + when (secret-code gated).
+    A recent timestamp means that truck's water meter has reported = online."""
+    if k != "ab-vision-7f3a9c2e":
+        raise HTTPException(404, "Not found")
+    rows = s.exec(select(MixerReading)
+                  .order_by(MixerReading.received_at.desc(), MixerReading.id.desc())
+                  .limit(200)).all()
+    latest = {}
+    for r in rows:
+        lbl = r.truck_label or "(no truck)"
+        if lbl not in latest:
+            latest[lbl] = {"received_at": r.received_at.isoformat() if r.received_at else None,
+                           "water_gal": r.gallons, "load_uid": r.load_uid}
+    return {"latest_by_truck": latest, "readings_seen": len(rows)}
 
 
 # ── Authentication ──────────────────────────────────────────────────────────
