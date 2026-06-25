@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.2-cost-detail"
+APP_VERSION = "2026-06-25.3-load-fees"
 
 
 @app.get("/version")
@@ -1647,6 +1647,25 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
                                  materials=batched_adx,
                                  order_admixtures=o.admixtures or "", unit_override=o.price_override,
                                  fiber_rate_override=o.fiber_rate)
+    # Back-haul: a pour's continuation is entered as an extra load. The order-total
+    # pricing above can't see individual loads, so add a back-haul fee here for each
+    # load ≤ the threshold (≤3 yd) that's smaller than the whole pour, and fold it
+    # into the bill. Skipped for self-haul customers (no delivery/load fees).
+    bh_rate = pricing._num(sheet.get("backhaul_per_yd"))
+    bh_thresh = pricing._num(sheet.get("backhaul_under_yd"))
+    order_total = pricing._num(billable)
+    if bh_rate and bh_thresh and not pricing.is_self_haul(cust, sheet):
+        extra_bh = 0.0
+        for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+            lq = pricing._num(ld.qty)
+            if lq and lq <= bh_thresh and order_total > lq:   # small continuation of a larger pour
+                extra_bh += round(bh_rate * lq, 2)
+        if extra_bh:
+            cp["backhaul"] = round(pricing._num(cp.get("backhaul")) + extra_bh, 2)
+            cp["subtotal"] = round(pricing._num(cp.get("subtotal")) + extra_bh, 2)
+            cp["tax"] = round(cp["subtotal"] * pricing._num(cp.get("tax_pct")) / 100.0, 2)
+            cp["total"] = round(cp["subtotal"] + cp["tax"], 2)
+            cp["job_running_total"] = cp["total"]
     # mileage: use the stored value, else auto-compute once and cache it on the order
     mi = o.mileage
     if mi is None and compute_miles:

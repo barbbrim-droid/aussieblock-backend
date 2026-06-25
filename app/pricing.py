@@ -263,9 +263,12 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
     if self_haul:
         short = backhaul = 0.0
     else:
-        short = _num(sheet.get("short_load_fee")) if (oq and oq < _num(sheet.get("short_load_under_yd"))) else 0.0
+        # Short load: any order this size or smaller (≤5 yd by default). Back haul:
+        # a continuation load of a larger pour (load < order) this size or smaller
+        # (≤3 yd). Both thresholds are inclusive.
+        short = _num(sheet.get("short_load_fee")) if (oq and oq <= _num(sheet.get("short_load_under_yd"))) else 0.0
         backhaul = (round(_num(sheet.get("backhaul_per_yd")) * lq, 2)
-                    if (lq and lq < _num(sheet.get("backhaul_under_yd")) and oq and oq > lq) else 0.0)
+                    if (lq and lq <= _num(sheet.get("backhaul_under_yd")) and oq and oq > lq) else 0.0)
     subtotal = round(extended + adx_total + short + backhaul, 2)
     tax_pct = _num(sheet.get("tax_pct"))
     tax = round(subtotal * tax_pct / 100.0, 2)
