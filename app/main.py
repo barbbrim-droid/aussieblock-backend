@@ -227,6 +227,9 @@ def _load_json(ld: Load, s: Session, ref: str) -> dict:
         "has_original": has_orig,
         "signed_by": ld.signed_by, "signed_at": ld.signed_at,
         "water_added": ld.water_added, "has_signature": bool(ld.signature),
+        # On-site clock (UTC ISO) — the frontend shows live time-on-site for this truck.
+        "onsite_at": (ld.onsite_at.isoformat() + "Z") if ld.onsite_at else None,
+        "departed_at": (ld.departed_at.isoformat() + "Z") if ld.departed_at else None,
         "truck_position": ({"lat": t.lat, "lng": t.lng, "heading": t.heading}
                            if t and t.lat is not None else None),
     }
@@ -263,6 +266,9 @@ def _order_json(o: Order, s: Session) -> dict:
         "signed_by": o.signed_by,
         "signed_at": o.signed_at,
         "water_added": o.water_added,
+        # On-site clock (UTC ISO) — drives the live "time on site" on the order tab.
+        "onsite_at": (o.onsite_at.isoformat() + "Z") if o.onsite_at else None,
+        "departed_at": (o.departed_at.isoformat() + "Z") if o.departed_at else None,
         "mixer_water_gal": o.mixer_water_gal,
         "driver_notes": o.driver_notes,
         "has_signature": bool(o.signature),
@@ -310,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.4-standby"
+APP_VERSION = "2026-06-25.5-onsite-timer"
 
 
 @app.get("/version")
