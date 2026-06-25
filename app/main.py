@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.6-customer-price"
+APP_VERSION = "2026-06-25.7-self-pickup"
 
 
 @app.get("/version")
@@ -1582,9 +1582,13 @@ def _cost_hauler_group(o: Order, s: Session, sheet: dict, customer: str) -> str:
       • delivered by an RTS truck number → 'RTS';
       • any other truck (P&L Concrete helping haul) → 'P&L Concrete'.
     Matched on the truck NUMBER (not the 'RTS' label text). A pour's trucks live on
-    its loads, so those are checked too (like _order_hauler)."""
+    its loads, so those are checked too (like _order_hauler).
+
+    Self-pickup gets its OWN bucket ('<customer> · self-pickup') so it never merges
+    with that same name as a HAULER (e.g. P&L Concrete both hauls for us AND picks
+    up its own concrete) — the frontend shows what they OWE us there, not a payout."""
     if pricing.is_self_haul(customer, sheet):
-        return customer or "Self-haul"
+        return f"{customer} · self-pickup" if customer else "Self-pickup"
     nums = set()
     if o.truck_id:
         t = s.get(Truck, o.truck_id)
@@ -1711,6 +1715,7 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
     dl["hauler_group"] = _cost_hauler_group(o, s, sheet, cust)   # Costs "by hauler" bucket
+    dl["self_haul"] = pricing.is_self_haul(cust, sheet)          # self-pickup → they OWE us
     # The order's invoice + effective paid status, so the Costs tab can show
     # paid/outstanding and toggle it (marks the invoice paid via its number).
     inv = s.exec(select(Invoice).where(Invoice.order_ref == o.ref)).first() if o.ref else None
