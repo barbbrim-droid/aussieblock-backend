@@ -1549,6 +1549,27 @@ def _order_hauler(o: Order, s: Session):
     return None
 
 
+def _cost_hauler_group(o: Order, s: Session, sheet: dict, customer: str) -> str:
+    """Which hauler bucket an order falls in for the Costs 'by hauler' view:
+      • a self-haul customer hauls their own concrete → listed under the CUSTOMER
+        name (no hauling payout);
+      • delivered by an RTS truck (4554/7329/7336) → 'RTS';
+      • any other truck (P&L Concrete helping haul) → 'P&L Concrete'.
+    A pour's trucks live on its loads, so those are checked too (like _order_hauler)."""
+    if pricing.is_self_haul(customer, sheet):
+        return customer or "Self-haul"
+    if o.truck_id:
+        t = s.get(Truck, o.truck_id)
+        if t and _is_rts(t.label):
+            return "RTS"
+    for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+        if ld.truck_id:
+            t = s.get(Truck, ld.truck_id)
+            if t and _is_rts(t.label):
+                return "RTS"
+    return "P&L Concrete"
+
+
 def _billable_yards(o: Order, s: Session) -> str:
     """The yards to bill the customer and haul on — ACTUAL delivered, never the
     ordered estimate. Priority:
@@ -1615,6 +1636,7 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
             s.add(o)
     dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
+    dl["hauler_group"] = _cost_hauler_group(o, s, sheet, cust)   # Costs "by hauler" bucket
     return {"customer": cp, "delivery": dl, "billed_qty": billable,
             "ordered_qty": o.qty, "price_override": o.price_override}
 
