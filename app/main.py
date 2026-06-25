@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.1-costs-haulers"
+APP_VERSION = "2026-06-25.2-cost-detail"
 
 
 @app.get("/version")
@@ -1549,25 +1549,45 @@ def _order_hauler(o: Order, s: Session):
     return None
 
 
+# Which trucks belong to which hauler, matched on the NUMBER in the truck label
+# ("RTS 4554" / "4554" both → "4554"), so the label text doesn't matter. EDIT
+# these as trucks change; a truck in neither list falls through to P&L Concrete.
+RTS_TRUCK_NUMBERS = {"4554", "7329", "7336"}
+PNL_TRUCK_NUMBERS: set = set()   # P&L Concrete's trucks (optional — others default to P&L)
+
+
+def _truck_num(label: str) -> str:
+    """The truck's number from its label ('RTS 4554' -> '4554'), digits only."""
+    n = pricing._num(label)
+    return ("%g" % n) if n else ""
+
+
 def _cost_hauler_group(o: Order, s: Session, sheet: dict, customer: str) -> str:
     """Which hauler bucket an order falls in for the Costs 'by hauler' view:
       • a self-haul customer hauls their own concrete → listed under the CUSTOMER
         name (no hauling payout);
-      • delivered by an RTS truck (4554/7329/7336) → 'RTS';
+      • delivered by an RTS truck number → 'RTS';
       • any other truck (P&L Concrete helping haul) → 'P&L Concrete'.
-    A pour's trucks live on its loads, so those are checked too (like _order_hauler)."""
+    Matched on the truck NUMBER (not the 'RTS' label text). A pour's trucks live on
+    its loads, so those are checked too (like _order_hauler)."""
     if pricing.is_self_haul(customer, sheet):
         return customer or "Self-haul"
+    nums = set()
     if o.truck_id:
         t = s.get(Truck, o.truck_id)
-        if t and _is_rts(t.label):
-            return "RTS"
+        if t:
+            nums.add(_truck_num(t.label))
     for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
         if ld.truck_id:
             t = s.get(Truck, ld.truck_id)
-            if t and _is_rts(t.label):
-                return "RTS"
-    return "P&L Concrete"
+            if t:
+                nums.add(_truck_num(t.label))
+    nums.discard("")
+    if nums & RTS_TRUCK_NUMBERS:
+        return "RTS"
+    if nums & PNL_TRUCK_NUMBERS:
+        return "P&L Concrete"
+    return "P&L Concrete"   # any other truck → P&L Concrete
 
 
 def _billable_yards(o: Order, s: Session) -> str:
@@ -1637,8 +1657,20 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
     dl["hauler_group"] = _cost_hauler_group(o, s, sheet, cust)   # Costs "by hauler" bucket
+    # The order's invoice + effective paid status, so the Costs tab can show
+    # paid/outstanding and toggle it (marks the invoice paid via its number).
+    inv = s.exec(select(Invoice).where(Invoice.order_ref == o.ref)).first() if o.ref else None
+    invoice_info = None
+    if inv:
+        override = s.exec(select(InvoicePaidOverride).where(
+            InvoicePaidOverride.number == inv.number)).first()
+        paid = inv.status == "paid" or override is not None
+        invoice_info = {"number": inv.number, "amount": inv.amount,
+                        "status": "paid" if paid else inv.status,
+                        "manually_paid": (override is not None and inv.status != "paid")}
     return {"customer": cp, "delivery": dl, "billed_qty": billable,
-            "ordered_qty": o.qty, "price_override": o.price_override}
+            "ordered_qty": o.qty, "price_override": o.price_override,
+            "invoice": invoice_info}
 
 
 @app.get("/orders/{ref}/pricing")
