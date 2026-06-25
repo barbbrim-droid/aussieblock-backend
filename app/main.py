@@ -918,20 +918,40 @@ def _materials_summary(s: Session, frm: str = None, to: str = None) -> dict:
                                       if d["name"] == m.name), 99))
     cutoffs = [m.counted_on for m in mats if m.counted_on]
     earliest = min(cutoffs) if cutoffs else ""
-    # Resolve each completed order once: its date, ticket actuals, and (for the
-    # cement/slag estimate fallback) its billable yards + matched mix design.
+    # Resolve every production event into {done, actuals, yds, design}:
+    #   • a single delivery → its completed order (ticket actuals or lb/yd estimate);
+    #   • a continuous pour → each DELIVERED load as it's signed off, whether or not
+    #     staff have manually marked the umbrella pour "complete". Pours stay
+    #     "ongoing" until finished (see _rollup_pour), so waiting on order-complete
+    #     would hide every load's cement/slag mid-pour — the silos would never draw
+    #     down. A pour the staff HAVE completed counts all its loads.
+    today = _business_today().isoformat()
+    loads_by_order = {}
+    for ld in s.exec(select(Load)).all():
+        loads_by_order.setdefault(ld.order_id, []).append(ld)
     completed, unmapped = [], {}
-    for o in s.exec(select(Order).where(Order.status == "complete")).all():
-        done = o.completed_at or ""
-        actuals = _ticket_actuals(o, s)
-        yds = pricing._num(_billable_yards(o, s))
-        d = _design_for(o.mix, designs) if yds > 0 else None
+
+    def _add(done, actuals, yds, mix):
+        d = _design_for(mix, designs) if yds > 0 else None
         completed.append({"done": done, "actuals": actuals, "yds": yds, "design": d})
-        # An order with yards but no cement actual AND no mix design can't draw the
-        # cement/slag silos down — surface its mix so staff can add a design for it.
+        # Yards with no cement/slag actual AND no mix design can't draw the silos
+        # down — surface the mix so staff can add a design for it.
         if yds > 0 and not actuals.get("cement") and not actuals.get("slag") and not d:
             if not earliest or done >= earliest:
-                unmapped[o.mix] = round(unmapped.get(o.mix, 0.0) + yds, 2)
+                unmapped[mix] = round(unmapped.get(mix, 0.0) + yds, 2)
+
+    for o in s.exec(select(Order)).all():
+        loads = loads_by_order.get(o.id, [])
+        if loads:   # continuous pour — draw down per delivered load
+            order_done = o.status == "complete"
+            for ld in loads:
+                if not order_done and ld.status != "complete":
+                    continue   # load still in flight on an unfinished pour
+                done = (ld.signed_at or "")[:10] or o.completed_at or today
+                _add(done, _actuals_from_bd(ld.batch_data), pricing._num(ld.qty), o.mix)
+        elif o.status == "complete":   # single delivery (no loads)
+            _add(o.completed_at or "", _ticket_actuals(o, s),
+                 pricing._num(_billable_yards(o, s)), o.mix)
 
     _EST_FIELD = {"cement": "cement_lb_yd", "slag": "slag_lb_yd"}
     items, total_cost = [], 0.0
@@ -2527,6 +2547,49 @@ def attach_fuel_mileage(body: FuelMileageIn, user: User = Depends(get_current_us
     print(f"POST /fuel/mileage  CLAIM truck={truck.label} odo={body.odometer} by={user.email} -> fill {latest.id} ({latest.gallons} gal)")
     return {"ok": True, "gallons": latest.gallons, "odometer": latest.odometer,
             "truck": truck.label, "occurred_at": when.isoformat() if when else None}
+
+
+class FuelManualIn(BaseModel):
+    truck_no: str                  # truck number the driver typed (e.g. "4554")
+    gallons: float                 # gallons the driver pumped (meter didn't record it)
+    odometer: Optional[float] = None
+
+
+@app.post("/fuel/manual")
+def manual_fuel_fill(body: FuelManualIn, user: User = Depends(get_current_user),
+                     s: Session = Depends(get_session)):
+    """Driver logs a fuel fill BY HAND when the on-truck meter didn't record it
+    (meter offline, fueled off-site, hand pump). Unlike /fuel/mileage — which only
+    claims a fill the meter already posted — this creates the fill from the gallons
+    the driver enters. Flagged manual in `raw` for the audit trail. Used by the
+    driver app's fuel form as a fallback when there's no pending meter fill."""
+    veh = (body.truck_no or "").strip()
+    if not veh:
+        raise HTTPException(422, "Enter your truck number")
+    if body.gallons is None or body.gallons <= 0:
+        raise HTTPException(422, "Enter the gallons you put in")
+    targets = veh_keys(veh)
+    truck = None
+    for t in s.exec(select(Truck)).all():
+        if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
+            truck = t
+            break
+    if truck is None:
+        return {"ok": False, "reason": "no_truck"}
+    when = datetime.utcnow()
+    # external_id is timestamped so repeated manual fills never collide, but a
+    # double-tap within the same instant is deduped.
+    ext = f"manual:{truck.id}:{when.isoformat()}"
+    ft = FuelTransaction(
+        external_id=ext, truck_id=truck.id, vehicle_no=truck.label or veh,
+        gallons=body.gallons, fuel_type="Diesel",
+        odometer=(body.odometer if (body.odometer and body.odometer > 0) else None),
+        driver=(user.company or user.email), occurred_at=when,
+        raw=json.dumps({"manual": True, "by": user.email}))
+    s.add(ft); s.commit(); s.refresh(ft)
+    print(f"POST /fuel/manual  truck={truck.label} gal={body.gallons} by={user.email} -> id={ft.id}")
+    return {"ok": True, "gallons": ft.gallons, "truck": truck.label,
+            "odometer": ft.odometer, "occurred_at": when.isoformat()}
 
 
 @app.get("/fuel")
