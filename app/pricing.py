@@ -14,6 +14,10 @@ DEFAULT_SHEET = {
     "short_load_under_yd": 5.0,
     "backhaul_per_yd": 50.0,
     "backhaul_under_yd": 3.0,
+    # Standby (on-site wait): the first `standby_free_hours` on site are free, then
+    # `standby_per_hour` $/hr, prorated by the minute. Charged per truck.
+    "standby_per_hour": 150.0,
+    "standby_free_hours": 1.0,
     "mixes": [],        # [{"mix": "3000 PSI", "price": 0.0, "haul": 0.0}]
     "overrides": [],    # [{"customer": "...", "mix": "" (=any), "price": 0.0}]
     "admixtures": [],   # [{"name": "Fiber", "rate": 3.75, "per": "lb"|"yard"}]

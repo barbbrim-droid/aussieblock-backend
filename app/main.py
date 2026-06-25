@@ -117,7 +117,7 @@ class ChargeIn(BaseModel):
     amount: float | None = None
 from .integrations.onestep_gps import (
     gps_poll_loop, arrival_pending, learn_site_location,
-    pin_job_location, pin_load_job_location,
+    pin_job_location, pin_load_job_location, stamp_onsite, stamp_departed,
 )
 from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv, veh_keys
 from .integrations.fuel_email import fuel_email_loop
@@ -310,7 +310,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.3-load-fees"
+APP_VERSION = "2026-06-25.4-standby"
 
 
 @app.get("/version")
@@ -583,6 +583,11 @@ def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staf
             raise HTTPException(409, "Assign a truck to this load first")
         ld.status = st
         ld.progress = _STATUS_PROGRESS.get(st, ld.progress)
+        # Standby clock for this load/truck (per-truck billing on a pour).
+        if st == "onsite":
+            stamp_onsite(ld)
+        elif st in ("returning", "complete"):
+            stamp_departed(ld)
         # On site: learn the truck's real parked spot as this job's pin and anchor
         # the return-trip check to it, so a wrongly-geocoded address doesn't read as
         # the load having "left the job" and flip it straight to 'returning'.
@@ -1507,6 +1512,8 @@ class PriceSheetIn(BaseModel):
     short_load_under_yd: float = 5.0
     backhaul_per_yd: float = 50.0
     backhaul_under_yd: float = 3.0
+    standby_per_hour: float = 150.0
+    standby_free_hours: float = 1.0
     mixes: list = []        # [{"mix","price","haul"}]
     overrides: list = []    # [{"customer","mix","price"}]
     admixtures: list = []   # [{"name","rate","per":"lb"|"yard"}]
@@ -1647,25 +1654,47 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
                                  materials=batched_adx,
                                  order_admixtures=o.admixtures or "", unit_override=o.price_override,
                                  fiber_rate_override=o.fiber_rate)
-    # Back-haul: a pour's continuation is entered as an extra load. The order-total
-    # pricing above can't see individual loads, so add a back-haul fee here for each
-    # load ≤ the threshold (≤3 yd) that's smaller than the whole pour, and fold it
-    # into the bill. Skipped for self-haul customers (no delivery/load fees).
+    # Per-load fees the order-total pricing can't see — back-haul (continuation
+    # loads) and standby (on-site wait). Query the loads once and fold both in.
+    # Skipped for self-haul customers (no delivery/load fees).
+    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+    exempt = pricing.is_self_haul(cust, sheet)
+    order_total = pricing._num(billable)
+    # Back-haul: each continuation load ≤ threshold (≤3 yd) that's smaller than the pour.
     bh_rate = pricing._num(sheet.get("backhaul_per_yd"))
     bh_thresh = pricing._num(sheet.get("backhaul_under_yd"))
-    order_total = pricing._num(billable)
-    if bh_rate and bh_thresh and not pricing.is_self_haul(cust, sheet):
-        extra_bh = 0.0
-        for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+    extra_bh = 0.0
+    if bh_rate and bh_thresh and not exempt:
+        for ld in loads:
             lq = pricing._num(ld.qty)
-            if lq and lq <= bh_thresh and order_total > lq:   # small continuation of a larger pour
+            if lq and lq <= bh_thresh and order_total > lq:
                 extra_bh += round(bh_rate * lq, 2)
-        if extra_bh:
-            cp["backhaul"] = round(pricing._num(cp.get("backhaul")) + extra_bh, 2)
-            cp["subtotal"] = round(pricing._num(cp.get("subtotal")) + extra_bh, 2)
-            cp["tax"] = round(cp["subtotal"] * pricing._num(cp.get("tax_pct")) / 100.0, 2)
-            cp["total"] = round(cp["subtotal"] + cp["tax"], 2)
-            cp["job_running_total"] = cp["total"]
+    # Standby: first standby_free_hours on site free, then $/hr prorated by the
+    # minute, PER TRUCK — a single delivery uses the order's on-site clock; a pour
+    # sums each load's (each truck gets its own free hour).
+    sb_rate = pricing._num(sheet.get("standby_per_hour"))
+    sb_free = pricing._num(sheet.get("standby_free_hours"))
+    spans = [(ld.onsite_at, ld.departed_at) for ld in loads] if loads else [(o.onsite_at, o.departed_at)]
+    onsite_minutes, standby = 0.0, 0.0
+    for start, end in spans:
+        if start and end:
+            secs = (end - start).total_seconds()
+            if secs > 0:
+                onsite_minutes += secs / 60.0
+                if sb_rate and not exempt:
+                    standby += max(0.0, secs / 3600.0 - sb_free) * sb_rate
+    standby = round(standby, 2)
+    onsite_minutes = round(onsite_minutes)
+    if extra_bh:
+        cp["backhaul"] = round(pricing._num(cp.get("backhaul")) + extra_bh, 2)
+    if standby:
+        cp["standby"] = round(pricing._num(cp.get("standby")) + standby, 2)
+    extra = round(extra_bh + standby, 2)
+    if extra:
+        cp["subtotal"] = round(pricing._num(cp.get("subtotal")) + extra, 2)
+        cp["tax"] = round(cp["subtotal"] * pricing._num(cp.get("tax_pct")) / 100.0, 2)
+        cp["total"] = round(cp["subtotal"] + cp["tax"], 2)
+        cp["job_running_total"] = cp["total"]
     # mileage: use the stored value, else auto-compute once and cache it on the order
     mi = o.mileage
     if mi is None and compute_miles:
@@ -1689,7 +1718,11 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
                         "manually_paid": (override is not None and inv.status != "paid")}
     return {"customer": cp, "delivery": dl, "billed_qty": billable,
             "ordered_qty": o.qty, "price_override": o.price_override,
-            "invoice": invoice_info}
+            "invoice": invoice_info,
+            # On-site time + standby for the Costs detail (minutes total across the
+            # order's trucks, the billed standby $, and the truck count).
+            "onsite": {"minutes": onsite_minutes, "standby": standby,
+                       "trucks": sum(1 for st, en in spans if st and en)}}
 
 
 @app.get("/orders/{ref}/pricing")
@@ -3433,6 +3466,11 @@ def set_order_status(
     o.status = status
     if status in _STATUS_PROGRESS:
         o.progress = _STATUS_PROGRESS[status]
+    # Standby clock: start when On site, stop when the truck leaves (returning/complete).
+    if status == "onsite":
+        stamp_onsite(o)
+    elif status in ("returning", "complete"):
+        stamp_departed(o)
     # Stamp the completion date the first time it's marked complete — drives the
     # cement/slag silo draw-down (usage counts orders completed since the count).
     if status == "complete" and not o.completed_at:

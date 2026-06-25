@@ -104,6 +104,11 @@ class Order(SQLModel, table=True):
     mixer_water_gal: Optional[float] = None
     completed_at: Optional[str] = None           # ISO date the order was marked complete (drives material draw-down)
     driver_notes: Optional[str] = None           # free notes the driver records on site (visible to dispatch)
+    # On-site clock for standby billing: stamped when the truck reaches the job
+    # (status -> onsite) and when it leaves (status -> returning/complete). For a
+    # single delivery the times live here; for a pour they live on each Load.
+    onsite_at: Optional[datetime] = None
+    departed_at: Optional[datetime] = None
 
 
 class Invoice(SQLModel, table=True):
@@ -160,6 +165,10 @@ class Load(SQLModel, table=True):
     signature: Optional[str] = None              # stored signature image filename
     signed_at: Optional[str] = None              # ISO timestamp of the sign-off
     water_added: Optional[str] = None            # gallons of water added on site for this load
+    # On-site clock for standby billing (this truck/load): stamped on -> onsite
+    # and -> returning/complete.
+    onsite_at: Optional[datetime] = None
+    departed_at: Optional[datetime] = None
 
 
 class FuelTransaction(SQLModel, table=True):

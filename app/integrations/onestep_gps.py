@@ -43,6 +43,7 @@ def _mock_step() -> None:
                 o.progress = min(1.0, o.progress + 0.01)
                 if o.progress >= 1.0:
                     o.status = "onsite"
+                    stamp_onsite(o)
                 elif o.progress > 0.05:
                     o.status = "enroute"
                 s.add(o)
@@ -216,6 +217,20 @@ def _rollup(s: Session, order_id: int) -> None:
         _rollup_pour(o, s)
 
 
+def stamp_onsite(obj) -> None:
+    """Standby clock START — stamp when a truck first reaches the job (Order or Load).
+    Idempotent: only the first 'onsite' sets it."""
+    if getattr(obj, "onsite_at", None) is None:
+        obj.onsite_at = datetime.utcnow()
+
+
+def stamp_departed(obj) -> None:
+    """Standby clock STOP — stamp when it leaves the job (-> returning/complete).
+    Only if it was ever on site, and only once."""
+    if getattr(obj, "onsite_at", None) is not None and getattr(obj, "departed_at", None) is None:
+        obj.departed_at = datetime.utcnow()
+
+
 def _advance_return(s: Session, truck: Truck) -> None:
     if truck.id is None or truck.lat is None or truck.lng is None:
         return
@@ -237,6 +252,7 @@ def _advance_return(s: Session, truck: Truck) -> None:
                 continue
             if _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.RETURN_LEAVE_SITE_M:
                 o.status = "returning"             # pulled away from the job
+                stamp_departed(o)
                 s.add(o)
                 print(f"Left job: {truck.label} -> order {o.ref} returning to yard.")
             elif o.status == "onsite" and (datetime.utcnow() - st["since"]).total_seconds() >= config.POUR_DELAY_SECONDS:
@@ -247,6 +263,7 @@ def _advance_return(s: Session, truck: Truck) -> None:
             if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
                 o.status = "complete"
                 o.progress = 1.0
+                stamp_departed(o)                  # in case it completed without a 'returning' pass
                 if not o.completed_at:
                     o.completed_at = datetime.utcnow().date().isoformat()
                 _job_loc.pop(o.id, None)
@@ -315,6 +332,7 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
                 continue
             if _haversine_m(truck.lat, truck.lng, st["lat"], st["lng"]) > config.RETURN_LEAVE_SITE_M:
                 ld.status = "returning"
+                stamp_departed(ld)
                 s.add(ld)
                 print(f"Left job: {truck.label} -> load #{ld.seq} returning to yard.")
                 _rollup(s, ld.order_id)
@@ -327,6 +345,7 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
             if _haversine_m(truck.lat, truck.lng, config.PLANT_LAT, config.PLANT_LNG) <= config.YARD_GEOFENCE_M:
                 ld.status = "complete"
                 ld.progress = 1.0
+                stamp_departed(ld)
                 _load_job_loc.pop(ld.id, None)
                 s.add(ld)
                 print(f"Back at yard: {truck.label} -> load #{ld.seq} complete.")
@@ -447,6 +466,7 @@ async def _advance_on_site_arrival() -> None:
             if _geofence_dwell_seconds(truck, site) >= config.SITE_ARRIVAL_DWELL_SECONDS:
                 o.status = "onsite"
                 o.progress = 1.0
+                stamp_onsite(o)
                 learn_site_location(o, truck)   # pin the real parked spot for next time
                 s.add(o)
                 changed = True
@@ -477,6 +497,7 @@ async def _advance_loads_on_site_arrival() -> None:
             if _geofence_dwell_seconds(truck, site) >= config.SITE_ARRIVAL_DWELL_SECONDS:
                 ld.status = "onsite"
                 ld.progress = 1.0
+                stamp_onsite(ld)
                 learn_site_location(o, truck)   # learn the job pin from the parked truck
                 s.add(ld); s.add(o)
                 changed = True
