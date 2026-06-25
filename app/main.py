@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.5-onsite-timer"
+APP_VERSION = "2026-06-25.6-customer-price"
 
 
 @app.get("/version")
@@ -3099,9 +3099,17 @@ def list_customers(background: BackgroundTasks, user: User = Depends(require_sta
         for u in s.exec(select(User).where(User.role == "customer")).all()
         if u.customer_id is not None
     }
+    # The customer's flat $/yd set price (the price-sheet override that applies to
+    # ANY mix for them), so the Customers panel can show/edit it.
+    sheet = pricing.load_sheet()
+    set_price = {}
+    for ov in sheet.get("overrides", []):
+        if not (ov.get("mix") or "").strip():            # blank mix = all mixes
+            set_price[pricing._norm(ov.get("customer"))] = pricing._num(ov.get("price"))
     return [
         {"id": c.id, "name": c.name, "acct_no": c.acct_no, "terms": c.terms,
-         "contact": c.contact, "email": c.email, "login_email": logins.get(c.id), "cod": c.cod}
+         "contact": c.contact, "email": c.email, "login_email": logins.get(c.id), "cod": c.cod,
+         "set_price": set_price.get(pricing._norm(c.name))}
         for c in customers
     ]
 
@@ -3269,6 +3277,34 @@ def set_customer_cod(customer_id: int, body: CodIn,
     c.cod = bool(body.cod)
     s.add(c); s.commit()
     return {"ok": True, "customer": c.name, "cod": c.cod}
+
+
+class CustomerPriceIn(BaseModel):
+    price: Optional[float] = None   # $/yd for all this customer's mixes; 0/None clears it
+
+
+@app.put("/customers/{customer_id}/price")
+def set_customer_price(customer_id: int, body: CustomerPriceIn,
+                       _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Set (or clear) a customer's flat $/yd price — a price-sheet override that
+    applies to ANY mix for them (staff). Writes the same `overrides` the Price
+    Sheet edits, so pricing/billing pick it up everywhere. Send 0 or null to clear.
+    Per-mix prices can still be set in the Price Sheet's Customer overrides."""
+    c = s.get(Customer, customer_id)
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    price = pricing._num(body.price) if body.price is not None else 0.0
+    sheet = pricing.load_sheet()
+    cust_n = pricing._norm(c.name)
+    # Keep every override EXCEPT this customer's blank-mix (all-mix) one — we replace it.
+    overrides = [ov for ov in sheet.get("overrides", [])
+                 if not (pricing._norm(ov.get("customer")) == cust_n and not (ov.get("mix") or "").strip())]
+    if price > 0:
+        overrides.append({"customer": c.name, "mix": "", "price": price})
+    sheet["overrides"] = overrides
+    pricing.save_sheet(sheet)
+    print(f"PUT /customers/{customer_id}/price  {c.name} -> {'$%.2f/yd' % price if price > 0 else 'cleared'}")
+    return {"ok": True, "customer": c.name, "set_price": price or None}
 
 
 def _invoice_age_days(date_str: str) -> int | None:
