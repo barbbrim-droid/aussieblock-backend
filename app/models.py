@@ -119,6 +119,18 @@ class Invoice(SQLModel, table=True):
     qbo_invoice_id: Optional[str] = None
 
 
+class InvoicePaidOverride(SQLModel, table=True):
+    """Staff manually marked this invoice paid in the app, independent of QuickBooks.
+    Kept in its OWN table (keyed by invoice number) so the A/R mirror-sync — which
+    deletes and re-adds every QuickBooks-sourced Invoice row — can't wipe the
+    override. Billing treats a matching invoice number as paid (drops it from the
+    owed balance). Removing the row undoes it."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    number: str = Field(index=True, unique=True)     # invoice number, e.g. "INV-10428"
+    marked_at: datetime = Field(default_factory=datetime.utcnow)
+    by: Optional[str] = None                          # staff email who marked it paid
+
+
 class PlusLoadRequest(SQLModel, table=True):
     """A customer tapping 'Request plus load' in the app writes one of these.
     Your office/dispatch dashboard reads them — this is the feed-back-to-office link."""

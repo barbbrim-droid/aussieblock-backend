@@ -35,7 +35,7 @@ import httpx
 from sqlmodel import Session, select
 
 from ..db import engine
-from ..models import Customer, Invoice
+from ..models import Customer, Invoice, InvoicePaidOverride
 from .. import config
 
 
@@ -46,9 +46,15 @@ def get_billing_for_customer(customer_id: int) -> dict | None:
         if not customer:
             return None
         invoices = s.exec(select(Invoice).where(Invoice.customer_id == customer_id)).all()
+        # Staff "mark paid" overrides (kept out of the synced Invoice table so the
+        # mirror-sync can't wipe them). A matching number counts as paid.
+        overrides = {o.number for o in s.exec(select(InvoicePaidOverride)).all()}
 
-        outstanding = sum(i.amount for i in invoices if i.status != "paid")
-        past_due = sum(i.amount for i in invoices if i.status == "overdue")
+        def _paid(i):
+            return i.status == "paid" or i.number in overrides
+
+        outstanding = sum(i.amount for i in invoices if not _paid(i))
+        past_due = sum(i.amount for i in invoices if i.status == "overdue" and not _paid(i))
         available = customer.credit_limit - outstanding
 
         return {
@@ -64,7 +70,11 @@ def get_billing_for_customer(customer_id: int) -> dict | None:
             "available": round(available, 2),
             "invoices": [
                 {"id": i.number, "date": i.date, "amount": i.amount,
-                 "status": i.status, "order": i.order_ref}
+                 # effective status reflects the override; manually_paid lets the UI
+                 # show "Paid (manual)" and offer an Undo.
+                 "status": "paid" if _paid(i) else i.status,
+                 "manually_paid": (i.number in overrides and i.status != "paid"),
+                 "order": i.order_ref}
                 for i in invoices
             ],
         }

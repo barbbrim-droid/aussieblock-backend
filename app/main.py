@@ -35,7 +35,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -2641,11 +2641,15 @@ def add_fuel_fill(body: FuelAddIn, _: User = Depends(require_staff),
 
 
 @app.get("/fuel")
-def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+def fuel_summary(frm: str = Query(""), to: str = Query(""),
+                 _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Per-truck fuel usage rolled up from on-truck fuel-meter fills (staff only),
     with cost (gallons × the $/gal in the price sheet) and per-yard efficiency
     (gallons and fuel-$ per delivered yard). `unmatched` collects fills for vehicle
-    numbers no truck is mapped to yet — map that number on the truck to pull them in."""
+    numbers no truck is mapped to yet — map that number on the truck to pull them in.
+
+    Optional frm/to (yyyy-mm-dd) restrict the rollup to fills in that date window —
+    used by the Costs screen so fuel matches the same date range as the orders."""
     sheet = pricing.load_sheet()
     trucks = s.exec(select(Truck)).all()
     txns = s.exec(select(FuelTransaction)).all()
@@ -2653,7 +2657,22 @@ def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_sess
     by_truck: dict = {}
     products: dict = {}   # product name -> its current $/gal, for the price editor
     unmatched = {"gallons": 0.0, "cost": 0.0, "fills": 0, "vehicles": set(), "list": []}
+
+    def _in_window(t) -> bool:
+        if not (frm or to):
+            return True
+        d = t.occurred_at.date().isoformat() if t.occurred_at else ""
+        if not d:
+            return False               # no date → can't place it in a window
+        if frm and d < frm:
+            return False
+        if to and d > to:
+            return False
+        return True
+
     for t in txns:
+        if not _in_window(t):
+            continue
         gal = t.gallons or 0.0
         cost = gal * pricing.fuel_price_for(sheet, t.fuel_type)
         if t.fuel_type:
@@ -2707,26 +2726,31 @@ def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_sess
                       "list": sorted(unmatched["list"],
                                      key=lambda f: f["when"] or datetime.min, reverse=True)},
         "products": [{"product": p, "price": pr} for p, pr in sorted(products.items())],
-        "fuel_price_default": pricing._num(sheet.get("fuel_price_default")),
+        "fuel_price_default": pricing.fuel_price_for(sheet, "Diesel"),
+        "window": {"frm": frm or None, "to": to or None},
         "live": config.USE_FLUIDSECURE,
     }
 
 
 class FuelPricesIn(BaseModel):
-    """Body for saving fuel $/gal — a default plus optional per-product rates."""
+    """Body for saving fuel $/gal — a default plus optional per-product rates.
+    `fuel_prices` is optional: omit it to update only the default $/gal and leave
+    any per-product overrides untouched (what the Costs screen's price box does)."""
     fuel_price_default: float = 0.0
-    fuel_prices: list = []   # [{"product": "Diesel", "price": 3.85}]
+    fuel_prices: Optional[list] = None   # [{"product": "Diesel", "price": 3.85}]
 
 
 @app.put("/fuel/prices")
 def put_fuel_prices(body: FuelPricesIn, _: User = Depends(require_staff)):
     """Save fuel $/gal rates into the price sheet (staff). Other sheet fields are
-    preserved (see pricing.save_sheet)."""
+    preserved (see pricing.save_sheet). When fuel_prices is omitted, only the
+    default $/gal changes."""
     sheet = pricing.load_sheet()
     sheet["fuel_price_default"] = body.fuel_price_default
-    sheet["fuel_prices"] = body.fuel_prices
+    if body.fuel_prices is not None:
+        sheet["fuel_prices"] = body.fuel_prices
     pricing.save_sheet(sheet)
-    return {"ok": True}
+    return {"ok": True, "fuel_price_default": body.fuel_price_default}
 
 
 @app.post("/fuel/import")
@@ -2891,6 +2915,36 @@ def invoice_pay_link(
         code = 404 if "not found" in reason.lower() else 409
         raise HTTPException(code, reason)
     return result
+
+
+@app.post("/billing/invoices/{number}/paid")
+def mark_invoice_paid(number: str, user: User = Depends(require_finance),
+                      s: Session = Depends(get_session)):
+    """Staff mark an invoice paid in the app (dispatch board), so it drops out of the
+    customer's owed balance. Stored as an override in its own table so the next
+    QuickBooks A/R sync can't wipe it. App-only — does NOT record a payment in
+    QuickBooks; reconcile the actual payment there separately. Idempotent."""
+    num = (number or "").strip()
+    if not num:
+        raise HTTPException(422, "Missing invoice number")
+    existing = s.exec(select(InvoicePaidOverride).where(InvoicePaidOverride.number == num)).first()
+    if not existing:
+        s.add(InvoicePaidOverride(number=num, by=user.email)); s.commit()
+        print(f"POST /billing/invoices/{num}/paid  marked paid by {user.email}")
+    return {"ok": True, "number": num, "paid": True}
+
+
+@app.delete("/billing/invoices/{number}/paid")
+def unmark_invoice_paid(number: str, _: User = Depends(require_finance),
+                        s: Session = Depends(get_session)):
+    """Undo a staff "mark paid" override — the invoice returns to its QuickBooks
+    status and back into the owed balance. Idempotent."""
+    num = (number or "").strip()
+    existing = s.exec(select(InvoicePaidOverride).where(InvoicePaidOverride.number == num)).first()
+    if existing:
+        s.delete(existing); s.commit()
+        print(f"DELETE /billing/invoices/{num}/paid  override removed")
+    return {"ok": True, "number": num, "paid": False}
 
 
 @app.post("/billing/sync")

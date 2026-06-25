@@ -21,9 +21,14 @@ DEFAULT_SHEET = {
     # Fuel cost: FluidSecure reports gallons, not dollars, so staff set a $/gal
     # rate. `fuel_prices` holds per-product rates; `fuel_price_default` covers any
     # product without one. Used to cost the fuel view's gallons.
-    "fuel_price_default": 0.0,
+    "fuel_price_default": 5.0,
     "fuel_prices": [],  # [{"product": "Diesel", "price": 3.85}]
 }
+
+# Fallback $/gal when no price is set anywhere (current diesel ≈ $5/gal). Keeps
+# fuel costs realistic out of the box; the office can still override per-product
+# or set fuel_price_default in the fuel view.
+DEFAULT_FUEL_PRICE = 5.0
 
 # Haul rate per yard by road miles from the yard (Aussieblock Delivery Pricing).
 # Mileage rounds UP to the next bracket; the first bracket whose max_mi >= miles wins.
@@ -117,8 +122,11 @@ def fuel_price_for(sheet: dict, product) -> float:
     pn = _norm(product)
     for p in (sheet or {}).get("fuel_prices") or []:
         if pn and _norm(p.get("product")) == pn:
-            return _num(p.get("price"))
-    return _num((sheet or {}).get("fuel_price_default"))
+            price = _num(p.get("price"))
+            if price > 0:
+                return price
+    d = _num((sheet or {}).get("fuel_price_default"))
+    return d if d > 0 else DEFAULT_FUEL_PRICE
 
 
 def _num(v) -> float:
