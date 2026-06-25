@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.7-self-pickup"
+APP_VERSION = "2026-06-25.8-hauler-field"
 
 
 @app.get("/version")
@@ -1589,6 +1589,16 @@ def _cost_hauler_group(o: Order, s: Session, sheet: dict, customer: str) -> str:
     up its own concrete) — the frontend shows what they OWE us there, not a payout."""
     if pricing.is_self_haul(customer, sheet):
         return f"{customer} · self-pickup" if customer else "Self-pickup"
+    # A staff-set hauler on the order WINS over the truck guess — e.g. an RTS truck
+    # is assigned for GPS but staff marked the load as hauled by P&L ("PL").
+    h = (o.hauler or "").strip()
+    if h:
+        hu = h.upper().replace(" ", "")
+        if "RTS" in hu or "RAY" in hu:
+            return "RTS"
+        if hu.startswith("PL") or "P&L" in h.upper() or "PANDL" in hu:
+            return "P&L Concrete"
+        return h            # some other named hauler — bucket under that name
     nums = set()
     if o.truck_id:
         t = s.get(Truck, o.truck_id)
