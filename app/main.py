@@ -2592,6 +2592,54 @@ def manual_fuel_fill(body: FuelManualIn, user: User = Depends(get_current_user),
             "odometer": ft.odometer, "occurred_at": when.isoformat()}
 
 
+class FuelAddIn(BaseModel):
+    truck_label: str               # truck to log the fill against (from the dropdown)
+    gallons: float
+    odometer: Optional[float] = None
+    occurred_at: Optional[str] = None   # 'YYYY-MM-DD' or ISO; defaults to now
+
+
+@app.post("/fuel")
+def add_fuel_fill(body: FuelAddIn, _: User = Depends(require_staff),
+                  s: Session = Depends(get_session)):
+    """Staff add a fuel fill by hand from the office (e.g. fuel pumped overnight
+    when the meter/PC was off). Pick the truck by label; gallons required; optional
+    odometer and date. Flagged manual in `raw`. Distinct from the device's
+    POST /api/fuel/fill and the driver's POST /fuel/manual."""
+    lbl = (body.truck_label or "").strip()
+    if not lbl:
+        raise HTTPException(422, "Pick a truck")
+    if body.gallons is None or body.gallons <= 0:
+        raise HTTPException(422, "Enter the gallons")
+    truck = s.exec(select(Truck).where(Truck.label == lbl)).first()
+    if not truck:
+        targets = veh_keys(lbl)
+        for t in s.exec(select(Truck)).all():
+            if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
+                truck = t
+                break
+    if not truck:
+        raise HTTPException(404, f"No truck '{lbl}'")
+    # The fill's date (occurred_at) may be backdated; the dedup key uses the real
+    # creation instant so two same-day manual fills never collide on external_id.
+    created = datetime.utcnow()
+    when = created
+    if body.occurred_at:
+        oc = body.occurred_at.strip()
+        try:
+            when = datetime.fromisoformat(oc if "T" in oc else f"{oc}T12:00:00")
+        except ValueError:
+            pass
+    ft = FuelTransaction(
+        external_id=f"manual:{truck.id}:{created.isoformat()}", truck_id=truck.id,
+        vehicle_no=truck.label, gallons=body.gallons, fuel_type="Diesel",
+        odometer=(body.odometer if (body.odometer and body.odometer > 0) else None),
+        occurred_at=when, raw=json.dumps({"manual": True, "staff": True}))
+    s.add(ft); s.commit(); s.refresh(ft)
+    print(f"POST /fuel  staff add truck={truck.label} gal={body.gallons} when={when.date()} -> id={ft.id}")
+    return {"ok": True, "id": ft.id, "truck": truck.label, "gallons": ft.gallons}
+
+
 @app.get("/fuel")
 def fuel_summary(_: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Per-truck fuel usage rolled up from on-truck fuel-meter fills (staff only),
