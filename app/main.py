@@ -302,11 +302,11 @@ def _order_json(o: Order, s: Session) -> dict:
 # "requested" = placed by a customer in the app, awaiting staff confirmation.
 # "ongoing" is the umbrella status for a continuous pour while its loads are in
 # flight (set by _rollup_pour, not a single-truck stage). Single orders never use it.
-ORDER_STATUSES = ["requested", "scheduled", "ongoing", "batched", "enroute", "onsite", "pouring", "returning", "complete"]
-_STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "pouring": 1.0, "returning": 1.0, "complete": 1.0}
+ORDER_STATUSES = ["requested", "scheduled", "ongoing", "batched", "enroute", "onsite", "pouring", "washout", "returning", "complete"]
+_STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite": 1.0, "pouring": 1.0, "washout": 1.0, "returning": 1.0, "complete": 1.0}
 # Stages that mean a truck is carrying the load — you can't enter them unassigned.
 # "ongoing" is NOT here: it's a pour umbrella, trucks live on its loads.
-_STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite", "pouring", "returning"}
+_STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite", "pouring", "washout", "returning"}
 
 
 @app.get("/health")
@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.12-standby-exempt"
+APP_VERSION = "2026-06-26.1-driver-status"
 
 
 @app.get("/version")
@@ -2174,6 +2174,49 @@ def set_driver_notes(ref: str, body: DriverNotesIn, user: User = Depends(get_cur
         raise HTTPException(404, "Order not found")
     o.driver_notes = (body.notes or "").strip() or None
     s.add(o); s.commit(); s.refresh(o)
+    return _order_json(o, s)
+
+
+class DriverStatusIn(BaseModel):
+    status: str
+    seq: Optional[int] = None   # load # for a pour; omit for a single delivery
+
+
+@app.post("/orders/{ref}/driver-status")
+def driver_set_status(ref: str, body: DriverStatusIn, user: User = Depends(get_current_user),
+                      s: Session = Depends(get_session)):
+    """Driver pushes their on-site status when the geofence misses it: On site,
+    Washing out, or Returning to yard. Assigned driver (or staff) only. For a pour
+    pass the load seq (the driver's truck); else it sets the single order. Stamps
+    the on-site clock (start on 'onsite', stop on 'returning')."""
+    st = (body.status or "").strip()
+    if st not in {"onsite", "pouring", "washout", "returning"}:
+        raise HTTPException(422, "Status must be onsite, pouring, washout, or returning")
+    o = s.exec(select(Order).where(Order.ref == ref)).first()
+    if not o or (user.role != "staff" and not _is_driver_of(o, user, s)):
+        raise HTTPException(404, "Order not found")
+    if body.seq is not None:
+        ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == body.seq)).first()
+        if not ld:
+            raise HTTPException(404, "Load not found")
+        ld.status = st
+        ld.progress = _STATUS_PROGRESS.get(st, ld.progress)
+        if st == "onsite":
+            stamp_onsite(ld)
+        elif st == "returning":
+            stamp_departed(ld)
+        s.add(ld); s.commit()
+        _rollup_pour(o, s)
+    else:
+        o.status = st
+        o.progress = _STATUS_PROGRESS.get(st, o.progress)
+        if st == "onsite":
+            stamp_onsite(o)
+        elif st == "returning":
+            stamp_departed(o)
+        s.add(o); s.commit()
+    s.refresh(o)
+    print(f"POST /orders/{ref}/driver-status  {st}{f' load#{body.seq}' if body.seq else ''} by {user.email}")
     return _order_json(o, s)
 
 

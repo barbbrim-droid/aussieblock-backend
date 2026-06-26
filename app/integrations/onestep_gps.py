@@ -236,10 +236,10 @@ def _advance_return(s: Session, truck: Truck) -> None:
         return
     orders = s.exec(
         select(Order).where(Order.truck_id == truck.id,
-                            Order.status.in_(["onsite", "pouring", "returning"]))
+                            Order.status.in_(["onsite", "pouring", "washout", "returning"]))
     ).all()
     for o in orders:
-        if o.status in ("onsite", "pouring"):
+        if o.status in ("onsite", "pouring", "washout"):
             st = _job_loc.get(o.id)
             if st is None:
                 # Anchor the job location at the known site centre (learned pin first,
@@ -316,10 +316,10 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
         return
     loads = s.exec(
         select(Load).where(Load.truck_id == truck.id,
-                           Load.status.in_(["onsite", "pouring", "returning"]))
+                           Load.status.in_(["onsite", "pouring", "washout", "returning"]))
     ).all()
     for ld in loads:
-        if ld.status in ("onsite", "pouring"):
+        if ld.status in ("onsite", "pouring", "washout"):
             st = _load_job_loc.get(ld.id)
             if st is None:
                 # Anchor at the geocoded site centre, not the geofence-edge spot (see
