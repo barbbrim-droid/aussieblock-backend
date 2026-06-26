@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.9-hauler-split"
+APP_VERSION = "2026-06-25.10-backhaul-split"
 
 
 @app.get("/version")
@@ -1747,19 +1747,25 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     hauler_split = {}
     if not exempt:
         rate = pricing._num(dl.get("rate"))
-        extras = pricing._num(cp.get("short_load")) + pricing._num(cp.get("backhaul"))
         if loads:
+            bh_rate = pricing._num(sheet.get("backhaul_per_yd"))
+            bh_thresh = pricing._num(sheet.get("backhaul_under_yd"))
+            order_total = pricing._num(billable)
             for ld in loads:
                 lq = pricing._num(ld.qty)
                 if lq <= 0:
                     continue
                 hg = _hauler_for_truck(ld.truck_id, s)
-                hauler_split[hg] = round(hauler_split.get(hg, 0.0) + rate * lq, 2)
-            if extras:                                  # order-level fees → primary hauler
+                amt = rate * lq                          # this load's delivery $
+                if bh_rate and bh_thresh and lq <= bh_thresh and order_total > lq:
+                    amt += bh_rate * lq                  # its back-haul → ITS hauler
+                hauler_split[hg] = round(hauler_split.get(hg, 0.0) + amt, 2)
+            short = pricing._num(cp.get("short_load"))   # flat (≤5yd orders, i.e. singles)
+            if short:
                 main = _cost_hauler_group(o, s, sheet, cust)
-                hauler_split[main] = round(hauler_split.get(main, 0.0) + extras, 2)
+                hauler_split[main] = round(hauler_split.get(main, 0.0) + short, 2)
         else:
-            th = pricing._num(dl.get("total")) + extras
+            th = pricing._num(dl.get("total")) + pricing._num(cp.get("short_load")) + pricing._num(cp.get("backhaul"))
             if th:
                 hauler_split[_cost_hauler_group(o, s, sheet, cust)] = round(th, 2)
     # The order's invoice + effective paid status, so the Costs tab can show
