@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.8-hauler-field"
+APP_VERSION = "2026-06-25.9-hauler-split"
 
 
 @app.get("/version")
@@ -1575,6 +1575,21 @@ def _truck_num(label: str) -> str:
     return ("%g" % n) if n else ""
 
 
+def _hauler_for_truck(truck_id, s: Session) -> str:
+    """The hauler of a single truck (one load), by its number: RTS_TRUCK_NUMBERS
+    -> 'RTS'; anything else (or unassigned) -> 'P&L Concrete'. Used to split a
+    pour's haul across the multiple haulers that ran its loads."""
+    if truck_id:
+        t = s.get(Truck, truck_id)
+        if t:
+            num = _truck_num(t.label)
+            if num in RTS_TRUCK_NUMBERS:
+                return "RTS"
+            if num in PNL_TRUCK_NUMBERS:
+                return "P&L Concrete"
+    return "P&L Concrete"
+
+
 def _cost_hauler_group(o: Order, s: Session, sheet: dict, customer: str) -> str:
     """Which hauler bucket an order falls in for the Costs 'by hauler' view:
       • a self-haul customer hauls their own concrete → listed under the CUSTOMER
@@ -1726,6 +1741,27 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     dl["hauler"] = _order_hauler(o, s)
     dl["hauler_group"] = _cost_hauler_group(o, s, sheet, cust)   # Costs "by hauler" bucket
     dl["self_haul"] = pricing.is_self_haul(cust, sheet)          # self-pickup → they OWE us
+    # Per-hauler split of the haul $: a pour run by multiple haulers (some loads
+    # RTS, some P&L) splits the to-hauler by each LOAD's truck, so each hauler's
+    # share shows separately instead of the whole order landing in one bucket.
+    hauler_split = {}
+    if not exempt:
+        rate = pricing._num(dl.get("rate"))
+        extras = pricing._num(cp.get("short_load")) + pricing._num(cp.get("backhaul"))
+        if loads:
+            for ld in loads:
+                lq = pricing._num(ld.qty)
+                if lq <= 0:
+                    continue
+                hg = _hauler_for_truck(ld.truck_id, s)
+                hauler_split[hg] = round(hauler_split.get(hg, 0.0) + rate * lq, 2)
+            if extras:                                  # order-level fees → primary hauler
+                main = _cost_hauler_group(o, s, sheet, cust)
+                hauler_split[main] = round(hauler_split.get(main, 0.0) + extras, 2)
+        else:
+            th = pricing._num(dl.get("total")) + extras
+            if th:
+                hauler_split[_cost_hauler_group(o, s, sheet, cust)] = round(th, 2)
     # The order's invoice + effective paid status, so the Costs tab can show
     # paid/outstanding and toggle it (marks the invoice paid via its number).
     inv = s.exec(select(Invoice).where(Invoice.order_ref == o.ref)).first() if o.ref else None
@@ -1739,7 +1775,7 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
                         "manually_paid": (override is not None and inv.status != "paid")}
     return {"customer": cp, "delivery": dl, "billed_qty": billable,
             "ordered_qty": o.qty, "price_override": o.price_override,
-            "invoice": invoice_info,
+            "invoice": invoice_info, "hauler_split": hauler_split,
             # On-site time + standby for the Costs detail (minutes total across the
             # order's trucks, the billed standby $, and the truck count).
             "onsite": {"minutes": onsite_minutes, "standby": standby,
