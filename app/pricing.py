@@ -22,6 +22,7 @@ DEFAULT_SHEET = {
     "overrides": [],    # [{"customer": "...", "mix": "" (=any), "price": 0.0}]
     "admixtures": [],   # [{"name": "Fiber", "rate": 3.75, "per": "lb"|"yard"}]
     "self_haul_customers": [],   # pickup customers (concrete only, no delivery/load fees)
+    "standby_exempt_customers": [],   # customers NOT charged standby (still pay haul fees)
     # Fuel cost: FluidSecure reports gallons, not dollars, so staff set a $/gal
     # rate. `fuel_prices` holds per-product rates; `fuel_price_default` covers any
     # product without one. Used to cost the fuel view's gallons.
@@ -111,6 +112,7 @@ def save_sheet(sheet: dict) -> dict:
     merged["overrides"] = sheet.get("overrides", [])
     merged["admixtures"] = sheet.get("admixtures", [])
     merged["self_haul_customers"] = sheet.get("self_haul_customers", [])
+    merged["standby_exempt_customers"] = sheet.get("standby_exempt_customers", current.get("standby_exempt_customers", []))
     merged["delivery_brackets"] = sheet.get("delivery_brackets") or DEFAULT_BRACKETS
     # Fuel prices live in the sheet but are edited from the fuel view, not the
     # price-sheet editor — carry the saved values forward when not in this payload.
@@ -187,6 +189,13 @@ def _adx_present(name: str, order_admixtures: str, materials) -> bool:
 def is_self_haul(customer: str, sheet: dict = None) -> bool:
     sheet = sheet or load_sheet()
     return _norm(customer) in {_norm(c) for c in sheet.get("self_haul_customers", []) if c}
+
+
+def is_standby_exempt(customer: str, sheet: dict = None) -> bool:
+    """True when a customer is NOT charged standby (on-site wait), even past the
+    free hour. They still pay normal delivery/haul fees — only standby is waived."""
+    sheet = sheet or load_sheet()
+    return _norm(customer) in {_norm(c) for c in sheet.get("standby_exempt_customers", []) if c}
 
 
 def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):

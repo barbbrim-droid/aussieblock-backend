@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.11-hauler-statement"
+APP_VERSION = "2026-06-25.12-standby-exempt"
 
 
 @app.get("/version")
@@ -1524,6 +1524,7 @@ class PriceSheetIn(BaseModel):
     overrides: list = []    # [{"customer","mix","price"}]
     admixtures: list = []   # [{"name","rate","per":"lb"|"yard"}]
     self_haul_customers: list = []   # pickup customers — no delivery/load fees
+    standby_exempt_customers: list = []   # customers not charged standby (still pay haul)
 
 
 @app.get("/price-sheet")
@@ -1709,6 +1710,9 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     # sums each load's (each truck gets its own free hour).
     sb_rate = pricing._num(sheet.get("standby_per_hour"))
     sb_free = pricing._num(sheet.get("standby_free_hours"))
+    # On-site time is still tracked for everyone; the CHARGE is waived for self-haul
+    # and for customers on the standby-exempt list (e.g. Landers).
+    sb_exempt = exempt or pricing.is_standby_exempt(cust, sheet)
     spans = [(ld.onsite_at, ld.departed_at) for ld in loads] if loads else [(o.onsite_at, o.departed_at)]
     onsite_minutes, standby = 0.0, 0.0
     for start, end in spans:
@@ -1716,7 +1720,7 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
             secs = (end - start).total_seconds()
             if secs > 0:
                 onsite_minutes += secs / 60.0
-                if sb_rate and not exempt:
+                if sb_rate and not sb_exempt:
                     standby += max(0.0, secs / 3600.0 - sb_free) * sb_rate
     standby = round(standby, 2)
     onsite_minutes = round(onsite_minutes)
