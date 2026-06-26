@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-25.10-backhaul-split"
+APP_VERSION = "2026-06-25.11-hauler-statement"
 
 
 @app.get("/version")
@@ -1744,7 +1744,12 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     # Per-hauler split of the haul $: a pour run by multiple haulers (some loads
     # RTS, some P&L) splits the to-hauler by each LOAD's truck, so each hauler's
     # share shows separately instead of the whole order landing in one bucket.
-    hauler_split = {}
+    # Per-hauler breakdown so a hauler statement can show yards/miles/fees/pay.
+    hauler_split = {}   # hauler -> {yards, delivery, short, backhaul, total}
+
+    def _hs(h):
+        return hauler_split.setdefault(h, {"yards": 0.0, "delivery": 0.0, "short": 0.0, "backhaul": 0.0, "total": 0.0})
+
     if not exempt:
         rate = pricing._num(dl.get("rate"))
         if loads:
@@ -1755,19 +1760,22 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
                 lq = pricing._num(ld.qty)
                 if lq <= 0:
                     continue
-                hg = _hauler_for_truck(ld.truck_id, s)
-                amt = rate * lq                          # this load's delivery $
-                if bh_rate and bh_thresh and lq <= bh_thresh and order_total > lq:
-                    amt += bh_rate * lq                  # its back-haul → ITS hauler
-                hauler_split[hg] = round(hauler_split.get(hg, 0.0) + amt, 2)
+                e = _hs(_hauler_for_truck(ld.truck_id, s))
+                d = rate * lq                            # this load's delivery $
+                bh = bh_rate * lq if (bh_rate and bh_thresh and lq <= bh_thresh and order_total > lq) else 0.0
+                e["yards"] += lq; e["delivery"] += d; e["backhaul"] += bh; e["total"] += d + bh
             short = pricing._num(cp.get("short_load"))   # flat (≤5yd orders, i.e. singles)
             if short:
-                main = _cost_hauler_group(o, s, sheet, cust)
-                hauler_split[main] = round(hauler_split.get(main, 0.0) + short, 2)
+                e = _hs(_cost_hauler_group(o, s, sheet, cust))
+                e["short"] += short; e["total"] += short
         else:
-            th = pricing._num(dl.get("total")) + pricing._num(cp.get("short_load")) + pricing._num(cp.get("backhaul"))
-            if th:
-                hauler_split[_cost_hauler_group(o, s, sheet, cust)] = round(th, 2)
+            d = pricing._num(dl.get("total")); short = pricing._num(cp.get("short_load")); bh = pricing._num(cp.get("backhaul"))
+            if d + short + bh:
+                e = _hs(_cost_hauler_group(o, s, sheet, cust))
+                e["yards"] += pricing._num(billable); e["delivery"] += d; e["short"] += short; e["backhaul"] += bh; e["total"] += d + short + bh
+        for e in hauler_split.values():
+            for k in e:
+                e[k] = round(e[k], 2)
     # The order's invoice + effective paid status, so the Costs tab can show
     # paid/outstanding and toggle it (marks the invoice paid via its number).
     inv = s.exec(select(Invoice).where(Invoice.order_ref == o.ref)).first() if o.ref else None
