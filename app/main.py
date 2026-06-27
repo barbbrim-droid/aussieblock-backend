@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-26.1-driver-status"
+APP_VERSION = "2026-06-27.1-address-proxy"
 
 
 @app.get("/version")
@@ -2218,6 +2218,38 @@ def driver_set_status(ref: str, body: DriverStatusIn, user: User = Depends(get_c
     s.refresh(o)
     print(f"POST /orders/{ref}/driver-status  {st}{f' load#{body.seq}' if body.seq else ''} by {user.email}")
     return _order_json(o, s)
+
+
+# Google Places (New) autocomplete — proxied server-side so the key stays off the
+# browser and we dodge HTTP-referrer/CORS quirks on the live domain. Uses the
+# configured Google key (override with PLACES_API_KEY); falls back to the public
+# web key the frontend already shipped.
+_PLACES_KEY = os.getenv("PLACES_API_KEY", "").strip() or config.GEOCODE_API_KEY or "AIzaSyCw3ArUqZT7XHLujqAmrf6IpXGm1qNe9v4"
+
+
+@app.get("/places/autocomplete")
+def places_autocomplete(q: str = Query(""), _: User = Depends(get_current_user)):
+    """As-you-type job-site address suggestions (server-side), biased to the plant
+    region. Returns {"suggestions": [str, ...]}."""
+    query = (q or "").strip()
+    if len(query) < 3 or not _PLACES_KEY:
+        return {"suggestions": []}
+    try:
+        import httpx
+        r = httpx.post(
+            "https://places.googleapis.com/v1/places:autocomplete",
+            headers={"Content-Type": "application/json", "X-Goog-Api-Key": _PLACES_KEY},
+            json={"input": query, "includedRegionCodes": ["us"],
+                  "locationBias": {"rectangle": {"low": {"latitude": 29.27, "longitude": -103.0},
+                                                 "high": {"latitude": 33.61, "longitude": -97.91}}}},
+            timeout=8,
+        )
+        data = r.json()
+        sugs = [(s.get("placePrediction") or {}).get("text", {}).get("text") for s in data.get("suggestions", [])]
+        return {"suggestions": [x for x in sugs if x]}
+    except Exception as e:
+        print("places_autocomplete failed:", e)
+        return {"suggestions": []}
 
 
 @app.get("/orders/{ref}/signature")
