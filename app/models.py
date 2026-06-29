@@ -131,7 +131,8 @@ class Message(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     driver: str = Field(index=True)            # thread = one driver
     from_dispatch: bool = True                 # True dispatch→driver, False driver→dispatch
-    body: str
+    body: str = ""                             # may be empty when only a photo is sent
+    image: Optional[str] = None                # filename of an attached photo, if any
     sender: Optional[str] = None               # display name (staff email or driver)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     read_by_driver: bool = False

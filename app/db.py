@@ -63,6 +63,7 @@ _COLUMN_MIGRATIONS = {
     },
     "mixerreading": {"order_ref": "VARCHAR"},
     "materialreceipt": {"po_id": "INTEGER"},   # links a delivery to its cement PO
+    "message": {"image": "VARCHAR"},           # photo attachment on a chat message
 }
 
 

@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-29.2-messaging"
+APP_VERSION = "2026-06-29.3-msg-photos"
 
 
 @app.get("/version")
@@ -2259,10 +2259,33 @@ def places_autocomplete(q: str = Query(""), _: User = Depends(get_current_user))
 
 
 # ── Dispatch ↔ driver messaging ──────────────────────────────────────────────
+def _message_image_dir() -> str:
+    d = config.data_path("message_images")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _msg_json(m: Message) -> dict:
     return {"id": m.id, "driver": m.driver, "from_dispatch": m.from_dispatch,
-            "body": m.body, "sender": m.sender,
+            "body": m.body, "sender": m.sender, "has_image": bool(m.image),
             "at": (m.created_at.isoformat() + "Z") if m.created_at else None}
+
+
+async def _save_message_image(file: UploadFile, msg_id: int) -> str:
+    """Validate + store a chat photo on the persistent disk, return its filename."""
+    ctype = (file.content_type or "").lower()
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if not (ctype.startswith("image/") or ext in _PHOTO_EXTS):
+        raise HTTPException(422, "Attach a photo (JPG, PNG, HEIC…).")
+    data = await file.read()
+    if len(data) > 15 * 1024 * 1024:
+        raise HTTPException(413, "That photo is too large (15 MB max).")
+    if ext not in _PHOTO_EXTS:
+        ext = ".jpg"
+    fname = f"{msg_id}{ext}"
+    with open(os.path.join(_message_image_dir(), fname), "wb") as fh:
+        fh.write(data)
+    return fname
 
 
 class MessageIn(BaseModel):
@@ -2278,7 +2301,8 @@ def message_threads(_: User = Depends(require_staff), s: Session = Depends(get_s
     by_driver: dict = {}
     for m in sorted(msgs, key=lambda x: x.created_at or datetime.min):
         d = by_driver.setdefault(m.driver, {"driver": m.driver, "last": "", "at": None, "unread": 0})
-        d["last"] = ("You: " if m.from_dispatch else "") + (m.body or "")
+        preview = (m.body or "").strip() or ("📷 Photo" if m.image else "")
+        d["last"] = ("You: " if m.from_dispatch else "") + preview
         d["at"] = (m.created_at.isoformat() + "Z") if m.created_at else None
         if (not m.from_dispatch) and (not m.read_by_dispatch):
             d["unread"] += 1
@@ -2308,6 +2332,22 @@ def send_message(body: MessageIn, user: User = Depends(require_staff), s: Sessio
     if not drv or not txt:
         raise HTTPException(422, "Pick a driver and type a message")
     m = Message(driver=drv, from_dispatch=True, body=txt, sender=(user.company or user.email), read_by_dispatch=True)
+    s.add(m); s.commit(); s.refresh(m)
+    return _msg_json(m)
+
+
+@app.post("/messages/photo")
+async def send_message_photo(driver: str = Query(...), body: str = Query(""),
+                             file: UploadFile = File(...),
+                             user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Dispatch sends a photo (with optional caption) to a driver."""
+    drv = (driver or "").strip()
+    if not drv:
+        raise HTTPException(422, "Pick a driver")
+    m = Message(driver=drv, from_dispatch=True, body=(body or "").strip(),
+                sender=(user.company or user.email), read_by_dispatch=True)
+    s.add(m); s.commit(); s.refresh(m)
+    m.image = await _save_message_image(file, m.id)
     s.add(m); s.commit(); s.refresh(m)
     return _msg_json(m)
 
@@ -2350,6 +2390,35 @@ def driver_send_message(body: DriverMessageIn, user: User = Depends(require_driv
     m = Message(driver=drv, from_dispatch=False, body=txt, sender=drv, read_by_driver=True)
     s.add(m); s.commit(); s.refresh(m)
     return _msg_json(m)
+
+
+@app.post("/driver/messages/photo")
+async def driver_send_photo(body: str = Query(""), file: UploadFile = File(...),
+                            user: User = Depends(require_driver), s: Session = Depends(get_session)):
+    """Driver sends a photo (with optional caption) to dispatch."""
+    drv = (user.company or "").strip()
+    if not drv:
+        raise HTTPException(422, "Driver has no name on file")
+    m = Message(driver=drv, from_dispatch=False, body=(body or "").strip(),
+                sender=drv, read_by_driver=True)
+    s.add(m); s.commit(); s.refresh(m)
+    m.image = await _save_message_image(file, m.id)
+    s.add(m); s.commit(); s.refresh(m)
+    return _msg_json(m)
+
+
+@app.get("/messages/{msg_id}/image")
+def get_message_image(msg_id: int, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """View a chat photo — staff, or the driver whose thread it belongs to."""
+    m = s.get(Message, msg_id)
+    if not m or not m.image:
+        raise HTTPException(404, "No photo on this message")
+    if user.role != "staff" and (user.company or "").strip() != m.driver:
+        raise HTTPException(404, "No photo on this message")
+    path = os.path.join(_message_image_dir(), m.image)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Photo not found")
+    return FileResponse(path, media_type=_media_type(path), filename=m.image)
 
 
 @app.get("/orders/{ref}/signature")
