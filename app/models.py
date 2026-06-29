@@ -124,6 +124,20 @@ class Invoice(SQLModel, table=True):
     qbo_invoice_id: Optional[str] = None
 
 
+class Message(SQLModel, table=True):
+    """A dispatch ↔ driver chat message. `driver` (the driver's name) is the thread
+    key; `from_dispatch` marks direction. The read flags drive the unread badges on
+    each side. Auto-created via create_all — no migration needed."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    driver: str = Field(index=True)            # thread = one driver
+    from_dispatch: bool = True                 # True dispatch→driver, False driver→dispatch
+    body: str
+    sender: Optional[str] = None               # display name (staff email or driver)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    read_by_driver: bool = False
+    read_by_dispatch: bool = False
+
+
 class InvoicePaidOverride(SQLModel, table=True):
     """Staff manually marked this invoice paid in the app, independent of QuickBooks.
     Kept in its OWN table (keyed by invoice number) so the A/R mirror-sync — which

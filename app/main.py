@@ -35,7 +35,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-29.1-driver-scoping"
+APP_VERSION = "2026-06-29.2-messaging"
 
 
 @app.get("/version")
@@ -2256,6 +2256,100 @@ def places_autocomplete(q: str = Query(""), _: User = Depends(get_current_user))
     except Exception as e:
         print("places_autocomplete failed:", e)
         return {"suggestions": []}
+
+
+# ── Dispatch ↔ driver messaging ──────────────────────────────────────────────
+def _msg_json(m: Message) -> dict:
+    return {"id": m.id, "driver": m.driver, "from_dispatch": m.from_dispatch,
+            "body": m.body, "sender": m.sender,
+            "at": (m.created_at.isoformat() + "Z") if m.created_at else None}
+
+
+class MessageIn(BaseModel):
+    driver: str
+    body: str
+
+
+@app.get("/messages/threads")
+def message_threads(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """One row per driver who has a thread: last message + count of driver→dispatch
+    messages dispatch hasn't read yet (staff). Drives the Messages panel + badge."""
+    msgs = s.exec(select(Message)).all()
+    by_driver: dict = {}
+    for m in sorted(msgs, key=lambda x: x.created_at or datetime.min):
+        d = by_driver.setdefault(m.driver, {"driver": m.driver, "last": "", "at": None, "unread": 0})
+        d["last"] = ("You: " if m.from_dispatch else "") + (m.body or "")
+        d["at"] = (m.created_at.isoformat() + "Z") if m.created_at else None
+        if (not m.from_dispatch) and (not m.read_by_dispatch):
+            d["unread"] += 1
+    return {"threads": sorted(by_driver.values(), key=lambda t: t["at"] or "", reverse=True),
+            "unread_total": sum(t["unread"] for t in by_driver.values())}
+
+
+@app.get("/messages/{driver}")
+def message_thread(driver: str, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Full thread with one driver (staff); marks the driver's messages as read."""
+    msgs = [m for m in s.exec(select(Message).where(Message.driver == driver)).all()]
+    msgs.sort(key=lambda m: m.created_at or datetime.min)
+    changed = False
+    for m in msgs:
+        if (not m.from_dispatch) and (not m.read_by_dispatch):
+            m.read_by_dispatch = True; s.add(m); changed = True
+    if changed:
+        s.commit()
+    return {"driver": driver, "messages": [_msg_json(m) for m in msgs]}
+
+
+@app.post("/messages")
+def send_message(body: MessageIn, user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Dispatch sends a message to a driver (by name)."""
+    drv = (body.driver or "").strip()
+    txt = (body.body or "").strip()
+    if not drv or not txt:
+        raise HTTPException(422, "Pick a driver and type a message")
+    m = Message(driver=drv, from_dispatch=True, body=txt, sender=(user.company or user.email), read_by_dispatch=True)
+    s.add(m); s.commit(); s.refresh(m)
+    return _msg_json(m)
+
+
+@app.get("/driver/messages")
+def driver_messages(user: User = Depends(require_driver), s: Session = Depends(get_session)):
+    """The driver's own thread with dispatch; marks dispatch's messages read."""
+    drv = (user.company or "").strip()
+    msgs = [m for m in s.exec(select(Message).where(Message.driver == drv)).all()]
+    msgs.sort(key=lambda m: m.created_at or datetime.min)
+    changed = False
+    for m in msgs:
+        if m.from_dispatch and (not m.read_by_driver):
+            m.read_by_driver = True; s.add(m); changed = True
+    if changed:
+        s.commit()
+    return {"driver": drv, "messages": [_msg_json(m) for m in msgs]}
+
+
+@app.get("/driver/messages/unread")
+def driver_unread(user: User = Depends(require_driver), s: Session = Depends(get_session)):
+    """Count of dispatch messages this driver hasn't read — for the badge."""
+    drv = (user.company or "").strip()
+    n = sum(1 for m in s.exec(select(Message).where(Message.driver == drv)).all()
+            if m.from_dispatch and not m.read_by_driver)
+    return {"count": n}
+
+
+class DriverMessageIn(BaseModel):
+    body: str
+
+
+@app.post("/driver/messages")
+def driver_send_message(body: DriverMessageIn, user: User = Depends(require_driver), s: Session = Depends(get_session)):
+    """Driver sends a message to dispatch."""
+    drv = (user.company or "").strip()
+    txt = (body.body or "").strip()
+    if not drv or not txt:
+        raise HTTPException(422, "Type a message")
+    m = Message(driver=drv, from_dispatch=False, body=txt, sender=drv, read_by_driver=True)
+    s.add(m); s.commit(); s.refresh(m)
+    return _msg_json(m)
 
 
 @app.get("/orders/{ref}/signature")
