@@ -316,7 +316,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-06-27.1-address-proxy"
+APP_VERSION = "2026-06-29.1-driver-scoping"
 
 
 @app.get("/version")
@@ -2061,18 +2061,24 @@ def _stamp_signature_pdf(pdf_path: str, signature: str, signed_by: str,
 
 @app.get("/driver/orders")
 def driver_orders(user: User = Depends(require_driver), s: Session = Depends(get_session)):
-    """Today's deliveries assigned to this driver (newest scheduled first). Matched
-    by the driver's name (User.company) vs Order.driver."""
+    """Today's deliveries assigned to THIS driver only (newest scheduled first).
+    A driver sees an order solely when they're its assigned driver — the order-level
+    driver for a single delivery, or the driver of one of its loads for a pour
+    (_is_driver_of). Unassigned orders and other drivers' orders are NOT shown."""
     today = _business_today().isoformat()
-    name = (user.company or "").strip().lower()
     rows = []
     for o in s.exec(select(Order).where(Order.scheduled_for == today)).all():
         if o.status in ("requested", "complete"):
             continue   # not yet confirmed, or already delivered
-        od = (o.driver or "").strip().lower()
-        if od and name and od != name:
-            continue   # assigned to a different driver — hide it
-        rows.append(_order_json(o, s))   # mine, or not yet assigned to anyone
+        if not _is_driver_of(o, user, s):
+            continue   # only what's assigned to this driver (order-level or a load)
+        j = _order_json(o, s)
+        # On a shared pour, show this driver ONLY their own load(s), not co-drivers'.
+        me = (user.company or "").strip().lower()
+        mine = [l for l in (j.get("loads") or []) if (l.get("driver") or "").strip().lower() == me]
+        if mine:
+            j["loads"] = mine
+        rows.append(j)
     rows.sort(key=lambda r: r.get("time") or "")
     return {"driver": user.company, "date": today, "orders": rows}
 
