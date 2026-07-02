@@ -49,7 +49,7 @@ class PumpState(SQLModel, table=True):
 
 class PumpControlIn(BaseModel):
     device_id: str
-    pin: str        # 4-digit driver PIN
+    pin: str = ""   # 4-digit driver PIN — required for relay_on=True, ignored for False
     relay_on: bool
 
 class PumpPinIn(BaseModel):
@@ -70,10 +70,13 @@ def get_pump_state(device_id: str, s: Session = Depends(get_session)):
 
 @router.post("/pump_control")
 def pump_control(body: PumpControlIn, s: Session = Depends(get_session)):
-    """Driver submits their 4-digit PIN from the app to turn the pump on/off."""
-    driver_pin = s.exec(select(PumpPin).where(PumpPin.pin == body.pin)).first()
-    if not driver_pin:
-        raise HTTPException(status_code=403, detail="Invalid PIN")
+    """Driver submits PIN to turn pump ON. Turning OFF requires no PIN."""
+    commanded_by = None
+    if body.relay_on:
+        driver_pin = s.exec(select(PumpPin).where(PumpPin.pin == body.pin)).first()
+        if not driver_pin:
+            raise HTTPException(status_code=403, detail="Invalid PIN")
+        commanded_by = driver_pin.label
 
     state = s.get(PumpState, body.device_id)
     if state is None:
@@ -81,12 +84,12 @@ def pump_control(body: PumpControlIn, s: Session = Depends(get_session)):
         s.add(state)
 
     state.relay_on = body.relay_on
-    state.commanded_by = driver_pin.label
+    state.commanded_by = commanded_by
     state.commanded_at = datetime.utcnow()
     s.commit()
     return {
         "relay": "on" if state.relay_on else "off",
-        "by": driver_pin.label,
+        "by": commanded_by,
     }
 
 
