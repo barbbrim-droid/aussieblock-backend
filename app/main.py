@@ -132,6 +132,7 @@ from .ticketgen import convert as ticket_convert
 from . import pricing
 from . import config
 from . import mixer
+from .pump import router as pump_router
 
 
 @asynccontextmanager
@@ -158,6 +159,9 @@ app.add_middleware(
 
 # Mixer-drum telemetry (device-authenticated, separate from the dispatch flow).
 app.include_router(mixer.router)
+
+# Yard pump relay — driver PIN auth + ESP32 polling.
+app.include_router(pump_router)
 
 
 LOAD_SIZE_YD = 10.0   # one truck-load; orders over this are continuous pours, split into loads
