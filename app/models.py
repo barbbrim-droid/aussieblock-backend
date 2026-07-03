@@ -332,3 +332,15 @@ class Driver(SQLModel, table=True):
     login are User rows (role='driver'); GET /drivers merges both lists by name."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)                                   # matches Order.driver
+
+
+class PlantChecklist(SQLModel, table=True):
+    """One batch-plant operator's daily checklist submission. The ticked items and
+    write-in readings live in `data` (a JSON blob); the columns exist only so the
+    office can list/filter submissions by day, operator, and flagged issues."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: str = Field(index=True)                                   # local plant date "YYYY-MM-DD"
+    operator: str = ""                                              # who filled it out
+    submitted_at: datetime = Field(default_factory=datetime.utcnow)
+    issues: int = 0                                                 # count of items flagged "issue"
+    data: str = ""                                                  # JSON: {ambient_temp, weather, items, readings, notes}

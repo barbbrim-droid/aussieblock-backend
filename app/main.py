@@ -36,7 +36,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -3630,6 +3630,60 @@ def delete_driver(name: str, _: User = Depends(require_staff), s: Session = Depe
     if removed:
         s.commit()
     return {"ok": True, "removed": name, "count": removed}
+
+
+# ── Batch plant: daily operator checklist ─────────────────────────────────────
+class PlantChecklistIn(BaseModel):
+    date: str = ""
+    operator: str = ""
+    ambient_temp: str = ""
+    weather: str = ""
+    items: dict = {}       # { itemKey: "ok" | "na" | "issue" }
+    readings: dict = {}    # { readingKey: "value" }
+    notes: str = ""
+
+
+@app.post("/plant-checklist")
+def submit_plant_checklist(body: PlantChecklistIn, user: User = Depends(require_staff),
+                           s: Session = Depends(get_session)):
+    """Save one day's completed plant checklist. Ticked items + readings are kept as
+    a JSON blob; `issues` counts items the operator flagged so the office can spot a
+    problem day at a glance. Each submission is its own record (supports >1 shift)."""
+    date = (body.date or "").strip() or datetime.utcnow().strftime("%Y-%m-%d")
+    operator = (body.operator or "").strip() or (user.company or user.email)
+    issues = sum(1 for v in (body.items or {}).values() if v == "issue")
+    payload = json.dumps({
+        "ambient_temp": body.ambient_temp, "weather": body.weather,
+        "items": body.items or {}, "readings": body.readings or {}, "notes": body.notes,
+    })
+    row = PlantChecklist(date=date, operator=operator, issues=issues, data=payload)
+    s.add(row); s.commit(); s.refresh(row)
+    print(f"POST /plant-checklist  {date} by {operator} — {issues} issue(s)")
+    return {"id": row.id, "date": row.date, "operator": row.operator,
+            "submitted_at": row.submitted_at.isoformat(), "issues": row.issues}
+
+
+@app.get("/plant-checklist")
+def list_plant_checklists(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Recent checklist submissions (newest first) — summary rows for the history list."""
+    rows = s.exec(select(PlantChecklist).order_by(PlantChecklist.submitted_at.desc())).all()
+    return [{"id": r.id, "date": r.date, "operator": r.operator,
+             "submitted_at": r.submitted_at.isoformat(), "issues": r.issues}
+            for r in rows[:90]]
+
+
+@app.get("/plant-checklist/{cid}")
+def get_plant_checklist(cid: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """One submission, with the full ticked items + readings for the read-only view."""
+    r = s.get(PlantChecklist, cid)
+    if not r:
+        raise HTTPException(404, "Checklist not found")
+    try:
+        data = json.loads(r.data) if r.data else {}
+    except ValueError:
+        data = {}
+    return {"id": r.id, "date": r.date, "operator": r.operator,
+            "submitted_at": r.submitted_at.isoformat(), "issues": r.issues, **data}
 
 
 @app.delete("/staff/{email}")
