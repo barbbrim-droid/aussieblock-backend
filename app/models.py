@@ -19,6 +19,10 @@ class User(SQLModel, table=True):
     # Order.driver (e.g. "Rodney") — that's how their deliveries are matched.
     company: Optional[str] = None                # worker's employer / who they work for (label only, not access)
     project: Optional[str] = None                # worker's current project/job (label only)
+    # Driver tablet convenience login: a 4–6 digit PIN the driver types to sign in
+    # (no email/password). Stored as-is so the office can view/reissue it, same as
+    # the fuel-pump PIN. Unique among driver logins so a PIN identifies one driver.
+    login_pin: Optional[str] = None
 
 
 class Customer(SQLModel, table=True):
@@ -134,6 +138,7 @@ class Message(SQLModel, table=True):
     body: str = ""                             # may be empty when only a photo is sent
     image: Optional[str] = None                # filename of an attached photo, if any
     sender: Optional[str] = None               # display name (staff email or driver)
+    image: Optional[str] = None                # filename of an attached photo (in the message_photos dir)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     read_by_driver: bool = False
     read_by_dispatch: bool = False

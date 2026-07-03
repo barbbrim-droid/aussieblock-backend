@@ -15,6 +15,7 @@ from typing import List, Optional
 import glob
 import json
 import os
+import secrets
 import shutil
 import time
 from contextlib import asynccontextmanager
@@ -53,13 +54,14 @@ class StaffLoginIn(BaseModel):
     """Body for creating/resetting a login. role: 'staff' = the dispatch operator
     (full board); 'worker' = a customer's field person, scoped to ONE company
     (their orders + tracking only, no billing, no board)."""
-    email: str
+    email: str = ""               # required for most logins; a driver may instead sign in with a PIN (no email)
     password: str = ""            # required for a NEW login; blank when editing = keep current password
     role: str = "worker"
     phone: str = ""               # worker's cell, so they can be texted their login
     customer_id: int | None = None  # REQUIRED for a worker — the company they work for (scopes what they see)
     project: str = ""             # their current project/job (label only)
     company: str = ""             # for a 'driver' login: the driver's name (matches Order.driver)
+    pin: str = ""                 # for a 'driver' login: 4–6 digit tablet sign-in PIN (blank = leave unchanged)
 
 
 class OrderIn(BaseModel):
@@ -371,6 +373,33 @@ def login(form: OAuth2PasswordRequestForm = Depends(), s: Session = Depends(get_
         "role": user.role,
         "customer_id": user.customer_id,
         "company": company,
+    }
+
+
+class PinLoginIn(BaseModel):
+    pin: str
+
+
+@app.post("/auth/pin-login")
+def pin_login(body: PinLoginIn, s: Session = Depends(get_session)):
+    """Driver tablet sign-in with just a PIN — no email/password to type. The PIN
+    is unique among driver logins, so it identifies exactly one driver. Returns the
+    same token payload as /auth/login."""
+    pin = "".join(ch for ch in (body.pin or "") if ch.isdigit())
+    unauthorized = HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect PIN")
+    if not (4 <= len(pin) <= 6):
+        raise unauthorized
+    user = s.exec(
+        select(User).where(User.role == "driver").where(User.login_pin == pin)
+    ).first()
+    if not user:
+        raise unauthorized
+    return {
+        "access_token": create_access_token(user),
+        "token_type": "bearer",
+        "role": user.role,
+        "customer_id": user.customer_id,
+        "company": user.company,
     }
 
 
@@ -3454,11 +3483,23 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     new login always requires a 6+ character password."""
     role = body.role if body.role in ("staff", "worker", "customer", "driver") else "worker"
     email = (body.email or "").strip().lower()
-    if not email:
-        raise HTTPException(422, "Email is required")
     pw = body.password or ""
     phone = (body.phone or "").strip() or None
     project = (body.project or "").strip() or None
+    # A driver may sign in with a 4–6 digit PIN instead of email/password. Normalize
+    # to digits; a blank PIN means "leave it unchanged" (on edit) or "no PIN" (on create).
+    pin = "".join(ch for ch in (body.pin or "") if ch.isdigit()) if role == "driver" else ""
+    if pin and not (4 <= len(pin) <= 6):
+        raise HTTPException(422, "The PIN must be 4 to 6 digits")
+
+    def _pin_taken(new_pin: str, exclude_id: int | None) -> bool:
+        """A driver PIN must identify exactly one driver, so it can't clash with
+        another driver's PIN (this user's own row is excluded on edit)."""
+        other = s.exec(
+            select(User).where(User.role == "driver").where(User.login_pin == new_pin)
+        ).first()
+        return bool(other and other.id != exclude_id)
+
     # Workers AND company admins (customer) MUST belong to a real company — that's
     # what scopes their view. Only the full operator (staff) has no company.
     # A 'driver' has no company; `company` instead holds their NAME (matches Order.driver).
@@ -3474,12 +3515,30 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
         company = (body.company or "").strip()    # the driver's name, used to match deliveries
         if not company:
             raise HTTPException(422, "Enter the driver's name (must match the name on their orders)")
+
+    # A driver can be set up with just a name + PIN — no email to invent. Mint a
+    # placeholder login handle + random password so the row is valid and unique;
+    # the driver never uses them (they sign in with the PIN or the tap-to-login link).
+    if role == "driver" and not email:
+        if not pin:
+            raise HTTPException(422, "Enter an email or a PIN so the driver can sign in")
+        email = f"driver-{secrets.token_hex(3)}@texausrock.com"
+        if not pw:
+            pw = secrets.token_urlsafe(9)
+
+    if not email:
+        raise HTTPException(422, "Email is required")
+
     u = s.exec(select(User).where(User.email == email)).first()
     if u:
         if pw:                                   # only reset the password when one is supplied
             if len(pw) < 6:
                 raise HTTPException(422, "Password must be at least 6 characters")
             u.password_hash = hash_password(pw)
+        if pin:                                  # blank leaves the existing PIN in place
+            if _pin_taken(pin, u.id):
+                raise HTTPException(422, "That PIN is already used by another driver — pick a different one")
+            u.login_pin = pin
         u.role = role
         u.customer_id = cust_id
         u.phone = phone
@@ -3488,15 +3547,18 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
         s.add(u); s.commit()
         return {"ok": True, "action": "updated", "email": email, "role": role,
                 "phone": phone, "customer_id": cust_id, "company": company,
-                "project": project, "password_changed": bool(pw)}
+                "project": project, "password_changed": bool(pw), "pin": u.login_pin}
     if len(pw) < 6:
         raise HTTPException(422, "A 6+ character password is required for a new login")
+    if pin and _pin_taken(pin, None):
+        raise HTTPException(422, "That PIN is already used by another driver — pick a different one")
     u = User(email=email, password_hash=hash_password(pw), role=role,
-             customer_id=cust_id, phone=phone, company=company, project=project)
+             customer_id=cust_id, phone=phone, company=company, project=project,
+             login_pin=pin or None)
     s.add(u); s.commit()
     return {"ok": True, "action": "created", "email": email, "role": role,
             "phone": phone, "customer_id": cust_id, "company": company,
-            "project": project, "password_changed": True}
+            "project": project, "password_changed": True, "pin": u.login_pin}
 
 
 @app.get("/staff")
@@ -3510,7 +3572,8 @@ def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_sess
             c = s.get(Customer, u.customer_id)
             company = c.name if c else None
         out.append({"email": u.email, "role": u.role, "phone": u.phone,
-                    "customer_id": u.customer_id, "company": company, "project": u.project})
+                    "customer_id": u.customer_id, "company": company, "project": u.project,
+                    "pin": u.login_pin if u.role == "driver" else None})
     return out
 
 
