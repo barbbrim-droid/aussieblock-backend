@@ -36,7 +36,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver,
@@ -120,6 +120,7 @@ class ChargeIn(BaseModel):
 from .integrations.onestep_gps import (
     gps_poll_loop, arrival_pending, learn_site_location,
     pin_job_location, pin_load_job_location, stamp_onsite, stamp_departed,
+    _haversine_m,
 )
 from .integrations.fluidsecure import fuel_poll_loop, ingest_csv as ingest_fuel_csv, veh_keys
 from .integrations.fuel_email import fuel_email_loop
@@ -4081,3 +4082,280 @@ def import_moby_mix(
 ):
     """Import a Moby Mix CSV export. Defaults to the bundled sample file. Staff only."""
     return import_orders_from_csv(path)
+
+
+# ── Employee time clock ──────────────────────────────────────────────────────
+# Batch-plant operators + yard crew punch a shared plant tablet (kiosk) with a
+# short PIN. Every punch is GPS-gated to the yard geofence (config.TIMECLOCK_
+# GEOFENCE_M around PLANT_LAT/LNG) so no one can clock in off-site. At clock-out
+# the kiosk asks (English/Spanish) whether they took a 30- or 60-min lunch, or
+# worked through — recorded on the shift and used in the hours math. The office
+# (finance) manages employees and reviews/edits timesheets.
+
+def _iso(dt) -> Optional[str]:
+    """Naive UTC datetime → ISO string marked UTC ('Z'), so the browser converts it
+    to the office's local time (Central) instead of reading it as local."""
+    return (dt.isoformat() + "Z") if dt else None
+
+
+def _employee_json(e: Employee) -> dict:
+    return {"id": e.id, "name": e.name, "pin": e.pin, "kind": e.kind, "active": e.active}
+
+
+def _entry_hours(en: TimeEntry) -> Optional[float]:
+    """Paid hours for a closed shift = (out - in) - lunch, else None (still open)."""
+    if not en.clock_out or not en.clock_in:
+        return None
+    secs = (en.clock_out - en.clock_in).total_seconds() - (en.lunch_minutes or 0) * 60
+    return round(max(0.0, secs) / 3600.0, 2)
+
+
+def _entry_json(en: TimeEntry, s: Session) -> dict:
+    emp = s.get(Employee, en.employee_id)
+    return {
+        "id": en.id,
+        "employee_id": en.employee_id,
+        "employee": emp.name if emp else "-",
+        "kind": emp.kind if emp else None,
+        "clock_in": _iso(en.clock_in),
+        "clock_out": _iso(en.clock_out),
+        "lunch_minutes": en.lunch_minutes,
+        "worked_through_lunch": (en.clock_out is not None and (en.lunch_minutes or 0) == 0),
+        "open": en.clock_out is None,
+        "hours": _entry_hours(en),
+        "in_lat": en.in_lat, "in_lng": en.in_lng,
+        "out_lat": en.out_lat, "out_lng": en.out_lng,
+        "source": en.source, "note": en.note, "edited_by": en.edited_by,
+    }
+
+
+def _open_entry(s: Session, employee_id: int):
+    """The employee's currently-open (not clocked-out) shift, if any."""
+    return s.exec(
+        select(TimeEntry).where(TimeEntry.employee_id == employee_id, TimeEntry.clock_out == None)  # noqa: E711
+        .order_by(TimeEntry.clock_in.desc())
+    ).first()
+
+
+def _within_yard(lat, lng):
+    """(inside, distance_m) - is this GPS fix within the yard time-clock geofence?"""
+    if lat is None or lng is None:
+        return (False, None)
+    d = _haversine_m(float(lat), float(lng), config.PLANT_LAT, config.PLANT_LNG)
+    return (d <= config.TIMECLOCK_GEOFENCE_M, round(d))
+
+
+class EmployeeIn(BaseModel):
+    name: str
+    pin: str
+    kind: str = "yard"                 # "plant" | "yard"
+    active: bool = True
+
+
+@app.get("/employees")
+def list_employees(_: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """All time-clock employees + whether each is currently clocked in (finance)."""
+    emps = s.exec(select(Employee).order_by(Employee.active.desc(), Employee.name)).all()
+    out = []
+    for e in emps:
+        oe = _open_entry(s, e.id)
+        j = _employee_json(e)
+        j["clocked_in"] = oe is not None
+        j["since"] = _iso(oe.clock_in) if oe else None
+        out.append(j)
+    return out
+
+
+@app.post("/employees")
+def upsert_employee(body: EmployeeIn, _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Create or update an employee. PIN must be unique among ACTIVE employees so a
+    PIN identifies exactly one person at the kiosk. Matches an existing employee by
+    exact name (case-insensitive) to edit them; otherwise creates a new one."""
+    pin = (body.pin or "").strip()
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(422, "Name is required")
+    if not (pin.isdigit() and 3 <= len(pin) <= 8):
+        raise HTTPException(422, "PIN must be 3-8 digits")
+    if (body.kind or "yard") not in ("plant", "yard"):
+        raise HTTPException(422, "kind must be 'plant' or 'yard'")
+    existing = next((e for e in s.exec(select(Employee)).all()
+                     if e.name.strip().lower() == name.lower()), None)
+    # PIN collision with a DIFFERENT active employee?
+    clash = next((e for e in s.exec(select(Employee).where(Employee.pin == pin, Employee.active == True)).all()  # noqa: E712
+                  if not existing or e.id != existing.id), None)
+    if clash and body.active:
+        raise HTTPException(409, f"PIN {pin} is already used by {clash.name}")
+    if existing:
+        existing.name = name
+        existing.pin = pin
+        existing.kind = body.kind or "yard"
+        existing.active = body.active
+        s.add(existing)
+        s.commit()
+        s.refresh(existing)
+        return _employee_json(existing)
+    e = Employee(name=name, pin=pin, kind=body.kind or "yard", active=body.active)
+    s.add(e)
+    s.commit()
+    s.refresh(e)
+    return _employee_json(e)
+
+
+@app.delete("/employees/{emp_id}")
+def delete_employee(emp_id: int, _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Deactivate an employee (kept for timesheet history; hidden from the kiosk)."""
+    e = s.get(Employee, emp_id)
+    if not e:
+        raise HTTPException(404, "Employee not found")
+    e.active = False
+    s.add(e)
+    s.commit()
+    return {"ok": True, "id": emp_id, "active": False}
+
+
+class PunchIn(BaseModel):
+    pin: str
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    lunch_minutes: Optional[int] = None   # supplied on the SECOND clock-out call (0=worked through, 30, 60)
+
+
+@app.post("/timeclock/punch")
+def timeclock_punch(body: PunchIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Kiosk punch. Toggles clock-in <-> clock-out for the employee whose PIN this is,
+    but ONLY when the tablet's GPS is inside the yard geofence. Clock-out is a two-
+    step call: the first (no lunch_minutes) returns action='out_pending' so the
+    kiosk can show the bilingual lunch prompt; the second (with lunch_minutes) closes
+    the shift. Requires a staff session (the tablet runs in the ops kiosk)."""
+    inside, dist = _within_yard(body.lat, body.lng)
+    if not inside:
+        # GPS missing or outside the yard -> refuse (English + Spanish for the kiosk).
+        raise HTTPException(403, {
+            "code": "outside_geofence",
+            "message": "You must be at the plant to clock in or out.",
+            "message_es": "Debe estar en la planta para marcar entrada o salida.",
+            "distance_m": dist,
+        })
+    pin = (body.pin or "").strip()
+    emp = s.exec(select(Employee).where(Employee.pin == pin, Employee.active == True)).first()  # noqa: E712
+    if not emp:
+        raise HTTPException(404, {"code": "bad_pin", "message": "PIN not recognized.",
+                                  "message_es": "PIN no reconocido."})
+    open_e = _open_entry(s, emp.id)
+    now = datetime.utcnow()
+    if not open_e:
+        # Clock IN.
+        en = TimeEntry(employee_id=emp.id, clock_in=now, in_lat=body.lat, in_lng=body.lng, source="kiosk")
+        s.add(en)
+        s.commit()
+        s.refresh(en)
+        return {"action": "in", "employee": emp.name, "at": _iso(now), "entry_id": en.id}
+    # Clock OUT - needs the lunch answer. First call (no lunch) -> ask; second -> close.
+    if body.lunch_minutes is None:
+        return {"action": "out_pending", "employee": emp.name, "entry_id": open_e.id,
+                "since": _iso(open_e.clock_in)}
+    lm = int(body.lunch_minutes)
+    if lm not in (0, 30, 60):
+        raise HTTPException(422, "lunch_minutes must be 0, 30, or 60")
+    open_e.clock_out = now
+    open_e.lunch_minutes = lm
+    open_e.out_lat = body.lat
+    open_e.out_lng = body.lng
+    s.add(open_e)
+    s.commit()
+    s.refresh(open_e)
+    return {"action": "out", "employee": emp.name, "at": _iso(now),
+            "hours": _entry_hours(open_e), "lunch_minutes": lm,
+            "worked_through_lunch": lm == 0}
+
+
+class TimeEntryIn(BaseModel):
+    employee_id: Optional[int] = None
+    clock_in: Optional[str] = None        # ISO
+    clock_out: Optional[str] = None       # ISO; null keeps it open
+    lunch_minutes: Optional[int] = None
+    note: Optional[str] = None
+
+
+def _parse_dt(v):
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, AttributeError):
+        raise HTTPException(422, f"Bad datetime: {v}")
+
+
+@app.get("/timeclock/entries")
+def list_time_entries(frm: Optional[str] = None, to: Optional[str] = None,
+                      employee_id: Optional[int] = None,
+                      _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Shifts in a date window (by clock-in date), for the timesheet. Open shifts are
+    always included so the office sees who's still clocked in."""
+    q = select(TimeEntry)
+    if employee_id:
+        q = q.where(TimeEntry.employee_id == employee_id)
+    ens = s.exec(q.order_by(TimeEntry.clock_in.desc())).all()
+
+    def in_range(en: TimeEntry) -> bool:
+        d = en.clock_in.date().isoformat() if en.clock_in else ""
+        if frm and d and d < frm:
+            return False
+        if to and d and d > to:
+            return False
+        return True
+    return [_entry_json(en, s) for en in ens if in_range(en)]
+
+
+@app.post("/timeclock/entries")
+def add_time_entry(body: TimeEntryIn, u: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Office manually adds a shift (a missed punch). employee_id + clock_in required."""
+    if not body.employee_id or not s.get(Employee, body.employee_id):
+        raise HTTPException(422, "Valid employee_id required")
+    ci = _parse_dt(body.clock_in)
+    if not ci:
+        raise HTTPException(422, "clock_in required")
+    en = TimeEntry(employee_id=body.employee_id, clock_in=ci, clock_out=_parse_dt(body.clock_out),
+                   lunch_minutes=body.lunch_minutes, note=body.note, source="office", edited_by=u.email)
+    s.add(en)
+    s.commit()
+    s.refresh(en)
+    return _entry_json(en, s)
+
+
+@app.put("/timeclock/entries/{entry_id}")
+def edit_time_entry(entry_id: int, body: TimeEntryIn, u: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Office edits a shift - fix times, set/clear lunch, add a note."""
+    en = s.get(TimeEntry, entry_id)
+    if not en:
+        raise HTTPException(404, "Entry not found")
+    if body.clock_in is not None:
+        ci = _parse_dt(body.clock_in)
+        if not ci:
+            raise HTTPException(422, "clock_in cannot be blank")
+        en.clock_in = ci
+    if body.clock_out is not None:
+        en.clock_out = _parse_dt(body.clock_out)   # "" / null -> reopen the shift
+    if body.lunch_minutes is not None:
+        if int(body.lunch_minutes) not in (0, 30, 60):
+            raise HTTPException(422, "lunch_minutes must be 0, 30, or 60")
+        en.lunch_minutes = int(body.lunch_minutes)
+    if body.note is not None:
+        en.note = body.note
+    en.edited_by = u.email
+    s.add(en)
+    s.commit()
+    s.refresh(en)
+    return _entry_json(en, s)
+
+
+@app.delete("/timeclock/entries/{entry_id}")
+def delete_time_entry(entry_id: int, _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Office deletes a shift (e.g. a duplicate/erroneous punch)."""
+    en = s.get(TimeEntry, entry_id)
+    if not en:
+        raise HTTPException(404, "Entry not found")
+    s.delete(en)
+    s.commit()
+    return {"ok": True, "id": entry_id}

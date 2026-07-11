@@ -148,6 +148,10 @@ YARD_GEOFENCE_M = float(os.getenv("YARD_GEOFENCE_M", "500"))
 # address entirely — it keys off the truck actually stopping.
 ARRIVAL_DWELL_SECONDS = int(os.getenv("ARRIVAL_DWELL_SECONDS", "300"))   # 5 minutes parked
 ARRIVAL_MOVE_M = float(os.getenv("ARRIVAL_MOVE_M", "75"))                # movement under this = "stopped"
+# Employee time clock: a kiosk punch (clock in/out) is only accepted when the
+# tablet's GPS is within this many meters of the yard (PLANT_LAT/LNG). Generous by
+# default so anywhere on the plant/yard counts; tighten via env if needed.
+TIMECLOCK_GEOFENCE_M = float(os.getenv("TIMECLOCK_GEOFENCE_M", "500"))
 # Once an order is On site, the job location is pinned (the geocoded site centre).
 # When the truck then moves more than this from the job, the order flips to
 # "returning"; when it re-enters the yard geofence it auto-completes. MUST be larger

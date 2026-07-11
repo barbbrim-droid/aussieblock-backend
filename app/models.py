@@ -334,6 +334,39 @@ class Driver(SQLModel, table=True):
     name: str = Field(index=True)                                   # matches Order.driver
 
 
+class Employee(SQLModel, table=True):
+    """An hourly employee who punches the plant time clock (batch-plant operators,
+    yard crew). No app login — identified at the kiosk by a short PIN. Kept separate
+    from User (logins) and Driver (assignable names)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    pin: str = Field(index=True)                  # short digits typed at the kiosk; unique among active employees
+    kind: str = "yard"                            # "plant" | "yard" (label/grouping)
+    active: bool = True                           # inactive = hidden from the kiosk, kept for history
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TimeEntry(SQLModel, table=True):
+    """One shift punched at the plant time clock: a clock-in and (once closed) a
+    clock-out, with the GPS location of each punch (the kiosk only accepts punches
+    inside the yard geofence). `lunch_minutes` is set at clock-out from the bilingual
+    prompt: 30 or 60 (deducted from paid hours) or 0 = worked through lunch (nothing
+    deducted, flagged for the office). None until clocked out / not asked."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    employee_id: int = Field(foreign_key="employee.id", index=True)
+    clock_in: datetime
+    clock_out: Optional[datetime] = None
+    lunch_minutes: Optional[int] = None           # None=open, 0=worked through, 30, 60
+    in_lat: Optional[float] = None
+    in_lng: Optional[float] = None
+    out_lat: Optional[float] = None
+    out_lng: Optional[float] = None
+    source: str = "kiosk"                          # "kiosk" | "office" (manually added/edited)
+    note: Optional[str] = None                    # office note (e.g. reason for a manual fix)
+    edited_by: Optional[str] = None               # staff email who last added/edited it by hand
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class PlantChecklist(SQLModel, table=True):
     """One batch-plant operator's daily checklist submission. The ticked items and
     write-in readings live in `data` (a JSON blob); the columns exist only so the
