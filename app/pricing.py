@@ -13,7 +13,7 @@ DEFAULT_SHEET = {
     "short_load_fee": 200.0,
     "short_load_under_yd": 5.0,
     "backhaul_per_yd": 50.0,
-    "backhaul_under_yd": 3.0,
+    "backhaul_under_yd": 3.0,   # $50/yd back-haul fee on a continuation load of 3 yards or less
     # Standby (on-site wait): the first `standby_free_hours` on site are free, then
     # `standby_per_hour` $/hr, prorated by the minute. Charged per truck.
     "standby_per_hour": 150.0,
@@ -208,10 +208,17 @@ def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):
 
 def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
                     materials=None, order_admixtures: str = "", unit_override=None,
-                    fiber_rate_override=None) -> dict:
+                    fiber_rate_override=None, mileage=None) -> dict:
     """Compute the ticket pricing block. Quantities are yards; load_qty is this
     load (the ticket), order_qty is the whole order (for the short-load rule).
-    unit_override, when set, forces the $/yd unit price (a staff per-order price)."""
+    unit_override, when set, forces the $/yd unit price (a staff per-order price).
+
+    mixes are priced as PURE CONCRETE (yard price); the delivery haul is added to
+    the bill from `mileage` (road miles) via the delivery brackets. Haul is NOT
+    added for self-pickup customers, for a negotiated customer override price (an
+    all-in deal, e.g. Landers), or for a staff per-order price (unit_override) —
+    those prices already include everything. Pass mileage=None to skip billed haul
+    entirely (e.g. the printed ticket, which doesn't show a haul line)."""
     sheet = sheet or {}
     lq = _num(load_qty) or _num(order_qty)   # fall back to order qty if the load read is blank
     oq = _num(order_qty) or lq
@@ -223,13 +230,18 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
             break
     # customer override (blank mix = applies to any mix for that customer)
     cust_n = _norm(customer)
+    override_applied = False
     for ov in sheet.get("overrides", []):
         if _norm(ov.get("customer")) == cust_n and cust_n and (not ov.get("mix") or _mix_matches(ov.get("mix"), mix)):
             unit = _num(ov.get("price"))
+            override_applied = True
             break
     # staff per-order price override wins over the sheet/customer price
     if unit_override is not None and _num(unit_override) > 0:
         unit = _num(unit_override)
+    # An override (customer deal or per-order staff price) is treated as ALL-IN — no
+    # separate haul is added on top of it (protects negotiated prices like Landers).
+    all_in_price = override_applied or (unit_override is not None and _num(unit_override) > 0)
 
     extended = round(lq * unit, 2)
 
@@ -282,7 +294,16 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
         short = _num(sheet.get("short_load_fee")) if (oq and oq <= _num(sheet.get("short_load_under_yd"))) else 0.0
         backhaul = (round(_num(sheet.get("backhaul_per_yd")) * lq, 2)
                     if (lq and lq <= _num(sheet.get("backhaul_under_yd")) and oq and oq > lq) else 0.0)
-    subtotal = round(extended + adx_total + short + backhaul, 2)
+    # Delivery haul billed to the customer: bracket rate (by road miles) × yards.
+    # Added for standard sheet-priced, delivered orders only — never for self-pickup
+    # or an all-in override price. mileage=None (e.g. the printed ticket) → no haul.
+    delivery = 0.0
+    delivery_rate = 0.0
+    if not self_haul and not all_in_price and mileage is not None:
+        _d = compute_delivery(sheet, mileage, lq)
+        delivery_rate = _d["rate"]
+        delivery = _d["total"]
+    subtotal = round(extended + adx_total + delivery + short + backhaul, 2)
     tax_pct = _num(sheet.get("tax_pct"))
     tax = round(subtotal * tax_pct / 100.0, 2)
     total = round(subtotal + tax, 2)
@@ -290,6 +311,8 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
         "unit_price": unit,
         "extended": extended,
         "admixtures": adx_lines,
+        "delivery": delivery,          # haul billed to the customer (bracket × yards)
+        "delivery_rate": delivery_rate,
         "short_load": short,
         "backhaul": backhaul,
         "subtotal": subtotal,

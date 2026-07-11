@@ -1719,10 +1719,19 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
     # order's admixtures text. _ticket_actuals reliably maps the ticket row to its
     # key (e.g. a Delvo/retarder row -> 'retarder'); map back to the material name.
     batched_adx = [key_name[k] for k in _ticket_actuals(o, s) if k in key_name]
+    # Road miles from the yard — resolved BEFORE pricing so the customer's bill can
+    # include the distance haul (mixes are priced as pure concrete + bracket haul).
+    # Use the stored value, else auto-compute once and cache it on the order.
+    mi = o.mileage
+    if mi is None and compute_miles:
+        mi = pricing.road_miles(o.site)
+        if mi is not None:
+            o.mileage = mi
+            s.add(o)
     cp = pricing.compute_pricing(sheet, o.mix, cust, billable, billable,
                                  materials=batched_adx,
                                  order_admixtures=o.admixtures or "", unit_override=o.price_override,
-                                 fiber_rate_override=o.fiber_rate)
+                                 fiber_rate_override=o.fiber_rate, mileage=mi)
     # Per-load fees the order-total pricing can't see — back-haul (continuation
     # loads) and standby (on-site wait). Query the loads once and fold both in.
     # Skipped for self-haul customers (no delivery/load fees).
@@ -1767,13 +1776,8 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
         cp["tax"] = round(cp["subtotal"] * pricing._num(cp.get("tax_pct")) / 100.0, 2)
         cp["total"] = round(cp["subtotal"] + cp["tax"], 2)
         cp["job_running_total"] = cp["total"]
-    # mileage: use the stored value, else auto-compute once and cache it on the order
-    mi = o.mileage
-    if mi is None and compute_miles:
-        mi = pricing.road_miles(o.site)
-        if mi is not None:
-            o.mileage = mi
-            s.add(o)
+    # Delivery (haul) cost paid to the hauler — same bracket × yards as the customer-
+    # billed haul above (pass-through), using the mileage resolved before pricing.
     dl = pricing.compute_delivery(sheet, mi, billable)
     dl["hauler"] = _order_hauler(o, s)
     dl["hauler_group"] = _cost_hauler_group(o, s, sheet, cust)   # Costs "by hauler" bucket
