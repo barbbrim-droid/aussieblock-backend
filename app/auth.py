@@ -110,6 +110,14 @@ def require_finance(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def require_timeclock(user: User = Depends(get_current_user)) -> User:
+    """Time-clock punch: the office (staff) OR a dedicated plant kiosk device login
+    (role 'kiosk'). A kiosk login can ONLY punch — it never reaches the board."""
+    if user.role not in ("staff", "kiosk"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Time clock access required")
+    return user
+
+
 # A "driver" login is one of Aussieblock's own drivers on the truck tablet: they
 # see their assigned deliveries, the batch ticket, and capture the customer's
 # sign-off. No board, no billing, no other companies.

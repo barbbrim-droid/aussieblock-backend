@@ -39,7 +39,7 @@ from .seed import seed_if_empty
 from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
-    require_driver,
+    require_driver, require_timeclock,
 )
 
 
@@ -3486,7 +3486,7 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     For an EXISTING login, a blank password leaves the current one in place — so
     company/phone/project/role can be updated without resetting the password. A
     new login always requires a 6+ character password."""
-    role = body.role if body.role in ("staff", "worker", "customer", "driver") else "worker"
+    role = body.role if body.role in ("staff", "worker", "customer", "driver", "kiosk") else "worker"
     email = (body.email or "").strip().lower()
     pw = body.password or ""
     phone = (body.phone or "").strip() or None
@@ -4222,7 +4222,7 @@ class PunchIn(BaseModel):
 
 
 @app.post("/timeclock/punch")
-def timeclock_punch(body: PunchIn, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+def timeclock_punch(body: PunchIn, _: User = Depends(require_timeclock), s: Session = Depends(get_session)):
     """Kiosk punch. Toggles clock-in <-> clock-out for the employee whose PIN this is,
     but ONLY when the tablet's GPS is inside the yard geofence. Clock-out is a two-
     step call: the first (no lunch_minutes) returns action='out_pending' so the
