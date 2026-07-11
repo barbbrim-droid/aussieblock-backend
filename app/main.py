@@ -4165,6 +4165,9 @@ def list_employees(_: User = Depends(require_finance), s: Session = Depends(get_
         j = _employee_json(e)
         j["clocked_in"] = oe is not None
         j["since"] = _iso(oe.clock_in) if oe else None
+        # How many shifts on record — drives whether they can be permanently deleted
+        # (0 hours = safe to remove) vs only deactivated (keep the timesheet history).
+        j["entry_count"] = len(s.exec(select(TimeEntry.id).where(TimeEntry.employee_id == e.id)).all())
         out.append(j)
     return out
 
@@ -4206,11 +4209,21 @@ def upsert_employee(body: EmployeeIn, _: User = Depends(require_finance), s: Ses
 
 
 @app.delete("/employees/{emp_id}")
-def delete_employee(emp_id: int, _: User = Depends(require_finance), s: Session = Depends(get_session)):
-    """Deactivate an employee (kept for timesheet history; hidden from the kiosk)."""
+def delete_employee(emp_id: int, hard: bool = False, _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Remove an employee. Default = DEACTIVATE (kept for timesheet history, hidden
+    from the kiosk). hard=true = PERMANENTLY delete the row, but only when they have
+    NO recorded shifts — someone with hours can't be deleted (would lose payroll
+    history); deactivate them instead."""
     e = s.get(Employee, emp_id)
     if not e:
         raise HTTPException(404, "Employee not found")
+    if hard:
+        n = len(s.exec(select(TimeEntry.id).where(TimeEntry.employee_id == emp_id)).all())
+        if n > 0:
+            raise HTTPException(409, f"{e.name} has {n} recorded shift{'s' if n != 1 else ''} — deactivate instead to keep the timesheet history.")
+        s.delete(e)
+        s.commit()
+        return {"ok": True, "id": emp_id, "deleted": True}
     e.active = False
     s.add(e)
     s.commit()
