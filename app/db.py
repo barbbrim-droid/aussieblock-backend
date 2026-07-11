@@ -64,6 +64,7 @@ _COLUMN_MIGRATIONS = {
     "mixerreading": {"order_ref": "VARCHAR"},
     "materialreceipt": {"po_id": "INTEGER"},   # links a delivery to its cement PO
     "message": {"image": "VARCHAR"},           # photo attachment on a chat message
+    "timeentry": {"end_of_day": "BOOLEAN"},    # clock-out: was the employee leaving for the day
 }
 
 

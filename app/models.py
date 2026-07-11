@@ -356,7 +356,11 @@ class TimeEntry(SQLModel, table=True):
     employee_id: int = Field(foreign_key="employee.id", index=True)
     clock_in: datetime
     clock_out: Optional[datetime] = None
-    lunch_minutes: Optional[int] = None           # None=open, 0=worked through, 30, 60
+    lunch_minutes: Optional[int] = None           # None=open; else minutes deducted (0=no lunch, 30/60/custom)
+    # Clock-out asks "leaving for the day?" — True = end of shift (a 0-min lunch here
+    # means worked through), False = clocked out mid-day for another reason (stepping
+    # out / leaving early — no lunch, NOT flagged as worked-through), None = legacy.
+    end_of_day: Optional[bool] = None
     in_lat: Optional[float] = None
     in_lng: Optional[float] = None
     out_lat: Optional[float] = None

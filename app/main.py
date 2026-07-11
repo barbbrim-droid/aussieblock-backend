@@ -4120,7 +4120,10 @@ def _entry_json(en: TimeEntry, s: Session) -> dict:
         "clock_in": _iso(en.clock_in),
         "clock_out": _iso(en.clock_out),
         "lunch_minutes": en.lunch_minutes,
-        "worked_through_lunch": (en.clock_out is not None and (en.lunch_minutes or 0) == 0),
+        "end_of_day": en.end_of_day,
+        # Worked through = they said they were leaving for the day AND took no lunch.
+        # A mid-day clock-out (end_of_day False) with 0 lunch is NOT "worked through".
+        "worked_through_lunch": (en.clock_out is not None and bool(en.end_of_day) and (en.lunch_minutes or 0) == 0),
         "open": en.clock_out is None,
         "hours": _entry_hours(en),
         "in_lat": en.in_lat, "in_lng": en.in_lng,
@@ -4218,7 +4221,8 @@ class PunchIn(BaseModel):
     pin: str
     lat: Optional[float] = None
     lng: Optional[float] = None
-    lunch_minutes: Optional[int] = None   # supplied on the SECOND clock-out call (0=worked through, 30, 60)
+    lunch_minutes: Optional[int] = None   # supplied on the SECOND clock-out call (minutes to deduct; 0=none)
+    end_of_day: Optional[bool] = None     # clock-out: True=leaving for the day, False=stepping out
 
 
 @app.post("/timeclock/punch")
@@ -4256,18 +4260,20 @@ def timeclock_punch(body: PunchIn, _: User = Depends(require_timeclock), s: Sess
         return {"action": "out_pending", "employee": emp.name, "entry_id": open_e.id,
                 "since": _iso(open_e.clock_in)}
     lm = int(body.lunch_minutes)
-    if lm not in (0, 30, 60):
-        raise HTTPException(422, "lunch_minutes must be 0, 30, or 60")
+    if lm < 0 or lm > 600:
+        raise HTTPException(422, "lunch_minutes must be 0–600")
+    eod = bool(body.end_of_day) if body.end_of_day is not None else True   # default: leaving for the day
     open_e.clock_out = now
     open_e.lunch_minutes = lm
+    open_e.end_of_day = eod
     open_e.out_lat = body.lat
     open_e.out_lng = body.lng
     s.add(open_e)
     s.commit()
     s.refresh(open_e)
     return {"action": "out", "employee": emp.name, "at": _iso(now),
-            "hours": _entry_hours(open_e), "lunch_minutes": lm,
-            "worked_through_lunch": lm == 0}
+            "hours": _entry_hours(open_e), "lunch_minutes": lm, "end_of_day": eod,
+            "worked_through_lunch": eod and lm == 0}
 
 
 class TimeEntryIn(BaseModel):
@@ -4275,6 +4281,7 @@ class TimeEntryIn(BaseModel):
     clock_in: Optional[str] = None        # ISO
     clock_out: Optional[str] = None       # ISO; null keeps it open
     lunch_minutes: Optional[int] = None
+    end_of_day: Optional[bool] = None
     note: Optional[str] = None
 
 
@@ -4317,7 +4324,8 @@ def add_time_entry(body: TimeEntryIn, u: User = Depends(require_finance), s: Ses
     if not ci:
         raise HTTPException(422, "clock_in required")
     en = TimeEntry(employee_id=body.employee_id, clock_in=ci, clock_out=_parse_dt(body.clock_out),
-                   lunch_minutes=body.lunch_minutes, note=body.note, source="office", edited_by=u.email)
+                   lunch_minutes=body.lunch_minutes, end_of_day=body.end_of_day,
+                   note=body.note, source="office", edited_by=u.email)
     s.add(en)
     s.commit()
     s.refresh(en)
@@ -4338,9 +4346,11 @@ def edit_time_entry(entry_id: int, body: TimeEntryIn, u: User = Depends(require_
     if body.clock_out is not None:
         en.clock_out = _parse_dt(body.clock_out)   # "" / null -> reopen the shift
     if body.lunch_minutes is not None:
-        if int(body.lunch_minutes) not in (0, 30, 60):
-            raise HTTPException(422, "lunch_minutes must be 0, 30, or 60")
+        if int(body.lunch_minutes) < 0 or int(body.lunch_minutes) > 600:
+            raise HTTPException(422, "lunch_minutes must be 0–600")
         en.lunch_minutes = int(body.lunch_minutes)
+    if body.end_of_day is not None:
+        en.end_of_day = bool(body.end_of_day)
     if body.note is not None:
         en.note = body.note
     en.edited_by = u.email
