@@ -221,11 +221,16 @@ def _load_ticket_prefix(ref: str, seq: int) -> str:
     return f"{ref}_L{seq}"
 
 
-def _load_json(ld: Load, s: Session, ref: str) -> dict:
-    t = s.get(Truck, ld.truck_id) if ld.truck_id else None
+def _load_json(ld: Load, s: Session, ref: str, ctx=None) -> dict:
+    t = (ctx.trucks.get(ld.truck_id) if ctx else s.get(Truck, ld.truck_id)) if ld.truck_id else None
     prefix = _load_ticket_prefix(ref, ld.seq)
-    has_orig = bool(ld.batch_ticket == f"{prefix}.pdf"
-                    and glob.glob(os.path.join(_batch_ticket_dir(), f"{prefix}_original.*")))
+    # has_original is a filesystem glob per load; when a batch context is supplied
+    # (the /orders board poll) it's answered from a single pre-read set instead.
+    if ctx is not None:
+        has_orig = bool(ld.batch_ticket == f"{prefix}.pdf" and prefix in ctx.original_prefixes)
+    else:
+        has_orig = bool(ld.batch_ticket == f"{prefix}.pdf"
+                        and glob.glob(os.path.join(_batch_ticket_dir(), f"{prefix}_original.*")))
     return {
         "seq": ld.seq, "qty": ld.qty,
         "truck": t.label if t else "—", "driver": ld.driver or "—",
@@ -242,10 +247,42 @@ def _load_json(ld: Load, s: Session, ref: str) -> dict:
     }
 
 
-def _order_json(o: Order, s: Session) -> dict:
-    truck = s.get(Truck, o.truck_id) if o.truck_id else None
-    customer = s.get(Customer, o.customer_id) if o.customer_id else None
-    loads = s.exec(select(Load).where(Load.order_id == o.id).order_by(Load.seq)).all()
+class _OrderJsonCtx:
+    """Pre-computed lookups shared across a batch of _order_json() calls so the
+    /orders board poll runs a handful of queries + one directory read instead of
+    several DB gets and a filesystem glob *per order and per load*. That per-item
+    work is invisible with a few orders but scales with the whole order history —
+    which the board re-serializes on every 5-second poll — so on a growing dataset
+    (and Render's network-attached disk) it's what makes the board slow to load.
+
+    Passing ctx is optional: single-order endpoints call _order_json(o, s) with no
+    ctx and each helper falls back to its own per-item lookups, exactly as before.
+    """
+    def __init__(self, s: Session):
+        self.trucks = {t.id: t for t in s.exec(select(Truck)).all()}
+        self.customers = {c.id: c for c in s.exec(select(Customer)).all()}
+        self.loads_by_order: dict = {}
+        for ld in s.exec(select(Load).order_by(Load.seq)).all():
+            self.loads_by_order.setdefault(ld.order_id, []).append(ld)
+        # Every filename in the batch-ticket dir, read once. An "…_original.<ext>"
+        # upload is recorded by its prefix (the order ref, or "<ref>_L<seq>" for a
+        # pour load) so has_original is an in-memory set check, not a glob per item.
+        try:
+            names = os.listdir(_batch_ticket_dir())
+        except OSError:
+            names = []
+        self.original_prefixes = {n[: n.index("_original.")] for n in names if "_original." in n}
+
+
+def _order_json(o: Order, s: Session, ctx=None) -> dict:
+    if ctx is not None:
+        truck = ctx.trucks.get(o.truck_id) if o.truck_id else None
+        customer = ctx.customers.get(o.customer_id) if o.customer_id else None
+        loads = ctx.loads_by_order.get(o.id, [])
+    else:
+        truck = s.get(Truck, o.truck_id) if o.truck_id else None
+        customer = s.get(Customer, o.customer_id) if o.customer_id else None
+        loads = s.exec(select(Load).where(Load.order_id == o.id).order_by(Load.seq)).all()
     return {
         "ref": o.ref,
         "customer": customer.name if customer else None,
@@ -267,7 +304,10 @@ def _order_json(o: Order, s: Session) -> dict:
         "site_lng": o.site_lng,
         "has_batch_ticket": bool(o.batch_ticket),
         "has_print_ticket": bool(o.batch_ticket_print),
-        "has_original": _has_original(o.ref, o.batch_ticket),
+        "has_original": (
+            bool(o.batch_ticket == f"{o.ref}.pdf" and o.ref in ctx.original_prefixes)
+            if ctx is not None else _has_original(o.ref, o.batch_ticket)
+        ),
         "batch_data": json.loads(o.batch_data) if o.batch_data else None,
         "archived": bool(o.archived),
         "signed_by": o.signed_by,
@@ -299,7 +339,7 @@ def _order_json(o: Order, s: Session) -> dict:
         "loads_total": len(loads),
         "loads_done": sum(1 for ld in loads if ld.status == "complete"),
         "yards_loaded": round(sum(pricing._num(ld.qty) for ld in loads), 2),
-        "loads": [_load_json(ld, s, o.ref) for ld in loads],
+        "loads": [_load_json(ld, s, o.ref, ctx) for ld in loads],
     }
 
 
@@ -2794,7 +2834,9 @@ def list_orders(
     else:
         # Non-staff with no company → nothing (defensive; shouldn't happen).
         return []
-    return [_order_json(o, s) for o in s.exec(q).all()]
+    orders = s.exec(q).all()
+    ctx = _OrderJsonCtx(s)   # one batch of lookups for the whole list (see class docstring)
+    return [_order_json(o, s, ctx) for o in orders]
 
 
 @app.get("/orders/{ref}")
