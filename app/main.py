@@ -10,6 +10,7 @@ Every endpoint below returns JSON in the exact shape the customer app expects,
 so wiring the front-end to it later is a drop-in.
 """
 import asyncio
+import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from typing import List, Optional
 import glob
@@ -138,6 +139,36 @@ from . import mixer
 from .pump import router as pump_router
 
 
+async def keepalive_loop() -> None:
+    """Self-ping so the host never spins the service down for being idle.
+
+    Render (and similar hosts) put a web service to sleep after ~15 min with no
+    inbound traffic; the first request after that takes 30-60s to answer, which
+    was timing out the dispatch board first thing in the morning or after a quiet
+    spell. Hitting our own public /health every 10 min counts as inbound traffic,
+    so the service stays warm and there's no cold start to wait on.
+
+    The URL comes from RENDER_EXTERNAL_URL (Render sets this automatically to the
+    service's public https URL) or an explicit KEEPALIVE_URL override. When neither
+    is set — e.g. local dev — the loop does nothing, so it's a no-op off Render.
+    """
+    base = (os.environ.get("KEEPALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    if not base:
+        print("Keep-alive: no RENDER_EXTERNAL_URL/KEEPALIVE_URL set — self-ping disabled (fine for local dev).")
+        return
+    url = f"{base}/health"
+    print(f"Keep-alive: pinging {url} every 600s to stay warm.")
+    while True:
+        # Sleep first: at startup we're obviously already awake, so there's no
+        # need to ping immediately — wait out the first interval, then keep it warm.
+        await asyncio.sleep(600)   # 10 min — safely under the ~15 min idle window
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.get(url)
+        except Exception as e:   # never let a network hiccup kill the loop
+            print("Keep-alive ping error:", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -145,6 +176,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(qbo_sync_loop()),   # periodic QuickBooks A/R sync
+        asyncio.create_task(keepalive_loop()),  # self-ping so the host never spins us down
     ]
     # FluidSecure retired 2026-06-23 — fuel now comes from the on-truck ESP32
     # meters via POST /api/fuel/fill. The poll/email loops are no longer started.
