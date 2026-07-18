@@ -240,7 +240,9 @@ def _to_generator_data(p, cfg):
             dose = float(dm.group(1))
             lim, lab = _astm("MasterAir AE90", "oz", cfg)
             total = dose * yards
-            mats.append(("MasterAir AE90", "oz", 0.0, dose, total, total, lim, lab))
+            # density = SG ~1.01 x 62.4 = 63.0 lb/ft³ (typical for an air-entraining
+            # admixture — swap in the exact figure from the product's TDS/COA if needed)
+            mats.append(("MasterAir AE90", "oz", 63.0, dose, total, total, lim, lab))
             break
     # MPL materials table reflects the fiber product actually used on this ticket.
     mpl = [dict(r) for r in (cfg.get("material_mpl", []) or [])]
