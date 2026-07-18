@@ -95,13 +95,32 @@ def _path() -> str:
     return os.path.join(config.data_path("."), "price_sheet.json")
 
 
+# Admixtures seeded into every price sheet by name if missing — an idempotent
+# backfill so a rate reaches an already-saved production sheet on deploy (same
+# pattern as _ensure_materials backfilling the Material table in main.py). Doesn't
+# touch an entry the office already added/edited under this name.
+DEFAULT_ADMIXTURES = [
+    {"name": "MasterAir AE90", "rate": 5.0, "per": "yard"},
+]
+
+
 def load_sheet() -> dict:
     try:
         with open(_path(), encoding="utf-8") as fh:
             s = json.load(fh)
-        return {**DEFAULT_SHEET, **s}
     except (OSError, ValueError):
-        return dict(DEFAULT_SHEET)
+        s = {}
+    merged = {**DEFAULT_SHEET, **s}
+    have = {_norm(a.get("name")) for a in merged.get("admixtures", []) if a.get("name")}
+    missing = [a for a in DEFAULT_ADMIXTURES if _norm(a["name"]) not in have]
+    if missing:
+        merged["admixtures"] = [*merged.get("admixtures", []), *missing]
+        try:
+            with open(_path(), "w", encoding="utf-8") as fh:
+                json.dump(merged, fh, indent=2)
+        except OSError:
+            pass
+    return merged
 
 
 def save_sheet(sheet: dict) -> dict:
