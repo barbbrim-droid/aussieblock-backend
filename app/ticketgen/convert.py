@@ -129,6 +129,10 @@ def _mix_design_from(materials) -> dict:
         # catch generic retarder/stabilizer names.
         elif re.search(r"delvo|retard|stabiliz|recover|\bdtd\b", n):
             md["retarder"] = adx
+        # Air-entrainer — this plant uses "MasterAir AE90"; also catch other common
+        # air-entraining admixture names/brands.
+        elif re.search(r"masterair|air\s*entrain|\bae\s*90\b|daravair|darex\s*a|micro-?air|eucon\s*aea", n):
+            md["air"] = adx
         elif "water" in n:
             md["water"] = cell
     if cem[1] or cem[2]:
