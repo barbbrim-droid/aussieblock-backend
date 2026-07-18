@@ -223,6 +223,25 @@ def _to_generator_data(p, cfg):
             # density = SG 0.91 x 62.4 = 56.8 lb/ft³ (macro-synthetic fiber)
             mats.append((chosen_fiber, "lb", 56.8, dose, total, total, lim, lab))
             break
+    # MasterAir AE90 (air-entrainer) is added at the TRUCK, not batched at the
+    # plant, so the dornerBatch protocol never lists it either. Same treatment as
+    # fiber above: when the order carries it, add it as a materials row — dosage
+    # (oz/yd) x yards — so the certified ticket reflects it. Hand-added at spec,
+    # so set == actual (0% variance).
+    has_air_row = any(re.search(r"masterair|air\s*entrain|\bae\s*90\b|daravair|darex\s*a|micro-?air|eucon\s*aea",
+                                mm[0] or "", re.I) for mm in mats)
+    if not has_air_row and yards:
+        for part in order_adx.split(","):
+            if not re.search(r"masterair|air\s*entrain|\bae\s*90\b|daravair|darex\s*a|micro-?air|eucon\s*aea", part, re.I):
+                continue
+            dm = re.search(r"([\d.]+)\s*oz", part, re.I)
+            if not dm:
+                break
+            dose = float(dm.group(1))
+            lim, lab = _astm("MasterAir AE90", "oz", cfg)
+            total = dose * yards
+            mats.append(("MasterAir AE90", "oz", 0.0, dose, total, total, lim, lab))
+            break
     # MPL materials table reflects the fiber product actually used on this ticket.
     mpl = [dict(r) for r in (cfg.get("material_mpl", []) or [])]
     if chosen_fiber:
