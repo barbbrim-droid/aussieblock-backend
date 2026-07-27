@@ -28,7 +28,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
     _BIZ_TZ = ZoneInfo("America/Chicago")   # San Angelo is US Central
@@ -2129,7 +2129,15 @@ def _stamp_signature_pdf(pdf_path: str, signature: str, signed_by: str,
         navy, grey = (0.05, 0.07, 0.09), (0.4, 0.4, 0.46)
         signed_at = signed_at_iso or ""
         try:
-            signed_at = datetime.fromisoformat(signed_at_iso).strftime("%b %d, %Y %I:%M %p UTC")
+            # signed_at_iso is naive UTC (datetime.utcnow) — convert to the plant's
+            # local time (Central, DST-aware) so the ticket matches the tablet clock,
+            # not UTC. Falls back to UTC only if the tz database is unavailable.
+            dt = datetime.fromisoformat(signed_at_iso)
+            if _BIZ_TZ is not None:
+                dt = dt.replace(tzinfo=timezone.utc).astimezone(_BIZ_TZ)
+                signed_at = dt.strftime("%b %d, %Y %I:%M %p CT")
+            else:
+                signed_at = dt.strftime("%b %d, %Y %I:%M %p UTC")
         except (ValueError, TypeError):
             pass
         meta = f"Signed by {signed_by or '—'}"
