@@ -13,7 +13,7 @@ Endpoints added:
   DELETE /pump_pins/{pin}         — staff: remove a PIN
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +24,28 @@ from .auth import require_staff
 from .db import get_session
 
 router = APIRouter()
+
+# Safety auto-off. The relay latches ON in PumpState until a driver turns it
+# OFF. If one forgets, it must not stay energised — nor greet the next driver
+# with "Pump ON" at login. Once it's been commanded on longer than this, the
+# state reverts to OFF: the ESP32's next poll de-energises the relay and the
+# driver dashboard falls back to "Fuel station". Tune to the longest fill.
+PUMP_MAX_ON_MINUTES = 25
+
+
+def _apply_timeout(state: "PumpState", s: Session) -> "PumpState":
+    """Revert a stale ON state to OFF (persisted) once it has been on longer
+    than PUMP_MAX_ON_MINUTES. A missing commanded_at (legacy row) counts as
+    expired — fail safe to off. No-op when already off."""
+    if state is None or not state.relay_on:
+        return state
+    started = state.commanded_at
+    if started is None or datetime.utcnow() - started >= timedelta(minutes=PUMP_MAX_ON_MINUTES):
+        state.relay_on = False
+        state.commanded_by = None
+        s.add(state)
+        s.commit()
+    return state
 
 
 # ── Models (also import these in models.py or let SQLModel find them here) ──
@@ -65,6 +87,7 @@ def get_pump_state(device_id: str, s: Session = Depends(get_session)):
     state = s.get(PumpState, device_id)
     if state is None:
         return {"relay": "off"}
+    state = _apply_timeout(state, s)
     return {"relay": "on" if state.relay_on else "off"}
 
 
