@@ -45,7 +45,8 @@ def _astm(name, unit, cfg):
     elif any(k in n for k in ["cem", "slag", "portland", "binder", "fly ash", "ash"]):
         pct = t.get("cement", 1)
     elif "fl" in u or "oz" in u or any(k in n for k in ["add", "lfa", "seed", "admix",
-                                                        "plast", "retard", "reduc", "fiber", "matrix"]):
+                                                        "plast", "retard", "reduc", "fiber", "matrix",
+                                                        "masterlife", "300d"]):
         pct = t.get("admixture", 3)
     else:
         pct = t.get("aggregate", 2)   # gravel / sand / aggregate
@@ -243,6 +244,24 @@ def _to_generator_data(p, cfg):
             # density = SG ~1.01 x 62.4 = 63.0 lb/ft³ (typical for an air-entraining
             # admixture — swap in the exact figure from the product's TDS/COA if needed)
             mats.append(("MasterAir AE90", "oz", 63.0, dose, total, total, lim, lab))
+            break
+    # MasterLife 300D (specialty durability admixture) is likewise added at the
+    # truck/plant and not listed by the dornerBatch protocol. Same treatment as
+    # fiber/air above: when the order carries it, add a materials row — dose
+    # (lbs/yd) x yards — so the certified ticket reflects it. Hand-added at spec,
+    # so set == actual (0% variance). Standard dose 9.5 lb/yd when none is given.
+    has_life_row = any(re.search(r"masterlife|\b300\s*d\b", mm[0] or "", re.I) for mm in mats)
+    if not has_life_row and yards:
+        for part in order_adx.split(","):
+            if not re.search(r"masterlife|\b300\s*d\b", part, re.I):
+                continue
+            dm = re.search(r"([\d.]+)\s*lb", part, re.I)
+            dose = float(dm.group(1)) if dm else 9.5
+            lim, lab = _astm("MasterLife 300D", "lb", cfg)
+            total = dose * yards
+            # density ~ SG 1.1 x 62.4 = 68.6 lb/ft³ (typical for this admixture —
+            # swap in the exact figure from the product's TDS/COA if needed)
+            mats.append(("MasterLife 300D", "lb", 68.6, dose, total, total, lim, lab))
             break
     # MPL materials table reflects the fiber product actually used on this ticket.
     mpl = [dict(r) for r in (cfg.get("material_mpl", []) or [])]
