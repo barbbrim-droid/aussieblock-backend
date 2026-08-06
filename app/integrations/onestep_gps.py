@@ -115,23 +115,30 @@ def _stopped_seconds(truck_id) -> float:
 # GEOFENCE DWELL — how long a truck has been continuously inside the job geofence
 # (moving or parked). The clock starts on entry and resets the moment it leaves, so
 # a drive-through that exits before SITE_ARRIVAL_DWELL_SECONDS never trips On site.
-_geofence_state: dict = {}   # truck_id -> {"lat","lng","since"}  (lat/lng = the site centre it's dwelling at)
+# Keyed per (truck, site) — a truck can have work open at two different jobs at
+# once, and a shared per-truck clock would let the check against job B wipe the
+# dwell it had already banked at job A, so neither ever reached the threshold.
+_geofence_state: dict = {}   # (truck_id, site_key) -> {"since"}
+
+
+def _site_key(site) -> tuple:
+    """Round a site centre to ~10 m so the same job maps to one dwell clock."""
+    return (round(site[0], 4), round(site[1], 4))
 
 
 def _geofence_dwell_seconds(truck: Truck, site) -> float:
     """Seconds the truck has been continuously within JOB_GEOFENCE_M of `site`.
-    Returns 0 when it's outside the fence, and restarts the clock if it's now
-    dwelling around a different site centre (a new job)."""
+    Returns 0 when it's outside that fence; the clock starts on entry and is
+    dropped on exit. Each job the truck is working keeps its own clock."""
     if truck.id is None or truck.lat is None or truck.lng is None:
         return 0.0
-    within = _haversine_m(truck.lat, truck.lng, site[0], site[1]) <= config.JOB_GEOFENCE_M
-    if not within:
-        _geofence_state.pop(truck.id, None)   # left the fence -> reset
+    key = (truck.id, _site_key(site))
+    if _haversine_m(truck.lat, truck.lng, site[0], site[1]) > config.JOB_GEOFENCE_M:
+        _geofence_state.pop(key, None)        # left this job's fence -> reset
         return 0.0
-    st = _geofence_state.get(truck.id)
-    # Start (or restart) the clock on entry, or if the tracked site centre moved.
-    if st is None or _haversine_m(site[0], site[1], st["lat"], st["lng"]) > config.JOB_GEOFENCE_M:
-        _geofence_state[truck.id] = {"lat": site[0], "lng": site[1], "since": datetime.utcnow()}
+    st = _geofence_state.get(key)
+    if st is None:                            # start the clock on entry
+        _geofence_state[key] = {"since": datetime.utcnow()}
         return 0.0
     return (datetime.utcnow() - st["since"]).total_seconds()
 
@@ -395,26 +402,50 @@ async def _poll_real() -> None:
 # to the job. Geocode each site address once (cached) and set progress =
 # 1 - (truck→site)/(yard→site). No-op if GEOCODE_API_KEY isn't set.
 # ──────────────────────────────────────────────────────────────────────────
-_geo_cache: dict = {}   # address -> (lat, lng) or None (failed/looked up)
+_geo_cache: dict = {}   # address -> (lat, lng) — successful lookups only
+_geo_failed: dict = {}  # address -> when it last failed (retried after a cool-off)
+_GEO_RETRY_SECONDS = 900
+
+
+def _geo_key() -> str:
+    """The Google key to geocode with. Same resolution as the Places proxy in
+    main.py (PLACES_API_KEY -> GEOCODE_API_KEY -> the shipped web key) — arrival
+    detection is dead in the water without a site centre, so it must not depend on
+    an env var that isn't set in production."""
+    from ..main import _PLACES_KEY
+    return _PLACES_KEY
 
 
 async def _geocode(address: str):
-    if not address or not config.GEOCODE_API_KEY:
+    if not address:
         return None
     if address in _geo_cache:
         return _geo_cache[address]
+    last_fail = _geo_failed.get(address)
+    if last_fail and (datetime.utcnow() - last_fail).total_seconds() < _GEO_RETRY_SECONDS:
+        return None                 # cool off, but never give up on the address
+    key = _geo_key()
+    if not key:
+        return None
     result = None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get("https://maps.googleapis.com/maps/api/geocode/json",
-                                  params={"address": address, "key": config.GEOCODE_API_KEY})
+                                  params={"address": address, "key": key})
             j = r.json()
         if j.get("status") == "OK" and j.get("results"):
             loc = j["results"][0]["geometry"]["location"]
             result = (loc["lat"], loc["lng"])
+        else:
+            print(f"geocode: no result for {address!r} ({j.get('status')} "
+                  f"{j.get('error_message') or ''})".rstrip() + ")")
     except Exception as e:
         print("geocode error:", e)
-    _geo_cache[address] = result   # cache hits AND misses so we don't re-hammer
+    if result:
+        _geo_cache[address] = result
+        _geo_failed.pop(address, None)
+    else:
+        _geo_failed[address] = datetime.utcnow()   # retry in 15 min, don't hammer
     return result
 
 
