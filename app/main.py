@@ -1645,6 +1645,21 @@ def put_price_sheet(body: PriceSheetIn, _: User = Depends(require_staff)):
     return pricing.save_sheet(body.model_dump())
 
 
+@app.get("/mixes")
+def list_mixes(_: User = Depends(get_current_user)):
+    """Mix NAMES from the price sheet, for the order form's Mix dropdown — so a mix
+    added to the sheet is orderable without a code change. Names only: customers
+    order too, and the sheet's prices are staff-only (see /price-sheet)."""
+    seen, names = set(), []
+    for m in pricing.load_sheet().get("mixes", []):
+        name = (m.get("mix") or "").strip()
+        key = pricing._norm(name)
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return {"mixes": names}
+
+
 def _is_rts(label: str | None) -> bool:
     return bool((label or "").strip().upper().startswith("RTS"))
 
