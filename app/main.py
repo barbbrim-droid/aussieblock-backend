@@ -35,7 +35,7 @@ try:
 except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to slack below
     _BIZ_TZ = None
 
-from .db import init_db, get_session
+from .db import init_db, get_session, engine
 from .seed import seed_if_empty
 from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry
 from .auth import (
@@ -269,6 +269,7 @@ def _load_json(ld: Load, s: Session, ref: str, ctx=None) -> dict:
         "status": ld.status, "progress": round(ld.progress, 3),
         "has_batch_ticket": bool(ld.batch_ticket),
         "has_original": has_orig,
+        "batch_status": ld.batch_status,   # "branding" while the branded ticket is still rendering
         "signed_by": ld.signed_by, "signed_at": ld.signed_at,
         "water_added": ld.water_added, "has_signature": bool(ld.signature),
         # On-site clock (UTC ISO) — the frontend shows live time-on-site for this truck.
@@ -341,6 +342,7 @@ def _order_json(o: Order, s: Session, ctx=None) -> dict:
             if ctx is not None else _has_original(o.ref, o.batch_ticket)
         ),
         "batch_data": json.loads(o.batch_data) if o.batch_data else None,
+        "batch_status": o.batch_status,   # "branding" while the branded ticket is still rendering
         "archived": bool(o.archived),
         "signed_by": o.signed_by,
         "signed_at": o.signed_at,
@@ -1539,8 +1541,85 @@ def save_batch_data(ref: str, body: BatchDataIn,
     return _order_json(o, s)
 
 
+def _brand_order_ticket_bg(ref: str, raw: bytes, name: str) -> None:
+    """Convert an uploaded order ticket into the branded Aussieblock ticket.
+
+    Runs AFTER the upload response has been sent. Branding is slow (a Claude vision
+    call, retried on overload) and memory-heavy, and holding the request open for it
+    meant a worker recycle mid-conversion reached the browser as a CORS-less 502 —
+    i.e. "Failed to fetch" on an upload that had in fact been saved. Doing it here
+    means the upload is already acknowledged; the worst case is an unbranded ticket.
+    Opens its own session: the request's session is closed by the time this runs.
+    """
+    with Session(engine) as s:
+        o = s.exec(select(Order).where(Order.ref == ref)).first()
+        if not o:
+            return
+        try:
+            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            branded, parsed_bd = ticket_convert.convert(
+                raw, name, customer_name=cust, site=o.site,
+                order_mix=o.mix, order_qty=o.qty,
+                price_sheet=pricing.load_sheet(),
+                order_admixtures=o.admixtures or "", return_data=True,
+                mixer_water=o.mixer_water_gal)
+            if branded:
+                fname = f"{ref}.pdf"
+                with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
+                    fh.write(branded)
+                o.batch_ticket = fname
+            # Keep the parsed cement/slag actuals so the silo tracker draws down from
+            # the real batched weights (not the lb/yd estimate).
+            if parsed_bd and (parsed_bd.get("mix_design") or {}):
+                o.batch_data = json.dumps(parsed_bd)
+            o.batch_status = "ready" if branded else "failed"
+        except Exception as e:
+            print("batch-ticket branding failed:", e)
+            o.batch_status = "failed"
+        s.add(o); s.commit(); s.refresh(o)
+        # If this order is already signed, stamp the signature onto the new ticket.
+        _stamp_signature_on_ticket(o, s)
+
+
+def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
+    """Same as _brand_order_ticket_bg, for one load of a continuous pour."""
+    with Session(engine) as s:
+        o = s.exec(select(Order).where(Order.ref == ref)).first()
+        if not o:
+            return
+        ld = s.exec(select(Load).where(Load.order_id == o.id, Load.seq == seq)).first()
+        if not ld:
+            return
+        prefix = _load_ticket_prefix(ref, seq)
+        try:
+            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            # "Load N of M" so the customer's ticket shows which load it is.
+            total_loads = len(s.exec(select(Load).where(Load.order_id == o.id)).all())
+            label = f"{seq} of {total_loads}" if total_loads > 1 else str(seq)
+            branded, parsed_bd = ticket_convert.convert(
+                raw, name, customer_name=cust, site=o.site,
+                order_mix=o.mix, order_qty=ld.qty,
+                price_sheet=pricing.load_sheet(),
+                order_admixtures=o.admixtures or "", return_data=True, load_label=label,
+                mixer_water=o.mixer_water_gal)
+            if branded:
+                fname = f"{prefix}.pdf"
+                with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
+                    fh.write(branded)
+                ld.batch_ticket = fname
+                # Keep the parsed weights so this load draws the silos down from real
+                # ticket actuals (cement/slag + admixtures), like the order ticket does.
+                if parsed_bd:
+                    ld.batch_data = json.dumps(parsed_bd)
+            ld.batch_status = "ready" if branded else "failed"
+        except Exception as e:
+            print("load batch-ticket branding failed:", e)
+            ld.batch_status = "failed"
+        s.add(ld); s.commit()
+
+
 @app.post("/orders/{ref}/batch-ticket")
-async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
+async def upload_batch_ticket(ref: str, background: BackgroundTasks, file: UploadFile = File(...),
                               variant: str = Query("view"),
                               _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Attach a batch ticket to an order (staff only, once it's batched).
@@ -1589,32 +1668,17 @@ async def upload_batch_ticket(ref: str, file: UploadFile = File(...),
     # (memory-heavy) branding step crashes the worker.
     o.batch_ticket = orig_name
     o.batch_ticket_print = None   # branded ticket prints fine on its own
+    o.batch_status = "branding" if ticket_convert.available() else "ready"
     s.add(o); s.commit(); s.refresh(o)
 
-    # Then brand it; on success swap the branded ticket in, else the original stays.
+    # Brand it AFTER responding — see _brand_order_ticket_bg. The upload is saved and
+    # acknowledged in ~a second; the board polls and swaps in the branded ticket when
+    # it lands. Nothing slow or memory-heavy stays inside the request any more.
     if ticket_convert.available():
-        try:
-            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            branded, parsed_bd = ticket_convert.convert(
-                raw, name, customer_name=cust, site=o.site,
-                order_mix=o.mix, order_qty=o.qty,
-                price_sheet=pricing.load_sheet(),
-                order_admixtures=o.admixtures or "", return_data=True,
-                mixer_water=o.mixer_water_gal)
-            if branded:
-                fname = f"{ref}.pdf"
-                with open(os.path.join(bdir, fname), "wb") as fh:
-                    fh.write(branded)
-                o.batch_ticket = fname
-            # Keep the parsed cement/slag actuals so the silo tracker draws down from
-            # the real batched weights (not the lb/yd estimate).
-            if parsed_bd and (parsed_bd.get("mix_design") or {}):
-                o.batch_data = json.dumps(parsed_bd)
-            s.add(o); s.commit(); s.refresh(o)
-        except Exception as e:
-            print("batch-ticket branding failed:", e)
-    # If this order is already signed, stamp the signature onto the new ticket.
-    _stamp_signature_on_ticket(o, s)
+        background.add_task(_brand_order_ticket_bg, ref, raw, name)
+    else:
+        # No vision key: the original is the final ticket, so stamp it now.
+        _stamp_signature_on_ticket(o, s)
     return _order_json(o, s)
 
 
@@ -2603,7 +2667,8 @@ def batch_ticket_images(ref: str, user: User = Depends(get_current_user), s: Ses
 # load gets its own paper batch ticket. These mirror the order-level endpoints
 # but key files/records to the individual Load (AB1042_L2.pdf, …).
 @app.post("/orders/{ref}/loads/{seq}/batch-ticket")
-async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(...),
+async def upload_load_batch_ticket(ref: str, seq: int, background: BackgroundTasks,
+                                   file: UploadFile = File(...),
                                    _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Attach a batch ticket to one load of a pour (staff). Same auto-branding
     (scan/photo → branded Aussieblock ticket via Claude vision) as the order
@@ -2639,33 +2704,12 @@ async def upload_load_batch_ticket(ref: str, seq: int, file: UploadFile = File(.
 
     # Record the original NOW so the upload survives even if branding crashes.
     ld.batch_ticket = orig_name
+    ld.batch_status = "branding" if ticket_convert.available() else "ready"
     s.add(ld); s.commit(); s.refresh(ld)
 
-    # Brand it (showing this load's yards); on success swap the branded copy in.
+    # Brand it after responding — see _brand_load_ticket_bg.
     if ticket_convert.available():
-        try:
-            cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            # "Load N of M" so the customer's ticket shows which load it is.
-            total_loads = len(s.exec(select(Load).where(Load.order_id == o.id)).all())
-            label = f"{seq} of {total_loads}" if total_loads > 1 else str(seq)
-            branded, parsed_bd = ticket_convert.convert(
-                raw, name, customer_name=cust, site=o.site,
-                order_mix=o.mix, order_qty=ld.qty,
-                price_sheet=pricing.load_sheet(),
-                order_admixtures=o.admixtures or "", return_data=True, load_label=label,
-                mixer_water=o.mixer_water_gal)
-            if branded:
-                fname = f"{prefix}.pdf"
-                with open(os.path.join(bdir, fname), "wb") as fh:
-                    fh.write(branded)
-                ld.batch_ticket = fname
-                # Keep the parsed weights so this load draws the silos down from real
-                # ticket actuals (cement/slag + admixtures), like the order ticket does.
-                if parsed_bd:
-                    ld.batch_data = json.dumps(parsed_bd)
-                s.add(ld); s.commit(); s.refresh(ld)
-        except Exception as e:
-            print("load batch-ticket branding failed:", e)
+        background.add_task(_brand_load_ticket_bg, ref, seq, raw, name)
     return _order_json(o, s)
 
 

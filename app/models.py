@@ -92,6 +92,10 @@ class Order(SQLModel, table=True):
     # Light/print-friendly version of the batch ticket (the on-screen one is dark
     # to match the app; this is what the "Print" button serves).
     batch_ticket_print: Optional[str] = None
+    # Where the auto-branding of the uploaded scan has got to: "branding" while the
+    # vision conversion runs in the background, then "ready", or "failed" when the
+    # original is all we could keep. None on tickets uploaded before this existed.
+    batch_status: Optional[str] = None
     archived: bool = False                       # staff hid this completed order from the default lists
     # COD / prepay: when required, the order can't be dispatched until paid.
     prepay_required: bool = False
@@ -180,6 +184,7 @@ class Load(SQLModel, table=True):
     progress: float = 0.0
     batch_ticket: Optional[str] = None           # this load's branded ticket filename
     batch_data: Optional[str] = None             # parsed protocol weights (JSON) for the silo tracker
+    batch_status: Optional[str] = None           # "branding" | "ready" | "failed" (see Order.batch_status)
     # Per-load proof of delivery — the customer signs off each truck as it's poured.
     signed_by: Optional[str] = None              # printed name of who signed for this load
     signature: Optional[str] = None              # stored signature image filename

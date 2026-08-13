@@ -51,7 +51,8 @@ _COLUMN_MIGRATIONS = {
     # the silo tracker can draw cement/slag/admixtures down from real ticket actuals.
     "load": {"batch_data": "VARCHAR", "signed_by": "VARCHAR", "signature": "VARCHAR",
              "signed_at": "VARCHAR", "water_added": "VARCHAR",
-             "onsite_at": "DATETIME", "departed_at": "DATETIME"},
+             "onsite_at": "DATETIME", "departed_at": "DATETIME",
+             "batch_status": "VARCHAR"},
     "order": {
         "notes": "VARCHAR", "slump": "VARCHAR", "admixtures": "VARCHAR", "use_for": "VARCHAR", "project": "VARCHAR", "batch_ticket": "VARCHAR", "batch_data": "VARCHAR", "batch_ticket_print": "VARCHAR", "archived": "BOOLEAN DEFAULT 0", "driver": "VARCHAR",
         "hauler": "VARCHAR", "mileage": "FLOAT", "price_override": "FLOAT", "fiber_rate": "FLOAT",
@@ -60,6 +61,7 @@ _COLUMN_MIGRATIONS = {
         "signed_by": "VARCHAR", "signature": "VARCHAR", "signed_at": "VARCHAR", "water_added": "VARCHAR",
         "site_lat": "FLOAT", "site_lng": "FLOAT", "completed_at": "VARCHAR", "driver_notes": "VARCHAR",
         "mixer_water_gal": "FLOAT", "onsite_at": "DATETIME", "departed_at": "DATETIME",
+        "batch_status": "VARCHAR",
     },
     "mixerreading": {"order_ref": "VARCHAR"},
     "materialreceipt": {"po_id": "INTEGER"},   # links a delivery to its cement PO
