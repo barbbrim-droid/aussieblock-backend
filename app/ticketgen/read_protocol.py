@@ -323,6 +323,14 @@ def _to_generator_data(p, cfg):
             data["process"]["Water added (mixer)"] = f"{float(mw):.1f} gal"
         except (TypeError, ValueError):
             pass
+    # First-batch concrete temperature, measured by the truck's mixer temp sensor.
+    # Its own line in the process block, same as the water line. None = no reading.
+    mt = cfg.get("_mixer_temp")
+    if mt is not None:
+        try:
+            data["process"]["Concrete temp (1st batch)"] = f"{float(mt):.0f} °F"
+        except (TypeError, ValueError):
+            pass
 
     # Pricing block, from the price sheet + order context (set by convert()).
     px = cfg.get("_pricing") or {}

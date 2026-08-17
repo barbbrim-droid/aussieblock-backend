@@ -277,8 +277,9 @@ def _advance_return(s: Session, truck: Truck) -> None:
                 s.add(o)
                 # Freeze the truck's on-site mixer water onto the order at completion
                 # (same as the operator's manual Complete). Lazy import avoids a cycle.
-                from ..main import _capture_mixer_water
+                from ..main import _capture_mixer_water, _capture_mixer_temp
                 _capture_mixer_water(o, s)
+                _capture_mixer_temp(o, s)
                 print(f"Back at yard: {truck.label} -> order {o.ref} complete.")
 
 

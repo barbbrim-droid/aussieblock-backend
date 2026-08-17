@@ -110,6 +110,9 @@ class Order(SQLModel, table=True):
     # On-site water (gal) totalled from the truck's mixer sensor, frozen onto the
     # order when it's completed. Shown on the batch ticket. None = not captured yet.
     mixer_water_gal: Optional[float] = None
+    # First-batch concrete temperature (°F) from the truck's mixer temp sensor,
+    # frozen onto the order at completion. Shown on the batch ticket. None = not captured.
+    mixer_temp_f: Optional[float] = None
     completed_at: Optional[str] = None           # ISO date the order was marked complete (drives material draw-down)
     driver_notes: Optional[str] = None           # free notes the driver records on site (visible to dispatch)
     # On-site clock for standby billing: stamped when the truck reaches the job

@@ -60,7 +60,7 @@ _COLUMN_MIGRATIONS = {
         "prepay_invoice_id": "VARCHAR", "prepaid": "BOOLEAN DEFAULT 0",
         "signed_by": "VARCHAR", "signature": "VARCHAR", "signed_at": "VARCHAR", "water_added": "VARCHAR",
         "site_lat": "FLOAT", "site_lng": "FLOAT", "completed_at": "VARCHAR", "driver_notes": "VARCHAR",
-        "mixer_water_gal": "FLOAT", "onsite_at": "DATETIME", "departed_at": "DATETIME",
+        "mixer_water_gal": "FLOAT", "mixer_temp_f": "FLOAT", "onsite_at": "DATETIME", "departed_at": "DATETIME",
         "batch_status": "VARCHAR",
     },
     "mixerreading": {"order_ref": "VARCHAR"},

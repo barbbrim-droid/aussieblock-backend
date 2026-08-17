@@ -351,6 +351,7 @@ def _order_json(o: Order, s: Session, ctx=None) -> dict:
         "onsite_at": (o.onsite_at.isoformat() + "Z") if o.onsite_at else None,
         "departed_at": (o.departed_at.isoformat() + "Z") if o.departed_at else None,
         "mixer_water_gal": o.mixer_water_gal,
+        "mixer_temp_f": o.mixer_temp_f,
         "driver_notes": o.driver_notes,
         "has_signature": bool(o.signature),
         "prepay_required": o.prepay_required,
@@ -811,6 +812,35 @@ def _capture_mixer_water(o, s) -> None:
     if not rows:
         return
     o.mixer_water_gal = round(sum(r.gallons or 0 for r in rows), 1)
+    for r in rows:
+        r.order_ref = o.ref
+        s.add(r)
+    s.add(o)
+
+
+def _capture_mixer_temp(o, s) -> None:
+    """When an order is completed, freeze the FIRST-batch concrete temperature onto
+    the order — the earliest of the truck's unclaimed 'temp…' mixer readings (those
+    posted since the truck's last completed job) — and tag that truck's temp readings
+    to this order so the next job can't reuse them. Idempotent once the order has a
+    temp. Mirrors _capture_mixer_water (temp readings use load_uid 'temp%' and we take
+    the first reading, not a sum). The caller commits."""
+    if o.mixer_temp_f is not None or not o.truck_id:
+        return
+    t = s.get(Truck, o.truck_id)
+    if not t or not t.label:
+        return
+    rows = s.exec(
+        select(MixerReading).where(
+            MixerReading.truck_label == t.label,
+            MixerReading.order_ref.is_(None),
+            MixerReading.load_uid.like("temp%"),
+        ).order_by(MixerReading.received_at.asc(), MixerReading.id.asc())
+    ).all()
+    rows = [r for r in rows if r.mix_temp_f is not None]
+    if not rows:
+        return
+    o.mixer_temp_f = round(rows[0].mix_temp_f, 1)   # first batch = earliest reading
     for r in rows:
         r.order_ref = o.ref
         s.add(r)
@@ -1562,7 +1592,7 @@ def _brand_order_ticket_bg(ref: str, raw: bytes, name: str) -> None:
                 order_mix=o.mix, order_qty=o.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True,
-                mixer_water=o.mixer_water_gal)
+                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f)
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
@@ -1601,7 +1631,7 @@ def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True, load_label=label,
-                mixer_water=o.mixer_water_gal)
+                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f)
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
@@ -2958,10 +2988,21 @@ def list_trucks(
     s: Session = Depends(get_session),
 ):
     """Live truck positions (updated by the GPS poller in the background)."""
+    # Latest mixer temperature (°F) per truck, for the live truck card. One pass over
+    # recent readings that carry a temp; first hit per truck is the newest.
+    trows = s.exec(select(MixerReading)
+                   .where(MixerReading.mix_temp_f.is_not(None))
+                   .order_by(MixerReading.received_at.desc(), MixerReading.id.desc())
+                   .limit(300)).all()
+    latest_temp = {}
+    for r in trows:
+        if r.truck_label and r.truck_label not in latest_temp:
+            latest_temp[r.truck_label] = r.mix_temp_f
     return [
         {"label": t.label, "device": t.gps_device_id, "fuel_vehicle": t.fluidsecure_vehicle_id,
          "lat": t.lat, "lng": t.lng,
-         "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes}
+         "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes,
+         "mixer_temp_f": latest_temp.get(t.label)}
         for t in s.exec(select(Truck)).all()
     ]
 
@@ -4097,9 +4138,11 @@ def set_order_status(
     # cement/slag silo draw-down (usage counts orders completed since the count).
     if status == "complete" and not o.completed_at:
         o.completed_at = _business_today().isoformat()
-    # Freeze the truck's on-site mixer water onto the order at completion (for the ticket).
+    # Freeze the truck's on-site mixer water + first-batch temp onto the order at
+    # completion (for the ticket).
     if status == "complete":
         _capture_mixer_water(o, s)
+        _capture_mixer_temp(o, s)
     # When dispatch confirms On site, LEARN where the truck is parked as this job's
     # location — replaces the inaccurate address geocode and is reused next time.
     if status == "onsite" and o.truck_id:
