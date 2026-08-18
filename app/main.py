@@ -1587,12 +1587,13 @@ def _brand_order_ticket_bg(ref: str, raw: bytes, name: str) -> None:
             return
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            trk = s.get(Truck, o.truck_id).label if o.truck_id else None
             branded, parsed_bd = ticket_convert.convert(
                 raw, name, customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=o.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True,
-                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f)
+                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f, truck=trk)
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
@@ -1623,6 +1624,9 @@ def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
         prefix = _load_ticket_prefix(ref, seq)
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
+            # The truck that actually ran THIS load (not the order's), so a re-assigned
+            # load prints the right vehicle even when the plant protocol says otherwise.
+            trk = s.get(Truck, ld.truck_id).label if ld.truck_id else None
             # "Load N of M" so the customer's ticket shows which load it is.
             total_loads = len(s.exec(select(Load).where(Load.order_id == o.id)).all())
             label = f"{seq} of {total_loads}" if total_loads > 1 else str(seq)
@@ -1631,7 +1635,7 @@ def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True, load_label=label,
-                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f)
+                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f, truck=trk)
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:

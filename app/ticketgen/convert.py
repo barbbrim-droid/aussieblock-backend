@@ -163,7 +163,7 @@ def _batch_data_from(d: dict) -> dict:
 def convert(data: bytes, filename: str, customer_name: str = None, site: str = None,
             order_mix: str = None, order_qty=None, price_sheet: dict = None,
             order_admixtures: str = "", return_data: bool = False, load_label: str = None,
-            mixer_water=None, mixer_temp=None):
+            mixer_water=None, mixer_temp=None, truck: str = None):
     """Read the uploaded ticket and render the branded PDF. Returns PDF bytes, or
     (pdf_bytes, batch_data) when return_data=True — batch_data is the parsed nested
     record for a typed protocol (with cement & slag actuals), else None.
@@ -189,6 +189,12 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
                     d["order"]["customer"] = customer_name   # order is authoritative for who it's for
                 if site:
                     d["order"]["site_addr"] = site           # …and for the job-site address
+                if truck:
+                    # …and for which truck ran it. The batch plant's protocol carries
+                    # whatever vehicle was selected in dornerBatch, which is wrong when
+                    # the load is re-assigned (or the operator picked the wrong truck).
+                    # Dispatch knows what actually hauled it, so that wins.
+                    d["order"]["vrn"] = truck
                 if load_label:
                     d["order"]["load_no"] = load_label       # "3 of 6" — which load of the pour
             generator.render_ticket(d, out.name)
