@@ -352,6 +352,8 @@ def _order_json(o: Order, s: Session, ctx=None) -> dict:
         "departed_at": (o.departed_at.isoformat() + "Z") if o.departed_at else None,
         "mixer_water_gal": o.mixer_water_gal,
         "mixer_temp_f": o.mixer_temp_f,
+        "mixer_temp_enroute_f": o.mixer_temp_enroute_f,
+        "mixer_temp_pour_f": o.mixer_temp_pour_f,
         "driver_notes": o.driver_notes,
         "has_signature": bool(o.signature),
         "prepay_required": o.prepay_required,
@@ -698,6 +700,7 @@ def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staf
             raise HTTPException(409, "Assign a truck to this load first")
         ld.status = st
         ld.progress = _STATUS_PROGRESS.get(st, ld.progress)
+        _capture_transition_temp(ld, st, s)
         # Standby clock for this load/truck (per-truck billing on a pour).
         if st == "onsite":
             stamp_onsite(ld)
@@ -818,33 +821,47 @@ def _capture_mixer_water(o, s) -> None:
     s.add(o)
 
 
-def _capture_mixer_temp(o, s) -> None:
-    """When an order is completed, freeze the FIRST-batch concrete temperature onto
-    the order — the earliest of the truck's unclaimed 'temp…' mixer readings (those
-    posted since the truck's last completed job) — and tag that truck's temp readings
-    to this order so the next job can't reuse them. Idempotent once the order has a
-    temp. Mirrors _capture_mixer_water (temp readings use load_uid 'temp%' and we take
-    the first reading, not a sum). The caller commits."""
-    if o.mixer_temp_f is not None or not o.truck_id:
+def _latest_temp_f(truck_label, s, max_age_min: int = 30):
+    """Most recent mixer temp (°F) for a truck, or None. A freshness window keeps an
+    hours-old reading from being stamped as the 'now' temp. Only a truck with a live
+    temp probe (currently RTS 7329) ever returns a value."""
+    if not truck_label:
+        return None
+    r = s.exec(
+        select(MixerReading).where(
+            MixerReading.truck_label == truck_label,
+            MixerReading.mix_temp_f.is_not(None),
+        ).order_by(MixerReading.received_at.desc(), MixerReading.id.desc())
+    ).first()
+    if not r or r.mix_temp_f is None or not r.received_at:
+        return None
+    if datetime.utcnow() - r.received_at > timedelta(minutes=max_age_min):
+        return None
+    return round(r.mix_temp_f, 1)
+
+
+def _capture_transition_temp(carrier, new_status, s) -> None:
+    """TxDOT temp rise: the instant an order/load goes EN ROUTE or POURING, stamp the
+    truck's current mixer temp onto it (once per leg), so the batch ticket can show
+    en route -> pour. `carrier` is an Order OR a Load — both carry truck_id and the two
+    mixer_temp_*_f fields. No-op for any truck without a live temp reading (so today,
+    effectively RTS 7329 only). The caller commits."""
+    if new_status not in ("enroute", "pouring"):
         return
-    t = s.get(Truck, o.truck_id)
+    field = "mixer_temp_enroute_f" if new_status == "enroute" else "mixer_temp_pour_f"
+    if getattr(carrier, field, None) is not None:
+        return                                    # already captured for this leg
+    tid = getattr(carrier, "truck_id", None)
+    if not tid:
+        return
+    t = s.get(Truck, tid)
     if not t or not t.label:
         return
-    rows = s.exec(
-        select(MixerReading).where(
-            MixerReading.truck_label == t.label,
-            MixerReading.order_ref.is_(None),
-            MixerReading.load_uid.like("temp%"),
-        ).order_by(MixerReading.received_at.asc(), MixerReading.id.asc())
-    ).all()
-    rows = [r for r in rows if r.mix_temp_f is not None]
-    if not rows:
+    temp = _latest_temp_f(t.label, s)
+    if temp is None:
         return
-    o.mixer_temp_f = round(rows[0].mix_temp_f, 1)   # first batch = earliest reading
-    for r in rows:
-        r.order_ref = o.ref
-        s.add(r)
-    s.add(o)
+    setattr(carrier, field, temp)
+    s.add(carrier)
 
 
 # ── Knowledge Center ─────────────────────────────────────────────────────────
@@ -1593,7 +1610,9 @@ def _brand_order_ticket_bg(ref: str, raw: bytes, name: str) -> None:
                 order_mix=o.mix, order_qty=o.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True,
-                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f, truck=trk)
+                mixer_water=o.mixer_water_gal,
+                mixer_temp_enroute=o.mixer_temp_enroute_f, mixer_temp_pour=o.mixer_temp_pour_f,
+                truck=trk)
             if branded:
                 fname = f"{ref}.pdf"
                 with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
@@ -1635,7 +1654,9 @@ def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True, load_label=label,
-                mixer_water=o.mixer_water_gal, mixer_temp=o.mixer_temp_f, truck=trk)
+                mixer_water=o.mixer_water_gal,
+                mixer_temp_enroute=ld.mixer_temp_enroute_f, mixer_temp_pour=ld.mixer_temp_pour_f,
+                truck=trk)
             if branded:
                 fname = f"{prefix}.pdf"
                 with open(os.path.join(_batch_ticket_dir(), fname), "wb") as fh:
@@ -2438,6 +2459,7 @@ def driver_set_status(ref: str, body: DriverStatusIn, user: User = Depends(get_c
             raise HTTPException(404, "Load not found")
         ld.status = st
         ld.progress = _STATUS_PROGRESS.get(st, ld.progress)
+        _capture_transition_temp(ld, st, s)
         if st == "onsite":
             stamp_onsite(ld)
         elif st == "returning":
@@ -2447,6 +2469,7 @@ def driver_set_status(ref: str, body: DriverStatusIn, user: User = Depends(get_c
     else:
         o.status = st
         o.progress = _STATUS_PROGRESS.get(st, o.progress)
+        _capture_transition_temp(o, st, s)
         if st == "onsite":
             stamp_onsite(o)
         elif st == "returning":
@@ -4142,11 +4165,11 @@ def set_order_status(
     # cement/slag silo draw-down (usage counts orders completed since the count).
     if status == "complete" and not o.completed_at:
         o.completed_at = _business_today().isoformat()
-    # Freeze the truck's on-site mixer water + first-batch temp onto the order at
-    # completion (for the ticket).
+    # Freeze the truck's on-site mixer water onto the order at completion (for the
+    # ticket). Concrete temp is captured earlier, at the en-route/pouring transitions.
     if status == "complete":
         _capture_mixer_water(o, s)
-        _capture_mixer_temp(o, s)
+    _capture_transition_temp(o, status, s)
     # When dispatch confirms On site, LEARN where the truck is parked as this job's
     # location — replaces the inaccurate address geocode and is reused next time.
     if status == "onsite" and o.truck_id:

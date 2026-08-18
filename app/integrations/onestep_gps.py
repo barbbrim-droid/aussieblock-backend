@@ -19,6 +19,16 @@ from ..models import Truck, Order, Load
 from .. import config
 
 
+def _stamp_transition_temp(carrier, status, s):
+    """Lazy wrapper (avoids the main<->gps import cycle): stamp the mixer temp onto an
+    order/load when it goes en route or pouring, for the TxDOT temp rise on the ticket."""
+    try:
+        from ..main import _capture_transition_temp
+        _capture_transition_temp(carrier, status, s)
+    except Exception:
+        pass
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # MOCK MODE — moves each truck along a gentle loop near the plant, and nudges
 # any assigned order's progress forward so the app shows live movement.
@@ -46,6 +56,7 @@ def _mock_step() -> None:
                     stamp_onsite(o)
                 elif o.progress > 0.05:
                     o.status = "enroute"
+                    _stamp_transition_temp(o, "enroute", s)
                 s.add(o)
         s.commit()
 
@@ -79,6 +90,7 @@ def _advance_on_yard_exit(s: Session, truck: Truck) -> None:
     ).all()
     for o in orders:
         o.status = "enroute"
+        _stamp_transition_temp(o, "enroute", s)
         o.progress = max(o.progress, 0.05)   # nudge off 0 so the route bar shows movement
         s.add(o)
         print(f"Yard exit: {truck.label} left the yard ({dist:.0f}m) -> order {o.ref} now en route.")
@@ -264,6 +276,7 @@ def _advance_return(s: Session, truck: Truck) -> None:
                 print(f"Left job: {truck.label} -> order {o.ref} returning to yard.")
             elif o.status == "onsite" and (datetime.utcnow() - st["since"]).total_seconds() >= config.POUR_DELAY_SECONDS:
                 o.status = "pouring"               # on site long enough -> pouring
+                _stamp_transition_temp(o, "pouring", s)
                 s.add(o)
                 print(f"On site {config.POUR_DELAY_SECONDS // 60}m: {truck.label} -> order {o.ref} now pouring.")
         elif o.status == "returning":
@@ -277,9 +290,8 @@ def _advance_return(s: Session, truck: Truck) -> None:
                 s.add(o)
                 # Freeze the truck's on-site mixer water onto the order at completion
                 # (same as the operator's manual Complete). Lazy import avoids a cycle.
-                from ..main import _capture_mixer_water, _capture_mixer_temp
+                from ..main import _capture_mixer_water
                 _capture_mixer_water(o, s)
-                _capture_mixer_temp(o, s)
                 print(f"Back at yard: {truck.label} -> order {o.ref} complete.")
 
 
@@ -312,6 +324,7 @@ def _advance_loads_on_yard_exit(s: Session, truck: Truck) -> None:
     loads = s.exec(select(Load).where(Load.truck_id == truck.id, Load.status == "batched")).all()
     for ld in loads:
         ld.status = "enroute"
+        _stamp_transition_temp(ld, "enroute", s)
         ld.progress = max(ld.progress, 0.05)
         s.add(ld)
         print(f"Yard exit: {truck.label} left the yard -> load #{ld.seq} en route.")
@@ -346,6 +359,7 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
                 _rollup(s, ld.order_id)
             elif ld.status == "onsite" and (datetime.utcnow() - st["since"]).total_seconds() >= config.POUR_DELAY_SECONDS:
                 ld.status = "pouring"
+                _stamp_transition_temp(ld, "pouring", s)
                 s.add(ld)
                 print(f"On site {config.POUR_DELAY_SECONDS // 60}m: {truck.label} -> load #{ld.seq} pouring.")
                 _rollup(s, ld.order_id)

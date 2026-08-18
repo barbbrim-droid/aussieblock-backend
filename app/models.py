@@ -113,6 +113,11 @@ class Order(SQLModel, table=True):
     # First-batch concrete temperature (°F) from the truck's mixer temp sensor,
     # frozen onto the order at completion. Shown on the batch ticket. None = not captured.
     mixer_temp_f: Optional[float] = None
+    # TxDOT temp-rise pair: the mixer concrete temp stamped the moment the order goes
+    # EN ROUTE and again when it goes POURING, so the ticket shows the rise. Only trucks
+    # with a live temp probe (currently RTS 7329) populate these. None = not captured.
+    mixer_temp_enroute_f: Optional[float] = None
+    mixer_temp_pour_f: Optional[float] = None
     completed_at: Optional[str] = None           # ISO date the order was marked complete (drives material draw-down)
     driver_notes: Optional[str] = None           # free notes the driver records on site (visible to dispatch)
     # On-site clock for standby billing: stamped when the truck reaches the job
@@ -193,6 +198,11 @@ class Load(SQLModel, table=True):
     signature: Optional[str] = None              # stored signature image filename
     signed_at: Optional[str] = None              # ISO timestamp of the sign-off
     water_added: Optional[str] = None            # gallons of water added on site for this load
+    # TxDOT temp-rise pair for THIS load's truck (en route + pouring). Same idea as
+    # the Order fields; used on the per-load pour ticket. Only a temp-probe truck
+    # (RTS 7329) populates them.
+    mixer_temp_enroute_f: Optional[float] = None
+    mixer_temp_pour_f: Optional[float] = None
     # On-site clock for standby billing (this truck/load): stamped on -> onsite
     # and -> returning/complete.
     onsite_at: Optional[datetime] = None
