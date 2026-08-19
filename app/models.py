@@ -324,6 +324,8 @@ class MixerReading(SQLModel, table=True):
     pressure_idx_max: Optional[float] = None
     mix_temp_c: Optional[float] = None
     mix_temp_f: Optional[float] = None
+    batt_pct: Optional[float] = None                   # drum sensor battery state-of-charge %
+    batt_v: Optional[float] = None                     # drum sensor battery voltage
     fw: Optional[str] = None                           # device firmware version
     received_at: datetime = Field(default_factory=datetime.utcnow)   # when the server stored it
     # Set to an Order.ref once this reading is claimed by a completed order (so its

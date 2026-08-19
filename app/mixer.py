@@ -54,6 +54,8 @@ class MixerLoadIn(BaseModel):
     pressure_idx_max: Optional[float] = None
     mix_temp_c: Optional[float] = None
     mix_temp_f: Optional[float] = None
+    batt_pct: Optional[float] = None
+    batt_v: Optional[float] = None
     fw: Optional[str] = None
 
 
@@ -85,6 +87,8 @@ def _reading_json(r: MixerReading) -> dict:
         "pressure_idx_max": r.pressure_idx_max,
         "mix_temp_c": r.mix_temp_c,
         "mix_temp_f": r.mix_temp_f,
+        "batt_pct": r.batt_pct,
+        "batt_v": r.batt_v,
         "fw": r.fw,
         "received_at": r.received_at.isoformat() if r.received_at else None,
     }
@@ -129,6 +133,8 @@ def post_load(body: MixerLoadIn, _: None = Depends(require_device_key),
         pressure_idx_max=body.pressure_idx_max,
         mix_temp_c=body.mix_temp_c,
         mix_temp_f=body.mix_temp_f,
+        batt_pct=body.batt_pct,
+        batt_v=body.batt_v,
         fw=(body.fw or "").strip() or None,
     )
     s.add(r); s.commit(); s.refresh(r)

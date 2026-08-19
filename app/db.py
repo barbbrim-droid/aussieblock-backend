@@ -66,7 +66,7 @@ _COLUMN_MIGRATIONS = {
         "onsite_at": "DATETIME", "departed_at": "DATETIME",
         "batch_status": "VARCHAR",
     },
-    "mixerreading": {"order_ref": "VARCHAR"},
+    "mixerreading": {"order_ref": "VARCHAR", "batt_pct": "FLOAT", "batt_v": "FLOAT"},
     "materialreceipt": {"po_id": "INTEGER"},   # links a delivery to its cement PO
     "message": {"image": "VARCHAR"},           # photo attachment on a chat message
     "timeentry": {"end_of_day": "BOOLEAN"},    # clock-out: was the employee leaving for the day

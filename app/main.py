@@ -3021,15 +3021,18 @@ def list_trucks(
                    .where(MixerReading.mix_temp_f.is_not(None))
                    .order_by(MixerReading.received_at.desc(), MixerReading.id.desc())
                    .limit(300)).all()
-    latest_temp = {}
+    latest_temp, latest_batt = {}, {}
     for r in trows:
         if r.truck_label and r.truck_label not in latest_temp:
             latest_temp[r.truck_label] = r.mix_temp_f
+        if r.truck_label and r.batt_pct is not None and r.truck_label not in latest_batt:
+            latest_batt[r.truck_label] = r.batt_pct
     return [
         {"label": t.label, "device": t.gps_device_id, "fuel_vehicle": t.fluidsecure_vehicle_id,
          "lat": t.lat, "lng": t.lng,
          "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes,
-         "mixer_temp_f": latest_temp.get(t.label)}
+         "mixer_temp_f": latest_temp.get(t.label),
+         "mixer_batt_pct": latest_batt.get(t.label)}
         for t in s.exec(select(Truck)).all()
     ]
 
