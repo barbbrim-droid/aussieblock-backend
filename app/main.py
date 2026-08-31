@@ -1588,6 +1588,30 @@ def save_batch_data(ref: str, body: BatchDataIn,
     return _order_json(o, s)
 
 
+# How far the entered yardage may sit from the ticket before it's pulled into line.
+# 0 means the box always matches the ticket exactly, including normal batch overrun
+# (a ticket reading 9.002 puts 9.002 in the box). Raise it to e.g. 0.05 to keep the
+# round number the dispatcher typed when the plant only overran by a hair.
+QTY_SYNC_TOLERANCE = 0.0
+
+
+def _sync_load_qty_to_ticket(ld: Load, ref: str, ticket_qty) -> None:
+    """Hold the load's entered yardage to what its batch ticket says.
+
+    The plant's ticket is the record of what was actually batched, so it wins over
+    whatever was typed into the box. Billing sums Load.qty (see _billable_yards), so
+    this keeps the invoice on the ticket too. No-op when the ticket carries no
+    quantity — an unreadable or quantity-less ticket leaves the entered value alone
+    rather than zeroing it."""
+    if ticket_qty is None or ticket_qty <= 0:
+        return
+    was = (ld.qty or "").strip()
+    if abs((pricing._num(was) or 0) - ticket_qty) <= QTY_SYNC_TOLERANCE:
+        return
+    ld.qty = "%g" % round(ticket_qty, 3)
+    print(f"load qty synced to ticket: {ref} L{ld.seq} {was!r} -> {ld.qty!r}")
+
+
 def _brand_order_ticket_bg(ref: str, raw: bytes, name: str) -> None:
     """Convert an uploaded order ticket into the branded Aussieblock ticket.
 
@@ -1605,7 +1629,10 @@ def _brand_order_ticket_bg(ref: str, raw: bytes, name: str) -> None:
         try:
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
             trk = s.get(Truck, o.truck_id).label if o.truck_id else None
-            branded, parsed_bd = ticket_convert.convert(
+            # Order.qty is what the customer ORDERED, not what was delivered, so the
+            # ticket's quantity is deliberately not written back to it here — the
+            # delivered figure reaches billing via batch_data (see _billable_yards).
+            branded, parsed_bd, _ticket_qty = ticket_convert.convert(
                 raw, name, customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=o.qty,
                 price_sheet=pricing.load_sheet(),
@@ -1649,7 +1676,7 @@ def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
             # "Load N of M" so the customer's ticket shows which load it is.
             total_loads = len(s.exec(select(Load).where(Load.order_id == o.id)).all())
             label = f"{seq} of {total_loads}" if total_loads > 1 else str(seq)
-            branded, parsed_bd = ticket_convert.convert(
+            branded, parsed_bd, ticket_qty = ticket_convert.convert(
                 raw, name, customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=ld.qty,
                 price_sheet=pricing.load_sheet(),
@@ -1666,6 +1693,8 @@ def _brand_load_ticket_bg(ref: str, seq: int, raw: bytes, name: str) -> None:
                 # ticket actuals (cement/slag + admixtures), like the order ticket does.
                 if parsed_bd:
                     ld.batch_data = json.dumps(parsed_bd)
+                # …and hold the box to the yardage the ticket prints.
+                _sync_load_qty_to_ticket(ld, ref, ticket_qty)
             ld.batch_status = "ready" if branded else "failed"
         except Exception as e:
             print("load batch-ticket branding failed:", e)
@@ -2861,7 +2890,8 @@ def delete_load_batch_ticket(ref: str, seq: int, _: User = Depends(require_staff
 
 
 @app.post("/materials/backfill-load-tickets")
-def backfill_load_tickets(force: bool = False, _: User = Depends(require_staff),
+def backfill_load_tickets(force: bool = False, sync_qty: bool = False,
+                          _: User = Depends(require_staff),
                           s: Session = Depends(get_session)):
     """Re-parse the stored ORIGINAL of every load batch ticket that has no saved
     weights yet (e.g. uploaded before per-load batch_data existed) and fill it in,
@@ -2870,11 +2900,16 @@ def backfill_load_tickets(force: bool = False, _: User = Depends(require_staff),
     (only typed protocols carry per-material weights). Needs the vision key.
 
     `force=true` re-parses loads that ALREADY have weights too — use it after a
-    parser change (e.g. a new admixture mapping) so existing tickets pick it up."""
+    parser change (e.g. a new admixture mapping) so existing tickets pick it up.
+
+    `sync_qty=true` also pulls each load's entered yardage into line with its ticket,
+    the way a fresh upload now does. OFF by default: it rewrites the yardage on past
+    loads and so changes what those orders bill, which is not something a backfill
+    run should do behind your back. Returns the count under "qty_synced"."""
     if not ticket_convert.available():
         raise HTTPException(503, "Ticket reader unavailable (ANTHROPIC_API_KEY not set).")
     bdir = _batch_ticket_dir()
-    filled, skipped, failed = 0, 0, 0
+    filled, skipped, failed, qty_synced = 0, 0, 0, 0
     q = select(Load).where(Load.batch_ticket.is_not(None))
     if not force:
         q = q.where(Load.batch_data.is_(None))
@@ -2890,10 +2925,16 @@ def backfill_load_tickets(force: bool = False, _: User = Depends(require_staff),
             with open(origs[0], "rb") as fh:
                 raw = fh.read()
             cust = s.get(Customer, o.customer_id).name if o.customer_id else None
-            _, parsed_bd = ticket_convert.convert(
+            _, parsed_bd, ticket_qty = ticket_convert.convert(
                 raw, os.path.basename(origs[0]), customer_name=cust, site=o.site,
                 order_mix=o.mix, order_qty=ld.qty, price_sheet=pricing.load_sheet(),
                 order_admixtures=o.admixtures or "", return_data=True)
+            if sync_qty:
+                before = ld.qty
+                _sync_load_qty_to_ticket(ld, o.ref, ticket_qty)
+                if ld.qty != before:
+                    qty_synced += 1
+                    s.add(ld); s.commit()
             if parsed_bd:
                 ld.batch_data = json.dumps(parsed_bd)
                 s.add(ld); s.commit()
@@ -2903,7 +2944,7 @@ def backfill_load_tickets(force: bool = False, _: User = Depends(require_staff),
         except Exception as e:
             print(f"backfill load {o.ref} L{ld.seq} failed:", e)
             failed += 1
-    return {"filled": filled, "skipped": skipped, "failed": failed}
+    return {"filled": filled, "skipped": skipped, "failed": failed, "qty_synced": qty_synced}
 
 
 @app.post("/orders/{ref}/archive")

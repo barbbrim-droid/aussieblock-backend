@@ -160,13 +160,35 @@ def _batch_data_from(d: dict) -> dict:
     }
 
 
+def _qty_num(v):
+    """First number in a quantity string ("6.858 yd³" -> 6.858, ".5" -> 0.5). None
+    when there isn't one — a protocol with no quantity renders as "-"."""
+    if v is None:
+        return None
+    m = re.search(r"\d*\.?\d+", str(v).replace(",", ""))
+    return float(m.group()) if m else None
+
+
+def _ticket_qty(d: dict, typed: bool):
+    """The yardage the branded ticket itself reports — the plant's batched quantity
+    for a typed protocol, the delivered figure off a handwritten field ticket. This
+    is the number printed in the ticket's Quantity row, so the caller can hold the
+    dispatcher's entered yardage to it. None when the ticket carries no quantity."""
+    if typed:
+        return _qty_num((d.get("order") or {}).get("qty"))
+    return _qty_num(d.get("delivered_qty") or d.get("delivered")
+                    or d.get("ordered_qty") or d.get("ordered"))
+
+
 def convert(data: bytes, filename: str, customer_name: str = None, site: str = None,
             order_mix: str = None, order_qty=None, price_sheet: dict = None,
             order_admixtures: str = "", return_data: bool = False, load_label: str = None,
             mixer_water=None, mixer_temp_enroute=None, mixer_temp_pour=None, truck: str = None):
     """Read the uploaded ticket and render the branded PDF. Returns PDF bytes, or
-    (pdf_bytes, batch_data) when return_data=True — batch_data is the parsed nested
-    record for a typed protocol (with cement & slag actuals), else None.
+    (pdf_bytes, batch_data, ticket_qty) when return_data=True — batch_data is the
+    parsed nested record for a typed protocol (with cement & slag actuals), else
+    None, and ticket_qty is the yardage printed on the ticket as a float (None when
+    the ticket carries none).
     Raises on any failure (the caller falls back to the original)."""
     cfg = _cfg()
     # context the reader uses to compute the ticket's pricing block
@@ -180,6 +202,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     out.close()
     batch_data = None
+    ticket_qty = None
     try:
         if _is_pdf(data, filename):
             # Typed dornerBatch "Total batch protocol" — full materials/batches/water.
@@ -199,6 +222,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
                 if load_label:
                     d["order"]["load_no"] = load_label       # "3 of 6" — which load of the pour
             generator.render_ticket(d, out.name)
+            ticket_qty = _ticket_qty(d, typed=True)
             try:
                 batch_data = _batch_data_from(d)   # cement & slag actuals for the silo tracker
             except Exception as e:
@@ -217,9 +241,10 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
             if load_label:
                 d["load"] = load_label        # "3 of 6" — which load of the pour
             delivery_ticket.render_delivery_ticket(d, out.name)
+            ticket_qty = _ticket_qty(d, typed=False)
         with open(out.name, "rb") as fh:
             pdf = fh.read()
-        return (pdf, batch_data) if return_data else pdf
+        return (pdf, batch_data, ticket_qty) if return_data else pdf
     finally:
         for p in (img, out.name):
             try:
