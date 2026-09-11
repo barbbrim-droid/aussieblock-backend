@@ -247,6 +247,29 @@ def _rollup_pour(o: Order, s: Session):
     s.add(o); s.commit()
 
 
+def _complete_open_loads(o: Order, s: Session) -> int:
+    """Dispatch marking a pour Complete finishes every load still in flight.
+
+    The pour's Complete is the dispatcher's word that the job is done, so a load
+    left at En route / On site / Pouring (a driver who never tapped Delivered, or
+    a truck stage nobody stepped forward) shouldn't linger: it would keep the
+    "x/y done" count short, hide the load from per-truck delivered yards, and
+    leave the driver's tablet showing an open delivery. Each load gets the same
+    stamping a manual "complete" would (progress, standby clock stop). Loads that
+    are already complete are untouched, so their timestamps stay as recorded.
+    Returns how many loads were finished. The caller commits."""
+    n = 0
+    for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+        if ld.status == "complete":
+            continue
+        ld.status = "complete"
+        ld.progress = _STATUS_PROGRESS["complete"]
+        stamp_departed(ld)
+        s.add(ld)
+        n += 1
+    return n
+
+
 def _load_ticket_prefix(ref: str, seq: int) -> str:
     """Files for a pour load's own batch ticket live alongside the order's, but
     namespaced by load (e.g. AB1042_L2.pdf, AB1042_L2_original.jpg)."""
@@ -4218,6 +4241,8 @@ def set_order_status(
     # ticket). Concrete temp is captured earlier, at the en-route/pouring transitions.
     if status == "complete":
         _capture_mixer_water(o, s)
+        # Completing the pour completes every load still in flight (see helper).
+        _complete_open_loads(o, s)
     _capture_transition_temp(o, status, s)
     # When dispatch confirms On site, LEARN where the truck is parked as this job's
     # location — replaces the inaccurate address geocode and is reused next time.
