@@ -41,7 +41,7 @@ def init_db() -> None:
 _COLUMN_MIGRATIONS = {
     "customer": {"qbo_id": "VARCHAR", "cod": "BOOLEAN DEFAULT 0", "email": "VARCHAR"},
     "user": {"phone": "VARCHAR", "company": "VARCHAR", "project": "VARCHAR", "login_pin": "VARCHAR"},
-    "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR"},
+    "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR", "kind": "VARCHAR DEFAULT 'mixer'"},
     "fueltransaction": {"driver": "VARCHAR"},   # added after the table first shipped
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
     # Materials gained a unit, a flat cost rate ($/unit), and an inventory flag so

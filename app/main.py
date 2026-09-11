@@ -105,6 +105,7 @@ class TruckIn(BaseModel):
     gps_device_id: str | None = None
     fluidsecure_vehicle_id: str | None = None
     notes: str = ""
+    kind: str = "mixer"           # "mixer" (ready-mix) or "aggregate" (rock/sand hauler)
 
 
 class TextInviteIn(BaseModel):
@@ -415,6 +416,24 @@ _STATUS_PROGRESS = {"requested": 0.0, "scheduled": 0.0, "batched": 0.05, "onsite
 # "ongoing" is NOT here: it's a pour umbrella, trucks live on its loads.
 _STATUSES_NEEDING_TRUCK = {"batched", "enroute", "onsite", "pouring", "washout", "returning"}
 
+TRUCK_KINDS = ("mixer", "aggregate")
+
+
+def _truck_kind(t: Truck) -> str:
+    return t.kind if t.kind in TRUCK_KINDS else "mixer"
+
+
+def _concrete_truck_or_409(label: str, s: Session) -> Truck:
+    """Look a truck up by label for putting it on an order/load. An aggregate
+    hauler (rock/sand only) is refused: it can't carry concrete, and letting it
+    onto a pour would confuse the board, the batch ticket and per-truck yards."""
+    t = s.exec(select(Truck).where(Truck.label == label)).first()
+    if not t:
+        raise HTTPException(404, f"No truck labelled '{label}'")
+    if _truck_kind(t) == "aggregate":
+        raise HTTPException(409, f"{t.label} is an aggregate hauler, not a ready-mix truck — it can't be put on a concrete order")
+    return t
+
 
 @app.get("/health")
 def health():
@@ -563,9 +582,7 @@ def create_order(
     truck_id = None
     label = (body.truck or "").strip()
     if label and label not in ("—", "-"):
-        t = s.exec(select(Truck).where(Truck.label == label)).first()
-        if not t:
-            raise HTTPException(404, f"No truck labelled '{label}'")
+        t = _concrete_truck_or_409(label, s)
         truck_id = t.id
 
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
@@ -707,9 +724,7 @@ def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staf
     if body.truck is not None:
         label = body.truck.strip()
         if label and label not in ("—", "-"):
-            t = s.exec(select(Truck).where(Truck.label == label)).first()
-            if not t:
-                raise HTTPException(404, f"No truck labelled '{label}'")
+            t = _concrete_truck_or_409(label, s)
             ld.truck_id = t.id
         else:
             ld.truck_id = None
@@ -765,9 +780,7 @@ def add_load(ref: str, body: AddLoadIn, _: User = Depends(require_staff),
     truck_id = None
     label = (body.truck or "").strip()
     if label and label not in ("—", "-"):
-        t = s.exec(select(Truck).where(Truck.label == label)).first()
-        if not t:
-            raise HTTPException(404, f"No truck labelled '{label}'")
+        t = _concrete_truck_or_409(label, s)
         truck_id = t.id
     st = (body.status or "batched").strip()
     if st in _STATUSES_NEEDING_TRUCK and not truck_id:
@@ -3099,6 +3112,7 @@ def list_trucks(
         {"label": t.label, "device": t.gps_device_id, "fuel_vehicle": t.fluidsecure_vehicle_id,
          "lat": t.lat, "lng": t.lng,
          "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes,
+         "kind": _truck_kind(t),
          "mixer_temp_f": latest_temp.get(t.label),
          "mixer_batt_pct": latest_batt.get(t.label),
          "mixer_updated_at": latest_at.get(t.label)}
@@ -3117,16 +3131,20 @@ def add_truck(body: TruckIn, _: User = Depends(require_staff), s: Session = Depe
     device = (body.gps_device_id or "").strip() or None
     fuel_vehicle = (body.fluidsecure_vehicle_id or "").strip() or None
     notes = (body.notes or "").strip() or None
+    kind = (body.kind or "mixer").strip().lower()
+    if kind not in TRUCK_KINDS:
+        raise HTTPException(422, f"Truck type must be one of: {', '.join(TRUCK_KINDS)}")
     truck = s.exec(select(Truck).where(Truck.label == label)).first()
     if truck:
         truck.gps_device_id = device
         truck.fluidsecure_vehicle_id = fuel_vehicle
         truck.notes = notes
+        truck.kind = kind
         s.add(truck)
         action = "updated"
     else:
         truck = Truck(label=label, gps_device_id=device,
-                      fluidsecure_vehicle_id=fuel_vehicle, notes=notes)
+                      fluidsecure_vehicle_id=fuel_vehicle, notes=notes, kind=kind)
         s.add(truck)
         action = "added"
     s.commit(); s.refresh(truck)
@@ -3142,7 +3160,7 @@ def add_truck(body: TruckIn, _: User = Depends(require_staff), s: Session = Depe
                 changed = True
         if changed:
             s.commit()
-    return {"ok": True, "action": action, "label": truck.label, "device": truck.gps_device_id}
+    return {"ok": True, "action": action, "label": truck.label, "device": truck.gps_device_id, "kind": _truck_kind(truck)}
 
 
 @app.delete("/trucks/{label}")
@@ -4280,9 +4298,7 @@ def assign_truck(
             )
         o.truck_id = None
     else:
-        t = s.exec(select(Truck).where(Truck.label == label)).first()
-        if not t:
-            raise HTTPException(404, f"No truck labelled '{label}'")
+        t = _concrete_truck_or_409(label, s)
         o.truck_id = t.id
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)

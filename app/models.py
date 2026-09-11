@@ -52,6 +52,9 @@ class Truck(SQLModel, table=True):
     heading: Optional[float] = None             # degrees, 0 = north
     updated_at: Optional[datetime] = None
     notes: Optional[str] = None                 # free-form (driver, capacity, maintenance…)
+    # What the truck hauls: "mixer" (ready-mix, can carry concrete orders) or
+    # "aggregate" (rock/sand hauler — tracked for GPS/fuel, never put on a pour).
+    kind: str = "mixer"
     # internal: phase used only by the mock simulator
     mock_phase: float = 0.0
 
