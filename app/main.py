@@ -277,6 +277,28 @@ def _load_ticket_prefix(ref: str, seq: int) -> str:
     return f"{ref}_L{seq}"
 
 
+def _driver_phone_map(s: Session) -> dict:
+    """Driver name (lower-cased) -> phone, from the driver logins that have a phone
+    on file. Surfaced on orders/loads so a customer can call the driver bringing
+    their concrete. Two logins for the same name (email + PIN) resolve to whichever
+    has a number."""
+    out = {}
+    for u in s.exec(select(User).where(User.role == "driver")).all():
+        nm = (u.company or "").strip().lower()
+        ph = (u.phone or "").strip()
+        if nm and ph and nm not in out:
+            out[nm] = ph
+    return out
+
+
+def _driver_phone(name, s: Session, ctx=None):
+    nm = (name or "").strip().lower()
+    if not nm or nm == "—":
+        return None
+    phones = ctx.driver_phones if ctx is not None else _driver_phone_map(s)
+    return phones.get(nm)
+
+
 def _load_json(ld: Load, s: Session, ref: str, ctx=None) -> dict:
     t = (ctx.trucks.get(ld.truck_id) if ctx else s.get(Truck, ld.truck_id)) if ld.truck_id else None
     prefix = _load_ticket_prefix(ref, ld.seq)
@@ -290,6 +312,7 @@ def _load_json(ld: Load, s: Session, ref: str, ctx=None) -> dict:
     return {
         "seq": ld.seq, "qty": ld.qty,
         "truck": t.label if t else "—", "driver": ld.driver or "—",
+        "driver_phone": _driver_phone(ld.driver, s, ctx),
         "status": ld.status, "progress": round(ld.progress, 3),
         "has_batch_ticket": bool(ld.batch_ticket),
         "has_original": has_orig,
@@ -329,6 +352,7 @@ class _OrderJsonCtx:
         except OSError:
             names = []
         self.original_prefixes = {n[: n.index("_original.")] for n in names if "_original." in n}
+        self.driver_phones = _driver_phone_map(s)
 
 
 def _order_json(o: Order, s: Session, ctx=None) -> dict:
@@ -351,6 +375,7 @@ def _order_json(o: Order, s: Session, ctx=None) -> dict:
         "status": o.status,
         "truck": truck.label if truck else "—",
         "driver": o.driver or "—",
+        "driver_phone": _driver_phone(o.driver, s, ctx),
         "progress": round(o.progress, 3),
         "notes": o.notes,
         "slump": o.slump,
