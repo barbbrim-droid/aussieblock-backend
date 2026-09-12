@@ -52,38 +52,62 @@ def _downscale_to_jpeg(img_bytes: bytes, out_path: str) -> bool:
         return False
 
 
-def _to_image_file(data: bytes, filename: str) -> str:
-    """Write the ticket out as a modest JPEG (page 1 if PDF) for the vision reader,
-    using a low-memory path so big scans don't blow up the worker."""
+_MAX_PAGES = 4   # a plant protocol is 1 page, sometimes 2; cap so a stray big PDF can't run away
+
+
+def _pdf_page_to_jpeg(doc, page, out_path: str) -> None:
+    """One PDF page -> a modest JPEG at out_path, low-memory: a scanned page is
+    usually ONE big embedded image, so pull that out and downscale it cheaply
+    instead of rendering the whole page at high res; a vector/text page (small)
+    is rendered instead."""
+    done = False
+    try:
+        imgs = page.get_images(full=True)
+        if imgs:
+            xref = max(imgs, key=lambda im: (im[2] or 0) * (im[3] or 0))[0]
+            ext = doc.extract_image(xref)
+            if ext and ext.get("image"):
+                done = _downscale_to_jpeg(ext["image"], out_path)
+    except Exception:
+        done = False
+    if not done:
+        pix = page.get_pixmap(dpi=170)   # vector/text PDF (small) — readable render
+        pix.save(out_path)
+        pix = None
+
+
+def _to_image_files(data: bytes, filename: str) -> list:
+    """Write the ticket out as modest JPEGs for the vision reader — ONE PER PAGE
+    for a PDF (the batch plant sometimes prints a long protocol on two pages, and
+    reading only the first lost the rest of the material rows, the totals and the
+    process block), a single JPEG for a photo. Low-memory path so big scans don't
+    blow up the worker. Returns the temp file paths, in page order."""
     import gc
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-    tmp.close()
+    paths = []
     if _is_pdf(data, filename):
         import fitz  # PyMuPDF
         doc = fitz.open(stream=data, filetype="pdf")
-        page = doc[0]
-        # A scanned protocol is usually ONE big embedded image — pull it out and
-        # downscale it cheaply, instead of rendering the whole page at high res.
-        done = False
         try:
-            imgs = page.get_images(full=True)
-            if imgs:
-                xref = max(imgs, key=lambda im: (im[2] or 0) * (im[3] or 0))[0]
-                ext = doc.extract_image(xref)
-                if ext and ext.get("image"):
-                    done = _downscale_to_jpeg(ext["image"], tmp.name)
-        except Exception:
-            done = False
-        if not done:
-            pix = page.get_pixmap(dpi=170)   # vector/text PDF (small) — readable render
-            pix.save(tmp.name)
-            pix = None
-        doc.close()
-        doc = None
+            for i in range(min(len(doc), _MAX_PAGES)):
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_p{i + 1}.jpg")
+                tmp.close()
+                _pdf_page_to_jpeg(doc, doc[i], tmp.name)
+                paths.append(tmp.name)
+        finally:
+            doc.close()
+            doc = None
     else:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        tmp.close()
         _downscale_to_jpeg(data, tmp.name)
+        paths.append(tmp.name)
     gc.collect()
-    return tmp.name
+    return paths
+
+
+def _to_image_file(data: bytes, filename: str) -> str:
+    """Back-compat: just the first page/image."""
+    return _to_image_files(data, filename)[0]
 
 
 def _mix_design_from(materials) -> dict:
@@ -198,7 +222,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
     cfg["_mixer_water"] = mixer_water   # gal of on-site water from the mixer sensor (or None)
     cfg["_mixer_temp_enroute"] = mixer_temp_enroute   # concrete temp (°F) when the truck went en route
     cfg["_mixer_temp_pour"] = mixer_temp_pour         # concrete temp (°F) when it started pouring
-    img = _to_image_file(data, filename)
+    imgs = _to_image_files(data, filename)   # one JPEG per page
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     out.close()
     batch_data = None
@@ -207,7 +231,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
         if _is_pdf(data, filename):
             # Typed dornerBatch "Total batch protocol" — full materials/batches/water.
             from . import read_protocol, generator
-            d = read_protocol.read_protocol(img, cfg)
+            d = read_protocol.read_protocol(imgs, cfg)   # every page goes to the reader
             if isinstance(d.get("order"), dict):
                 if customer_name:
                     d["order"]["customer"] = customer_name   # order is authoritative for who it's for
@@ -230,7 +254,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
         else:
             # Handwritten field-ticket photo — summary delivery ticket.
             from . import read_ticket, delivery_ticket
-            d = read_ticket.read_ticket(img, cfg)
+            d = read_ticket.read_ticket(imgs[0], cfg)
             if customer_name:
                 d["customer"] = customer_name
             if site:
@@ -246,7 +270,7 @@ def convert(data: bytes, filename: str, customer_name: str = None, site: str = N
             pdf = fh.read()
         return (pdf, batch_data, ticket_qty) if return_data else pdf
     finally:
-        for p in (img, out.name):
+        for p in (*imgs, out.name):
             try:
                 os.remove(p)
             except OSError:

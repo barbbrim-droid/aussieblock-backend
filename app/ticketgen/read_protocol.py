@@ -93,6 +93,11 @@ PROMPT = (
     "This is a photo of a dornerBatch 'Total batch protocol' (a machine-PRINTED "
     "concrete batch report, not handwritten). Transcribe it exactly via "
     "emit_protocol.\n"
+    "- If more than one image is attached, they are the PAGES of ONE protocol in "
+    "order (the plant printed it on two sheets). Read them as a single document: "
+    "a table that starts on page 1 continues on page 2 — keep every row from both "
+    "pages, in order, and don't repeat a row that appears on both (a repeated "
+    "table header on page 2 is not a new row).\n"
     "- ORDER INFORMATION: plant, recipe no./name, customer no./name, construction "
     "site no./name and address, vehicle no./VRN, quantity, load/delivery number.\n"
     "- BATCHES: each row's protocol no., production time, batch quantity.\n"
@@ -108,20 +113,34 @@ PROMPT = (
 )
 
 
-def read_protocol(path, cfg):
+def read_protocol(paths, cfg):
+    """`paths` is one JPEG path, or a list of them — one per page of the plant's
+    printout, in order. All pages go to the reader in ONE request so a table split
+    across two sheets is read as one table."""
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        paths = [paths]
+    paths = [p for p in paths if p]
+    if not paths:
+        raise ValueError("No ticket image to read")
     key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("No Anthropic API key in config.json.")
     # Extra retries (with the SDK's exponential backoff) ride out transient
     # 529 "Overloaded" responses, which large/dense scans hit far more often.
     client = anthropic.Anthropic(api_key=key, max_retries=6)
+    content = []
+    for i, p in enumerate(paths):
+        if len(paths) > 1:
+            content.append({"type": "text", "text": f"Page {i + 1} of {len(paths)}:"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _b64(p)}})
+    content.append({"type": "text", "text": PROMPT})
     msg = client.messages.create(
         model=cfg.get("vision_model", "claude-sonnet-4-6"),
-        max_tokens=2048, tools=[TOOL],
+        # A two-page protocol carries more material/batch rows; give the tool
+        # call room so the JSON is never cut off mid-table.
+        max_tokens=4096, tools=[TOOL],
         tool_choice={"type": "tool", "name": "emit_protocol"},
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _b64(path)}},
-            {"type": "text", "text": PROMPT}]}],
+        messages=[{"role": "user", "content": content}],
     )
     out = {}
     for b in msg.content:
