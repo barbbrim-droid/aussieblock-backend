@@ -470,7 +470,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.7-profit-allocation"
+APP_VERSION = "2026-09-13.8-profit-per-order"
 
 
 @app.get("/version")
@@ -1234,7 +1234,15 @@ def _materials_summary(s: Session, frm: str = None, to: str = None) -> dict:
             for ld in loads:
                 if not order_done and ld.status != "complete":
                     continue   # load still in flight on an unfinished pour
-                done = (ld.signed_at or "")[:10] or o.completed_at or today
+                # When it was poured: the sign-off, else when the truck left the site,
+                # else the pour's completion date, else the pour's scheduled date. It
+                # must never fall to "today" — that used to pile every unsigned load of
+                # every unfinished pour in history onto today's usage.
+                done = ((ld.signed_at or "")[:10]
+                        or (ld.departed_at.date().isoformat() if ld.departed_at else "")
+                        or (o.completed_at or "")[:10]
+                        or (o.scheduled_for if re.match(r"^\d{4}-\d{2}-\d{2}$", o.scheduled_for or "") else "")
+                        or today)
                 _add(done, _actuals_from_bd(ld.batch_data), pricing._num(ld.qty), o.mix)
         elif o.status == "complete":   # single delivery (no loads)
             _add(o.completed_at or "", _ticket_actuals(o, s),
@@ -5440,6 +5448,39 @@ def profit_report_pdf(_: User = Depends(require_finance), s: Session = Depends(g
     return FileResponse(out, media_type="application/pdf", filename=f"aussieblock-margin-{label}.pdf")
 
 
+_EST_FIELD = {"cement": "cement_lb_yd", "slag": "slag_lb_yd"}
+
+
+def _order_material_lines(o: Order, s: Session, mats: list, designs: list):
+    """What one completed order consumed, per tracked material: {name: {used (in the
+    material's unit), cost, delivery, estimated, unit, cost_rate, haul_rate}} plus
+    whether the mix is unmapped (no cement/slag weights AND no mix design). Actuals
+    come from the order's batch ticket(s) — the order's own and every load's — with
+    the mix-design lb/yd estimate standing in for cement/slag when no ticket has
+    weights, exactly as the Materials tracker does."""
+    actuals = _ticket_actuals(o, s)
+    yds = pricing._num(_billable_yards(o, s))
+    design = _design_for(o.mix, designs) if yds > 0 else None
+    out = {}
+    for m in mats:
+        key, unit, to_ton = _MATERIAL_SPEC.get(m.name, ("", m.unit or "ton", (m.unit or "ton") == "ton"))
+        if not key:
+            continue
+        a = pricing._num(actuals.get(key))
+        est = (yds * (getattr(design, _EST_FIELD[key]) or 0)
+               if (not a and m.track_inventory and key in _EST_FIELD and design and yds > 0) else 0.0)
+        native = a + est
+        if native <= 0:
+            continue
+        used = native * (TONS_PER_LB if to_ton else 1.0)
+        out[m.name] = {"unit": unit, "cost_rate": m.cost_rate or 0.0, "haul_rate": (m.haul_rate or 0.0) if unit == "ton" else 0.0,
+                       "used": used, "cost": used * (m.cost_rate or 0.0),
+                       "delivery": used * (m.haul_rate or 0.0) if unit == "ton" else 0.0,
+                       "estimated": est > 0}
+    is_unmapped = yds > 0 and not actuals.get("cement") and not actuals.get("slag") and design is None
+    return out, is_unmapped
+
+
 def _profit_data(s: Session, frm, to) -> dict:
     """Build the profit payload (see profit_summary). Shared by the JSON route and
     the one-page PDF report so both always agree to the cent."""
@@ -5511,26 +5552,40 @@ def _profit_data(s: Session, frm, to) -> dict:
         d["orders"] += 1; d["yards"] += yards; d["revenue"] += revenue; d["hauling"] += hauling
     s.commit()   # persist any mileage cached by pricing
 
-    # Materials: the tracker's usage cost for the window — what was BATCHED into the
-    # yards poured — plus, for the aggregates, the delivery of those same tons
-    # (batched tons × the material's $/ton haul rate). Costing delivery this way
-    # ties it to the concrete poured, not to the day the rock happened to arrive.
-    def _mat_costs(summary: dict):
-        mat = round(pricing._num(summary.get("total_cost")), 2)
-        deliv = 0.0
-        for m in summary.get("materials", []):
-            if (m.get("unit") == "ton") and pricing._num(m.get("haul_rate")) > 0:
-                deliv += pricing._num(m.get("used_amount")) * pricing._num(m.get("haul_rate"))
-        return mat, round(deliv, 2)
-
-    mats = _materials_summary(s, frm=frm, to=to)
-    material_cost, agg_delivery = _mat_costs(mats)
+    # Materials: costed on EXACTLY the orders that make up the revenue — for each
+    # completed order in the window, the tons batched into it (ticket actuals across
+    # the order and its loads; mix-design estimate for cement/slag when a ticket has
+    # no weights) × $/unit at the pit, plus for the aggregates the delivery of those
+    # same tons (× the material's $/ton haul rate). Keying materials off the same
+    # orders as revenue is what keeps a day's margin honest: nothing poured on
+    # another day, and no in-flight pour, can land in this window.
+    mats_all = sorted(s.exec(select(Material)).all(),
+                      key=lambda m: next((i for i, d in enumerate(DEFAULT_MATERIALS) if d["name"] == m.name), 99))
+    designs = s.exec(select(MixDesign)).all()
+    mat_tot: dict = {}    # name -> {used, cost, delivery, estimated, unit, cost_rate, haul_rate}
+    unmapped: dict = {}
+    for r in rows:
+        o = next((x for x in orders if x.ref == r["ref"]), None)
+        if o is None:
+            continue
+        lines, is_unmapped = _order_material_lines(o, s, mats_all, designs)
+        d = days.get(_pour_date(o))
+        for name, ln in lines.items():
+            t = mat_tot.setdefault(name, {"name": name, "unit": ln["unit"], "cost_rate": ln["cost_rate"], "haul_rate": ln["haul_rate"],
+                                          "used": 0.0, "cost": 0.0, "delivery": 0.0, "estimated": False})
+            t["used"] += ln["used"]; t["cost"] += ln["cost"]; t["delivery"] += ln["delivery"]; t["estimated"] |= ln["estimated"]
+            if d is not None:
+                d["materials"] += ln["cost"]; d["aggregate_delivery"] += ln["delivery"]
+        r["materials"] = round(sum(ln["cost"] for ln in lines.values()), 2)
+        r["aggregate_delivery"] = round(sum(ln["delivery"] for ln in lines.values()), 2)
+        if is_unmapped:
+            unmapped[o.mix] = round(unmapped.get(o.mix, 0.0) + r["yards"], 2)
+    material_cost = round(sum(t["cost"] for t in mat_tot.values()), 2)
+    agg_delivery = round(sum(t["delivery"] for t in mat_tot.values()), 2)
+    for dk in days:
+        days[dk]["materials"] = round(days[dk]["materials"], 2)
+        days[dk]["aggregate_delivery"] = round(days[dk]["aggregate_delivery"], 2)
     day_keys = sorted(k for k in days if k != "—")
-    if len(day_keys) > 1:
-        for dk in day_keys:   # one scan per day that had orders — bounded by the window
-            days[dk]["materials"], days[dk]["aggregate_delivery"] = _mat_costs(_materials_summary(s, frm=dk, to=dk))
-    elif len(day_keys) == 1:
-        days[day_keys[0]]["materials"], days[day_keys[0]]["aggregate_delivery"] = material_cost, agg_delivery
 
     yards_total = round(sum(r["yards"] for r in rows), 2)
 
@@ -5598,11 +5653,9 @@ def _profit_data(s: Session, frm, to) -> dict:
         },
         "days": day_rows,
         "orders": rows,
-        "materials": [{"name": m["name"], "unit": m["unit"], "used": m["used_amount"], "cost_rate": m["cost_rate"],
-                       "cost": m["cost"], "estimated": m.get("used_estimate_amount", 0) > 0,
-                       "haul_rate": pricing._num(m.get("haul_rate")) if m.get("unit") == "ton" else 0.0,
-                       "delivery": round(pricing._num(m.get("used_amount")) * pricing._num(m.get("haul_rate")), 2) if m.get("unit") == "ton" else 0.0}
-                      for m in mats.get("materials", []) if pricing._num(m.get("used_amount")) > 0 or pricing._num(m.get("cost")) > 0],
+        "materials": [{**t, "used": round(t["used"], 2), "cost": round(t["cost"], 2), "delivery": round(t["delivery"], 2)}
+                      for t in mat_tot.values() if t["used"] > 0],
         "haulers": hauler_rows,
-        "notes": {"missing_mileage": missing_mileage, "unmapped_mixes": mats.get("unmapped_mixes", [])},
+        "notes": {"missing_mileage": missing_mileage,
+                  "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())]},
     }
