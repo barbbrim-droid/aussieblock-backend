@@ -468,7 +468,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.2-weight-ticket-pdf"
+APP_VERSION = "2026-09-13.3-profit"
 
 
 @app.get("/version")
@@ -5310,3 +5310,182 @@ def delete_weight_ticket_photo(ticket_id: int, name: str, background: Background
     if t:
         background.add_task(_wt_build_pdf, t.id)
     return _wt_json(t) if t else {"ok": True}
+
+
+# ── Profit (P&L by poured yardage) ───────────────────────────────────────────
+# Net profit for a day or date range, built from what the app already knows:
+#   revenue  = what customers are billed (pre-tax subtotal) for the ACTUAL yards
+#              poured on completed orders in the window — same pricing as Costs;
+#   costs    = materials batched (Materials tracker: ticket actuals × $/unit),
+#              hauling paid out to third-party haulers (Costs "to hauler"),
+#              fuel (fills × $/gal), and aggregate haul-in from weight tickets.
+# Orders are placed in the window by their scheduled (pour) date, like the Costs
+# screen; materials and fuel by the date they were used/filled.
+
+def _fuel_cost_in_window(s: Session, sheet: dict, frm: str, to: str) -> dict:
+    """Fuel fills in the window × the sheet's $/gal, by day and in total."""
+    by_day, total_gal, total_cost = {}, 0.0, 0.0
+    for t in s.exec(select(FuelTransaction)).all():
+        d = t.occurred_at.date().isoformat() if t.occurred_at else ""
+        if not d or (frm and d < frm) or (to and d > to):
+            continue
+        gal = t.gallons or 0.0
+        cost = gal * pricing.fuel_price_for(sheet, t.fuel_type)
+        by_day[d] = round(by_day.get(d, 0.0) + cost, 2)
+        total_gal += gal; total_cost += cost
+    return {"gallons": round(total_gal, 1), "cost": round(total_cost, 2), "by_day": by_day}
+
+
+@app.get("/profit")
+def profit_summary(_: User = Depends(require_finance), s: Session = Depends(get_session),
+                   frm: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None)):
+    """Net profit for a date window (yyyy-mm-dd, inclusive; blank = all time).
+    Returns totals, a per-day breakdown, the orders that make up the revenue, the
+    materials that make up the material cost, and hauling by hauler."""
+    frm = (frm or "").strip() or None
+    to = (to or "").strip() or None
+    for v in (frm, to):
+        if v:
+            try:
+                datetime.strptime(v, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(422, "Dates must be YYYY-MM-DD.")
+    sheet = pricing.load_sheet()
+    key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
+
+    # Place each completed order on its pour date. Normally scheduled_for (an ISO
+    # date, as the Costs screen uses); a legacy "today"/"tomorrow" value falls back
+    # to the day it was completed.
+    def _pour_date(o: Order) -> str:
+        d = (o.scheduled_for or "").strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+            return d
+        return (o.completed_at or "")[:10] or _business_today().isoformat()
+    orders = [o for o in s.exec(select(Order).where(Order.status == "complete")).all()
+              if (not frm or _pour_date(o) >= frm) and (not to or _pour_date(o) <= to)]
+
+    # Prefetch any missing road mileages in parallel (same trick as the Costs bulk
+    # pricing) so haul figures are right the first time this is opened.
+    need = sorted({o.site for o in orders if o.mileage is None and o.site})
+    if need:
+        miles = {}
+        with ThreadPoolExecutor(max_workers=min(16, len(need))) as ex:
+            futs = {ex.submit(pricing.road_miles, site): site for site in need}
+            try:
+                for fut in as_completed(futs, timeout=12):
+                    try:
+                        miles[futs[fut]] = fut.result()
+                    except Exception:   # noqa: BLE001
+                        pass
+            except TimeoutError:
+                pass
+        changed = False
+        for o in orders:
+            if o.mileage is None and miles.get(o.site) is not None:
+                o.mileage = miles[o.site]; s.add(o); changed = True
+        if changed:
+            s.commit()
+
+    cust_names = {c.id: c.name for c in s.exec(select(Customer)).all()}
+    days: dict = {}
+    haulers: dict = {}
+    rows = []
+    missing_mileage = 0
+    for o in orders:
+        try:
+            p = _pricing_for(o, s, sheet, key_name, compute_miles=False)
+        except Exception as e:   # noqa: BLE001 — one bad order must not blank the whole report
+            print(f"profit: pricing {o.ref} failed:", e)
+            continue
+        cp = p.get("customer") or {}
+        yards = pricing._num(p.get("billed_qty"))
+        revenue = round(pricing._num(cp.get("subtotal")), 2)      # pre-tax: sales tax is passed through
+        tax = round(pricing._num(cp.get("tax")), 2)
+        hauling = round(sum(pricing._num(e.get("total")) for e in (p.get("hauler_split") or {}).values()), 2)
+        if o.mileage is None and o.site:
+            missing_mileage += 1
+        for h, e in (p.get("hauler_split") or {}).items():
+            b = haulers.setdefault(h, {"hauler": h, "yards": 0.0, "total": 0.0, "orders": 0})
+            b["yards"] += pricing._num(e.get("yards")); b["total"] += pricing._num(e.get("total")); b["orders"] += 1
+        cust = cust_names.get(o.customer_id, "")
+        rows.append({"ref": o.ref, "when": _pour_date(o), "customer": cust, "site": o.site, "mix": o.mix,
+                     "project": o.project, "yards": yards, "revenue": revenue, "tax": tax, "hauling": hauling,
+                     "unit_price": pricing._num(cp.get("unit_price")), "is_pour": bool(o.qty and pricing._num(o.qty) > 10),
+                     "self_haul": bool((p.get("delivery") or {}).get("self_haul"))})
+        d = days.setdefault(_pour_date(o), {"date": _pour_date(o), "orders": 0, "yards": 0.0,
+                                                     "revenue": 0.0, "hauling": 0.0, "materials": 0.0,
+                                                     "fuel": 0.0, "aggregate_haul": 0.0})
+        d["orders"] += 1; d["yards"] += yards; d["revenue"] += revenue; d["hauling"] += hauling
+    s.commit()   # persist any mileage cached by pricing
+
+    # Materials: the tracker's usage cost for the window, then per day (only the
+    # days that had orders — each call scans every order, so keep it bounded).
+    mats = _materials_summary(s, frm=frm, to=to)
+    material_cost = round(pricing._num(mats.get("total_cost")), 2)
+    day_keys = sorted(k for k in days if k != "—")
+    if len(day_keys) > 1:
+        for dk in day_keys:
+            days[dk]["materials"] = round(pricing._num(_materials_summary(s, frm=dk, to=dk).get("total_cost")), 2)
+    elif len(day_keys) == 1:
+        days[day_keys[0]]["materials"] = material_cost
+
+    fuel = _fuel_cost_in_window(s, sheet, frm, to)
+    for dk, c in fuel["by_day"].items():
+        if dk in days:
+            days[dk]["fuel"] = c
+
+    # Aggregate weight tickets in the window: haul-in is a cost of its own; the
+    # material $ is reported for reference only — the Materials tracker already
+    # costs gravel/sand as it's batched, so adding it here would double count.
+    wq = select(WeightTicket)
+    if frm:
+        wq = wq.where(WeightTicket.ticket_date >= frm)
+    if to:
+        wq = wq.where(WeightTicket.ticket_date <= to)
+    agg_haul = agg_material = agg_tons = 0.0
+    for t in s.exec(wq).all():
+        mc, hc = _wt_costs(t)
+        agg_haul += hc; agg_material += mc; agg_tons += pricing._num(t.net_tons)
+        if t.ticket_date in days:
+            days[t.ticket_date]["aggregate_haul"] = round(days[t.ticket_date]["aggregate_haul"] + hc, 2)
+
+    yards_total = round(sum(r["yards"] for r in rows), 2)
+    revenue_total = round(sum(r["revenue"] for r in rows), 2)
+    hauling_total = round(sum(r["hauling"] for r in rows), 2)
+    fuel_total = fuel["cost"]
+    agg_haul = round(agg_haul, 2)
+    costs_total = round(material_cost + hauling_total + fuel_total + agg_haul, 2)
+    profit = round(revenue_total - costs_total, 2)
+
+    day_rows = []
+    for dk in sorted(days, reverse=True):
+        d = days[dk]
+        d["yards"] = round(d["yards"], 2); d["revenue"] = round(d["revenue"], 2); d["hauling"] = round(d["hauling"], 2)
+        d["costs"] = round(d["materials"] + d["hauling"] + d["fuel"] + d["aggregate_haul"], 2)
+        d["profit"] = round(d["revenue"] - d["costs"], 2)
+        day_rows.append(d)
+    rows.sort(key=lambda r: (r["when"] or "", r["ref"]), reverse=True)
+    hauler_rows = sorted(({**b, "yards": round(b["yards"], 2), "total": round(b["total"], 2)} for b in haulers.values()),
+                         key=lambda b: -b["total"])
+    return {
+        "from": frm, "to": to,
+        "totals": {
+            "orders": len(rows), "yards": yards_total,
+            "revenue": revenue_total, "tax_collected": round(sum(r["tax"] for r in rows), 2),
+            "materials": material_cost, "hauling": hauling_total, "fuel": fuel_total,
+            "fuel_gallons": fuel["gallons"], "aggregate_haul": agg_haul,
+            "aggregate_material": round(agg_material, 2), "aggregate_tons": round(agg_tons, 2),
+            "costs": costs_total, "profit": profit,
+            "margin_pct": round(profit / revenue_total * 100.0, 1) if revenue_total else None,
+            "per_yd": {"revenue": round(revenue_total / yards_total, 2) if yards_total else None,
+                       "costs": round(costs_total / yards_total, 2) if yards_total else None,
+                       "profit": round(profit / yards_total, 2) if yards_total else None},
+        },
+        "days": day_rows,
+        "orders": rows,
+        "materials": [{"name": m["name"], "unit": m["unit"], "used": m["used_amount"], "cost_rate": m["cost_rate"],
+                       "cost": m["cost"], "estimated": m.get("used_estimate_amount", 0) > 0}
+                      for m in mats.get("materials", []) if pricing._num(m.get("used_amount")) > 0 or pricing._num(m.get("cost")) > 0],
+        "haulers": hauler_rows,
+        "notes": {"missing_mileage": missing_mileage, "unmapped_mixes": mats.get("unmapped_mixes", [])},
+    }
