@@ -55,6 +55,14 @@ class Truck(SQLModel, table=True):
     # What the truck hauls: "mixer" (ready-mix, can carry concrete orders) or
     # "aggregate" (rock/sand hauler — tracked for GPS/fuel, never put on a pour).
     kind: str = "mixer"
+    # GPS mileage. The office enters the dash reading once (odo_baseline, at
+    # odo_baseline_at); from then on the poller adds up the miles the tracker sees
+    # (gps_miles), so the app's odometer = baseline + gps_miles. Pre-fills the
+    # driver's fuel-fill mileage and checks what they type against it.
+    odo_baseline: Optional[float] = None
+    odo_baseline_at: Optional[datetime] = None
+    gps_miles: float = 0.0
+    gps_odometer_reported: Optional[float] = None   # an odometer figure the GPS platform itself reports, if any (raw, units as sent)
     # internal: phase used only by the mock simulator
     mock_phase: float = 0.0
 
@@ -224,6 +232,12 @@ class FuelTransaction(SQLModel, table=True):
     gallons: Optional[float] = None                     # quantity dispensed
     fuel_type: Optional[str] = None                     # e.g. "Diesel", "DEF"
     odometer: Optional[float] = None                    # odometer/hours entered at the pump
+    odometer_gps: Optional[float] = None                # the truck's GPS odometer at the time of the fill (baseline + GPS miles)
+    # Sanity check on the typed odometer: None = fine; "out_of_sequence" = lower than
+    # the previous fill; "jump" = implausibly far past the previous fill; "off_gps" =
+    # more than 5% away from the GPS odometer. Set when logged/edited and by the
+    # startup re-check, so old bad entries surface on the Fuel screen.
+    odometer_flag: Optional[str] = None
     driver: Optional[str] = None                        # driver/operator name on the transaction
     pin: Optional[str] = None                           # operator PIN on the transaction (if reported)
     occurred_at: Optional[datetime] = None              # when the fill happened (FluidSecure time)

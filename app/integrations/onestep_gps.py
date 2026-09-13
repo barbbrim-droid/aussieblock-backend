@@ -41,8 +41,11 @@ def _mock_step() -> None:
             # small circular path ~1.5km around the plant
             r = 0.015
             angle = t.mock_phase * 2 * math.pi
-            t.lat = config.PLANT_LAT + r * math.sin(angle)
-            t.lng = config.PLANT_LNG + r * math.cos(angle)
+            new_lat = config.PLANT_LAT + r * math.sin(angle)
+            new_lng = config.PLANT_LNG + r * math.cos(angle)
+            accumulate_gps_miles(t, new_lat, new_lng)   # mock trucks rack up GPS miles too
+            t.lat = new_lat
+            t.lng = new_lng
             t.heading = (math.degrees(angle) + 90) % 360
             t.updated_at = datetime.utcnow()
             s.add(t)
@@ -378,6 +381,36 @@ def _advance_loads_return(s: Session, truck: Truck) -> None:
 # LIVE MODE — calls the One Step GPS API. The exact endpoint/response shape
 # may differ slightly from what's below; adjust to match the docs they send.
 # ──────────────────────────────────────────────────────────────────────────
+_M_PER_MILE = 1609.344
+# Keys the GPS platform might use for a device-reported odometer, checked in order
+# on the point and its detail block. Stored raw; /diag/gps shows what came through.
+_ODO_KEYS = ("odometer", "odometer_miles", "device_odometer", "mileage", "total_mileage", "odo")
+last_points: dict = {}   # device_id -> the keys seen on its latest point (for /diag/gps)
+
+
+def accumulate_gps_miles(truck: Truck, lat: float, lng: float) -> None:
+    """Add the distance from the truck's previous position to this one onto its
+    GPS odometer. Tiny moves (< ~25 ft) are GPS jitter while parked and skipped;
+    a hop over 5 miles between two polls is a glitch (or a long outage) and is
+    skipped too, so a bad point can't add phantom miles."""
+    if truck.lat is None or truck.lng is None:
+        return
+    miles = _haversine_m(truck.lat, truck.lng, lat, lng) / _M_PER_MILE
+    if 0.005 < miles < 5.0:
+        truck.gps_miles = round((truck.gps_miles or 0.0) + miles, 3)
+
+
+def _point_odometer(point: dict):
+    for src in (point, point.get("device_point_detail") or {}, point.get("detail") or {}):
+        if not isinstance(src, dict):
+            continue
+        for k in _ODO_KEYS:
+            v = src.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                return float(v)
+    return None
+
+
 async def _poll_real() -> None:
     url = f"{config.ONESTEP_API_BASE}/device"
     params = {"latest_point": "true", "api-key": config.ONESTEP_API_KEY}
@@ -399,6 +432,14 @@ async def _poll_real() -> None:
                 continue
             truck = s.exec(select(Truck).where(Truck.gps_device_id == dev_id)).first()
             if truck:
+                try:
+                    last_points[dev_id] = sorted(k for k in point.keys() if isinstance(k, str))[:60]
+                except Exception:   # noqa: BLE001
+                    pass
+                accumulate_gps_miles(truck, float(lat), float(lng))   # before the position is overwritten
+                rep = _point_odometer(point)
+                if rep is not None:
+                    truck.gps_odometer_reported = rep
                 truck.lat = float(lat)
                 truck.lng = float(lng)
                 truck.heading = float(heading)

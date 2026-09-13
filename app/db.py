@@ -41,8 +41,10 @@ def init_db() -> None:
 _COLUMN_MIGRATIONS = {
     "customer": {"qbo_id": "VARCHAR", "cod": "BOOLEAN DEFAULT 0", "email": "VARCHAR"},
     "user": {"phone": "VARCHAR", "company": "VARCHAR", "project": "VARCHAR", "login_pin": "VARCHAR"},
-    "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR", "kind": "VARCHAR DEFAULT 'mixer'"},
-    "fueltransaction": {"driver": "VARCHAR"},   # added after the table first shipped
+    "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR", "kind": "VARCHAR DEFAULT 'mixer'",
+              "odo_baseline": "FLOAT", "odo_baseline_at": "DATETIME", "gps_miles": "FLOAT DEFAULT 0",
+              "gps_odometer_reported": "FLOAT"},   # GPS odometer (baseline + miles seen by the tracker)
+    "fueltransaction": {"driver": "VARCHAR", "odometer_gps": "FLOAT", "odometer_flag": "VARCHAR"},
     "invoice": {"qbo_invoice_id": "VARCHAR"},   # for the "Make a payment" link
     # Materials gained a unit, a flat cost rate ($/unit), and an inventory flag so
     # gravel/sand/admixtures can be tracked by actual usage + cost without a silo.
