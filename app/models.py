@@ -251,6 +251,9 @@ class Material(SQLModel, table=True):
     name: str = Field(index=True, unique=True)   # "Portland" | "Slag" | "Gravel" | ...
     unit: str = "ton"                            # display/cost unit: "ton" | "lb" | "oz"
     cost_rate: float = 0.0                       # $ per unit, for usage-based cost (editable)
+    # Default hauling rate ($/ton) paid to bring this material in from the pit —
+    # pre-fills the haul cost on an aggregate weight ticket (staff can override per ticket).
+    haul_rate: float = 0.0
     track_inventory: bool = True                 # True = silo with on-hand draw-down; False = usage + cost only
     capacity_tons: float = 0.0                   # silo capacity (tons) — for the fill gauge
     reorder_tons: float = 0.0                    # alert when on-hand falls to/below this
@@ -404,3 +407,36 @@ class PlantChecklist(SQLModel, table=True):
     submitted_at: datetime = Field(default_factory=datetime.utcnow)
     issues: int = 0                                                 # count of items flagged "issue"
     data: str = ""                                                  # JSON: {ambient_temp, weather, items, readings, notes}
+
+
+class WeightTicket(SQLModel, table=True):
+    """One quarry/pit scale (weight) ticket for a load of aggregate (rock, sand…)
+    hauled in by one of our aggregate trucks. The driver snaps the ticket on the
+    tablet as they pick up; the office reviews it on the dispatch board. Two costs
+    roll up from it: the AGGREGATE cost (net tons × $/ton paid to the pit) and the
+    HAULING cost (net tons × $/ton haul rate). Rates are snapshotted onto the ticket
+    when it's logged (from the material's defaults) so past tickets don't move when
+    a rate changes; staff can correct any figure on review. Photos/PDFs live on the
+    persistent disk under weight_tickets/{id}/."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ticket_date: str                                          # ISO date the load was weighed
+    material_id: Optional[int] = Field(default=None, foreign_key="material.id", index=True)
+    material: Optional[str] = None                            # material name as logged ("Gravel", "Sand", or a pit product)
+    supplier: Optional[str] = None                            # pit / quarry the load came from
+    ticket_no: Optional[str] = None                           # scale ticket number
+    truck_id: Optional[int] = Field(default=None, foreign_key="truck.id")
+    truck_label: Optional[str] = None                         # truck as logged (kept even if the truck row goes)
+    driver: Optional[str] = None                              # driver name (User.company for a driver login)
+    gross_lb: Optional[float] = None                          # scale gross weight (lb), if on the ticket
+    tare_lb: Optional[float] = None                           # scale tare weight (lb), if on the ticket
+    net_tons: Optional[float] = None                          # net weight in tons — what the costs use
+    material_rate: Optional[float] = None                     # $/ton paid to the pit (snapshot)
+    haul_rate: Optional[float] = None                         # $/ton hauling (snapshot)
+    notes: Optional[str] = None
+    uploaded_by: Optional[str] = None                         # login email/name of whoever logged it
+    source: str = "driver"                                    # "driver" (tablet) | "staff" (board)
+    reviewed: bool = False                                    # office has checked the figures against the photo
+    # Auto-read of the ticket photo (Claude vision): "pending" | "done" | "skipped" | "failed".
+    read_status: Optional[str] = None
+    read_data: Optional[str] = None                           # JSON of what the reader saw (for audit)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
