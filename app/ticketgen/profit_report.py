@@ -183,11 +183,13 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
     row(["", "Amount", "Per CY", "% of rev", ""], cw, ca, bold=True, color=GREY, size=6.5, h=4)
     per_cy = (lambda v: _money(float(v or 0) / yards) if yards else "—")
     row(["Revenue — yards poured × price (pre-tax)", _money(revenue), per_cy(revenue), "100%" if revenue else "—", ""], cw, ca, bold=True, color=GREEN)
+    wt = T.get("weight_tickets") or {}
+    ff = T.get("fuel_fills") or {}
     lines = [
-        ("Materials batched (ticket actuals × $/unit)", T.get("materials")),
+        ("Materials batched (ticket actuals × $/unit at the pit)", T.get("materials")),
+        ("Aggregate delivery (batched gravel/sand tons × $/ton haul)", T.get("aggregate_delivery")),
         ("Hauling paid out (delivery, short-load, back-haul)", T.get("hauling")),
-        (f"Fuel ({_num(T.get('fuel_gallons'))} gal × $/gal)", T.get("fuel")),
-        (f"Aggregate haul-in ({_num(T.get('aggregate_tons'))} t on weight tickets)", T.get("aggregate_haul")),
+        (f"Fuel (yards × {_money(T.get('fuel_rate_per_yd'))}/CY, trailing {T.get('fuel_trailing_days', 30)}-day rate)", T.get("fuel")),
     ]
     for lbl, v in lines:
         row([f"  − {lbl}", _money(v), per_cy(v), _pct(v, revenue), ""], cw, ca)
@@ -195,9 +197,11 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
     row(["NET PROFIT", _money(profit), per_cy(profit), (f"{margin:.1f}%" if margin is not None else "—"), ""],
         cw, ca, bold=True, color=GREEN if profit >= 0 else RED, h=6, size=9)
     pdf.set_x(L); pdf.set_font("DejaVu", "", 6); pdf.set_text_color(*GREY)
-    pdf.cell(W, 3.4, f"Sales tax collected {_money(T.get('tax_collected'))} is passed through and not counted. "
-                     f"Aggregate purchase $ ({_money(T.get('aggregate_material'))}) is not subtracted again — gravel/sand are already costed in Materials as they batch.",
-             new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(W, 3.2, f"Sales tax collected {_money(T.get('tax_collected'))} is passed through and not counted. "
+                           f"Reference only, not counted: weight tickets in period {int(wt.get('loads') or 0)} loads / {_num(wt.get('tons'))} t "
+                           f"({_money(wt.get('material_cost'))} material + {_money(wt.get('haul_cost'))} haul — inventory, costed above as the tons are batched); "
+                           f"fuel fills in period {_num(ff.get('gallons'))} gal / {_money(ff.get('cost'))}.",
+                   new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2.5)
 
     # ---- two columns: materials | hauling by hauler ----
@@ -207,16 +211,17 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
     pdf.set_x(L); pdf.set_font("DejaVu", "B", 8.5); pdf.set_text_color(*INK); pdf.cell(half, 5, "Materials batched", new_x="LMARGIN", new_y="NEXT")
     pdf.set_draw_color(*LINE); yy = pdf.get_y(); pdf.line(L, yy, L + half, yy); pdf.ln(0.6)
     mats = data.get("materials") or []
-    mw = [half * 0.42, half * 0.2, half * 0.18, half * 0.2]
-    ma = ["L", "R", "R", "R"]
+    mw = [half * 0.34, half * 0.2, half * 0.16, half * 0.15, half * 0.15]
+    ma = ["L", "R", "R", "R", "R"]
     if not mats:
         pdf.set_x(L); pdf.set_font("DejaVu", "", 7); pdf.set_text_color(*GREY); pdf.cell(half, 4.5, "No batch tickets with weights in this window.", new_x="LMARGIN", new_y="NEXT")
     else:
-        row(["Material", "Used", "$/unit", "Cost"], mw, ma, bold=True, color=GREY, size=6.3, h=3.8)
+        row(["Material", "Used", "$/unit", "Cost", "Delivery"], mw, ma, bold=True, color=GREY, size=6.3, h=3.8)
         for m in mats[:8]:
             row([m.get("name", "") + (" *" if m.get("estimated") else ""), f"{_num(m.get('used'), 2)} {m.get('unit', '')}",
-                 _money(m.get("cost_rate"), dash_zero=True), _money(m.get("cost"))], mw, ma, h=4.4, size=7)
-        row(["Total", "", "", _money(T.get("materials"))], mw, ma, bold=True, h=4.6, size=7.2)
+                 _money(m.get("cost_rate"), dash_zero=True), _money(m.get("cost")),
+                 _money(m.get("delivery"), dash_zero=True)], mw, ma, h=4.4, size=7)
+        row(["Total", "", "", _money(T.get("materials")), _money(T.get("aggregate_delivery"))], mw, ma, bold=True, h=4.6, size=7.2)
         if any(m.get("estimated") for m in mats):
             pdf.set_x(L); pdf.set_font("DejaVu", "", 5.8); pdf.set_text_color(*GREY); pdf.cell(half, 3, "* part estimated from the mix design (no ticket weights)", new_x="LMARGIN", new_y="NEXT")
     left_end = pdf.get_y()
@@ -243,7 +248,7 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
         rrow(["Total", "", _num(sum(float(h.get("yards") or 0) for h in hs)), _money(T.get("hauling"))], hw, ha, bold=True, h=4.6, size=7.2)
     # fuel + aggregate notes under hauling
     pdf.set_x(rx); pdf.set_font("DejaVu", "", 6.5); pdf.set_text_color(*GREY)
-    pdf.cell(half, 3.6, f"Fuel: {_num(T.get('fuel_gallons'))} gal, {_money(T.get('fuel'))}   ·   Aggregate haul-in: {_num(T.get('aggregate_tons'))} t, {_money(T.get('aggregate_haul'))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(half, 3.6, f"Fuel allocated: {_money(T.get('fuel'))} at {_money(T.get('fuel_rate_per_yd'))}/CY   ·   Aggregate delivery: {_money(T.get('aggregate_delivery'))}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_y(max(left_end, pdf.get_y()) + 3)
 
     # ---- by day (fits what's left of the page) ----
@@ -254,14 +259,14 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
         section("By day")
         dw = [W * 0.15, W * 0.08, W * 0.08, W * 0.13, W * 0.12, W * 0.11, W * 0.09, W * 0.09, W * 0.15]
         da = ["L", "R", "R", "R", "R", "R", "R", "R", "R"]
-        row(["Day", "Orders", "CY", "Revenue", "Materials", "Hauling", "Fuel", "Agg haul", "Net (margin)"], dw, da, bold=True, color=GREY, size=6.3, h=3.8)
+        row(["Day", "Orders", "CY", "Revenue", "Materials", "Agg deliv", "Hauling", "Fuel", "Net (margin)"], dw, da, bold=True, color=GREY, size=6.3, h=3.8)
         rh = 4.3
         max_rows = max(1, int((pdf.h - 10 - footer_h - pdf.get_y() - 5) / rh))
         shown = days[:max_rows] if len(days) > max_rows else days
         for d in shown:
             dp = float(d.get("profit") or 0); dr = float(d.get("revenue") or 0)
             row([_date_short(d.get("date")), str(d.get("orders", 0)), _num(d.get("yards")), _money(dr), _money(d.get("materials")),
-                 _money(d.get("hauling")), _money(d.get("fuel")), _money(d.get("aggregate_haul")),
+                 _money(d.get("aggregate_delivery")), _money(d.get("hauling")), _money(d.get("fuel")),
                  f"{_money(dp)} ({_pct(dp, dr)})"], dw, da, h=rh, size=6.8, color=INK)
         if len(days) > len(shown):
             pdf.set_x(L); pdf.set_font("DejaVu", "", 6.3); pdf.set_text_color(*GREY)
@@ -280,9 +285,10 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
     pdf.set_y(fy)
     pdf.set_draw_color(*LINE); pdf.line(L, fy, L + W, fy)
     pdf.set_xy(L, fy + 1.2); pdf.set_font("DejaVu", "", 6); pdf.set_text_color(*GREY)
-    pdf.multi_cell(W, 3.1, ("How this is built: revenue is what completed orders bill for the yards actually poured (pre-tax), placed on their pour date; "
-                            "materials and fuel are costed on the day they were batched or filled; hauling is what's paid to third-party haulers; "
-                            "aggregate haul-in comes from the drivers' weight tickets. " + (" ".join(caveats) if caveats else "")).strip())
+    pdf.multi_cell(W, 3.1, ("How this is built: revenue is what completed orders bill for the yards actually poured (pre-tax), placed on their pour date. "
+                            "Materials are the tons batched into those yards × $/unit at the pit; aggregate delivery is the batched gravel/sand tons × the $/ton haul rate; "
+                            "hauling is what's paid to third-party haulers; fuel is allocated per yard at the fleet's trailing 30-day $/CY. "
+                            "Weight tickets and fuel fills are shown for reference and not charged to the day they arrived. " + (" ".join(caveats) if caveats else "")).strip())
     pdf.set_xy(L, pdf.h - 8); pdf.set_font("DejaVu", "", 6); pdf.set_text_color(*GREY)
     pdf.cell(W, 3, "Aussieblock Ready Mix · dispatch app margin report · internal", align="C")
 

@@ -470,7 +470,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.6-aggregate-rates"
+APP_VERSION = "2026-09-13.7-profit-allocation"
 
 
 @app.get("/version")
@@ -5507,54 +5507,73 @@ def _profit_data(s: Session, frm, to) -> dict:
                      "self_haul": bool((p.get("delivery") or {}).get("self_haul"))})
         d = days.setdefault(_pour_date(o), {"date": _pour_date(o), "orders": 0, "yards": 0.0,
                                                      "revenue": 0.0, "hauling": 0.0, "materials": 0.0,
-                                                     "fuel": 0.0, "aggregate_haul": 0.0})
+                                                     "aggregate_delivery": 0.0, "fuel": 0.0})
         d["orders"] += 1; d["yards"] += yards; d["revenue"] += revenue; d["hauling"] += hauling
     s.commit()   # persist any mileage cached by pricing
 
-    # Materials: the tracker's usage cost for the window, then per day (only the
-    # days that had orders — each call scans every order, so keep it bounded).
+    # Materials: the tracker's usage cost for the window — what was BATCHED into the
+    # yards poured — plus, for the aggregates, the delivery of those same tons
+    # (batched tons × the material's $/ton haul rate). Costing delivery this way
+    # ties it to the concrete poured, not to the day the rock happened to arrive.
+    def _mat_costs(summary: dict):
+        mat = round(pricing._num(summary.get("total_cost")), 2)
+        deliv = 0.0
+        for m in summary.get("materials", []):
+            if (m.get("unit") == "ton") and pricing._num(m.get("haul_rate")) > 0:
+                deliv += pricing._num(m.get("used_amount")) * pricing._num(m.get("haul_rate"))
+        return mat, round(deliv, 2)
+
     mats = _materials_summary(s, frm=frm, to=to)
-    material_cost = round(pricing._num(mats.get("total_cost")), 2)
+    material_cost, agg_delivery = _mat_costs(mats)
     day_keys = sorted(k for k in days if k != "—")
     if len(day_keys) > 1:
-        for dk in day_keys:
-            days[dk]["materials"] = round(pricing._num(_materials_summary(s, frm=dk, to=dk).get("total_cost")), 2)
+        for dk in day_keys:   # one scan per day that had orders — bounded by the window
+            days[dk]["materials"], days[dk]["aggregate_delivery"] = _mat_costs(_materials_summary(s, frm=dk, to=dk))
     elif len(day_keys) == 1:
-        days[day_keys[0]]["materials"] = material_cost
+        days[day_keys[0]]["materials"], days[day_keys[0]]["aggregate_delivery"] = material_cost, agg_delivery
 
-    fuel = _fuel_cost_in_window(s, sheet, frm, to)
-    for dk, c in fuel["by_day"].items():
-        if dk in days:
-            days[dk]["fuel"] = c
+    yards_total = round(sum(r["yards"] for r in rows), 2)
 
-    # Aggregate weight tickets in the window: haul-in is a cost of its own; the
-    # material $ is reported for reference only — the Materials tracker already
-    # costs gravel/sand as it's batched, so adding it here would double count.
+    # Fuel: a truck fills every few days, so charging fills to the day they happen
+    # swings a daily margin wildly. Allocate instead at the fleet's $/CY over the
+    # 30 days ending at the window (fills ÷ yards poured), applied to the yards in
+    # the window. The actual fills inside the window are reported for reference.
+    end_day = to or _business_today().isoformat()
+    trail_from = (datetime.strptime(end_day, "%Y-%m-%d").date() - timedelta(days=29)).isoformat()
+    trail_fuel = _fuel_cost_in_window(s, sheet, trail_from, end_day)
+    trail_yards = 0.0
+    for o in s.exec(select(Order).where(Order.status == "complete")).all():
+        if trail_from <= _pour_date(o) <= end_day:
+            trail_yards += pricing._num(_billable_yards(o, s))
+    fuel_rate = round(trail_fuel["cost"] / trail_yards, 4) if trail_yards > 0 else 0.0
+    fuel_total = round(yards_total * fuel_rate, 2)
+    for dk in day_keys:
+        days[dk]["fuel"] = round(days[dk]["yards"] * fuel_rate, 2)
+    fuel_fills = _fuel_cost_in_window(s, sheet, frm, to)
+
+    # Aggregate weight tickets in the window — the purchase/inventory record. Shown
+    # for reference only: gravel/sand and their delivery are costed above as the
+    # tons are BATCHED, so counting the tickets here would double count.
     wq = select(WeightTicket)
     if frm:
         wq = wq.where(WeightTicket.ticket_date >= frm)
     if to:
         wq = wq.where(WeightTicket.ticket_date <= to)
-    agg_haul = agg_material = agg_tons = 0.0
+    wt_loads = 0; wt_haul = wt_material = wt_tons = 0.0
     for t in s.exec(wq).all():
         mc, hc = _wt_costs(t)
-        agg_haul += hc; agg_material += mc; agg_tons += pricing._num(t.net_tons)
-        if t.ticket_date in days:
-            days[t.ticket_date]["aggregate_haul"] = round(days[t.ticket_date]["aggregate_haul"] + hc, 2)
+        wt_loads += 1; wt_haul += hc; wt_material += mc; wt_tons += pricing._num(t.net_tons)
 
-    yards_total = round(sum(r["yards"] for r in rows), 2)
     revenue_total = round(sum(r["revenue"] for r in rows), 2)
     hauling_total = round(sum(r["hauling"] for r in rows), 2)
-    fuel_total = fuel["cost"]
-    agg_haul = round(agg_haul, 2)
-    costs_total = round(material_cost + hauling_total + fuel_total + agg_haul, 2)
+    costs_total = round(material_cost + agg_delivery + hauling_total + fuel_total, 2)
     profit = round(revenue_total - costs_total, 2)
 
     day_rows = []
     for dk in sorted(days, reverse=True):
         d = days[dk]
         d["yards"] = round(d["yards"], 2); d["revenue"] = round(d["revenue"], 2); d["hauling"] = round(d["hauling"], 2)
-        d["costs"] = round(d["materials"] + d["hauling"] + d["fuel"] + d["aggregate_haul"], 2)
+        d["costs"] = round(d["materials"] + d["aggregate_delivery"] + d["hauling"] + d["fuel"], 2)
         d["profit"] = round(d["revenue"] - d["costs"], 2)
         day_rows.append(d)
     rows.sort(key=lambda r: (r["when"] or "", r["ref"]), reverse=True)
@@ -5565,9 +5584,12 @@ def _profit_data(s: Session, frm, to) -> dict:
         "totals": {
             "orders": len(rows), "yards": yards_total,
             "revenue": revenue_total, "tax_collected": round(sum(r["tax"] for r in rows), 2),
-            "materials": material_cost, "hauling": hauling_total, "fuel": fuel_total,
-            "fuel_gallons": fuel["gallons"], "aggregate_haul": agg_haul,
-            "aggregate_material": round(agg_material, 2), "aggregate_tons": round(agg_tons, 2),
+            "materials": material_cost, "aggregate_delivery": agg_delivery,
+            "hauling": hauling_total, "fuel": fuel_total,
+            "fuel_rate_per_yd": fuel_rate, "fuel_trailing_days": 30,
+            "fuel_fills": {"gallons": fuel_fills["gallons"], "cost": fuel_fills["cost"]},   # actual fills in window (reference)
+            "weight_tickets": {"loads": wt_loads, "tons": round(wt_tons, 2), "material_cost": round(wt_material, 2),
+                               "haul_cost": round(wt_haul, 2)},                                # purchases in window (reference)
             "costs": costs_total, "profit": profit,
             "margin_pct": round(profit / revenue_total * 100.0, 1) if revenue_total else None,
             "per_yd": {"revenue": round(revenue_total / yards_total, 2) if yards_total else None,
@@ -5577,7 +5599,9 @@ def _profit_data(s: Session, frm, to) -> dict:
         "days": day_rows,
         "orders": rows,
         "materials": [{"name": m["name"], "unit": m["unit"], "used": m["used_amount"], "cost_rate": m["cost_rate"],
-                       "cost": m["cost"], "estimated": m.get("used_estimate_amount", 0) > 0}
+                       "cost": m["cost"], "estimated": m.get("used_estimate_amount", 0) > 0,
+                       "haul_rate": pricing._num(m.get("haul_rate")) if m.get("unit") == "ton" else 0.0,
+                       "delivery": round(pricing._num(m.get("used_amount")) * pricing._num(m.get("haul_rate")), 2) if m.get("unit") == "ton" else 0.0}
                       for m in mats.get("materials", []) if pricing._num(m.get("used_amount")) > 0 or pricing._num(m.get("cost")) > 0],
         "haulers": hauler_rows,
         "notes": {"missing_mileage": missing_mileage, "unmapped_mixes": mats.get("unmapped_mixes", [])},
