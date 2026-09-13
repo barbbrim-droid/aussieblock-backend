@@ -468,7 +468,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.1-aggregate-weight-tickets"
+APP_VERSION = "2026-09-13.2-weight-ticket-pdf"
 
 
 @app.get("/version")
@@ -4719,8 +4719,10 @@ def delete_time_entry(entry_id: int, _: User = Depends(require_finance), s: Sess
 # office reviews and corrects it on the dispatch board. Aggregate cost and hauling
 # cost both roll up from net tons × the rates snapshotted on the ticket.
 from .ticketgen import read_weight_ticket as _wt_reader
+from .ticketgen import weight_ticket_pdf as _wt_pdf
 
 _WT_LB_PER_TON = 2000.0
+_WT_PDF_NAME = "ticket.pdf"   # the generated readable PDF, alongside the raw photos
 
 
 def _wt_root() -> str:
@@ -4738,8 +4740,36 @@ def _wt_photos(ticket_id: int) -> list:
     d = _wt_dir(ticket_id)
     if not os.path.isdir(d):
         return []
-    names = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in _ATTACH_EXTS]
+    names = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in _ATTACH_EXTS and f != _WT_PDF_NAME]
     return sorted(names, key=lambda n: (int(os.path.splitext(n)[0]) if os.path.splitext(n)[0].isdigit() else 1 << 30, n))
+
+
+def _wt_pdf_path(ticket_id: int) -> str:
+    return os.path.join(_wt_dir(ticket_id), _WT_PDF_NAME)
+
+
+def _wt_build_pdf(ticket_id: int) -> str | None:
+    """(Re)generate the ticket's readable PDF from its current figures + photos:
+    a typed, searchable header block and the cleaned-up photo(s). Runs after an
+    upload, a photo read, an edit, or a photo add/remove, so the PDF always
+    matches what's on the ticket. Never raises — a PDF failure must not break
+    the request that triggered it."""
+    try:
+        with Session(engine) as s:
+            t = s.get(WeightTicket, ticket_id)
+            if not t:
+                return None
+            j = _wt_json(t)
+        photos = [os.path.join(_wt_dir(ticket_id), n) for n in _wt_photos(ticket_id)]
+        try:
+            company = ticket_convert._cfg().get("company") or {}
+        except Exception:   # noqa: BLE001 — config missing → plain header
+            company = {}
+        _wt_dir(ticket_id, create=True)   # a typed-only ticket (no photo) has no folder yet
+        return _wt_pdf.render_weight_ticket_pdf(j, photos, _wt_pdf_path(ticket_id), company=company)
+    except Exception as e:   # noqa: BLE001
+        print(f"weight ticket {ticket_id} pdf failed:", e)
+        return None
 
 
 def _wt_costs(t: WeightTicket) -> tuple:
@@ -4765,7 +4795,8 @@ def _wt_json(t: WeightTicket) -> dict:
             "notes": t.notes, "uploaded_by": t.uploaded_by, "source": t.source, "reviewed": bool(t.reviewed),
             "read_status": t.read_status, "read": read,
             "created_at": t.created_at.isoformat() if t.created_at else None,
-            "photos": _wt_photos(t.id)}
+            "photos": _wt_photos(t.id),
+            "pdf": os.path.exists(_wt_pdf_path(t.id))}   # the readable PDF is ready to view
 
 
 def _wt_aggregate_materials(s: Session) -> list:
@@ -4829,6 +4860,7 @@ def _wt_read_photo(ticket_id: int, path: str) -> None:
             print(f"weight ticket {ticket_id} read failed:", e)
             t.read_status = "failed"
             s.add(t); s.commit()
+            _wt_build_pdf(ticket_id)
             return
         t.read_data = json.dumps(d)
         t.read_status = "done"
@@ -4867,6 +4899,7 @@ def _wt_read_photo(ticket_id: int, path: str) -> None:
             elif not t.truck_label:
                 t.truck_label = d["truck"]
         s.add(t); s.commit()
+    _wt_build_pdf(ticket_id)   # the PDF carries whatever the reader filled in
 
 
 def _wt_can_see(t: WeightTicket, user: User) -> bool:
@@ -5029,6 +5062,9 @@ async def create_weight_ticket(
     elif path:
         t.read_status = "skipped"
         s.add(t); s.commit()
+        background.add_task(_wt_build_pdf, t.id)
+    else:
+        background.add_task(_wt_build_pdf, t.id)   # no photo: a typed-only PDF for the file
     print(f"POST /weight-tickets  #{t.id} {t.material or '?'} {t.net_tons or '?'} t by {user.email or user.company}")
     return _wt_json(t)
 
@@ -5129,8 +5165,8 @@ class WeightTicketPatch(BaseModel):
 
 
 @app.patch("/weight-tickets/{ticket_id}")
-def edit_weight_ticket(ticket_id: int, body: WeightTicketPatch, _: User = Depends(require_staff),
-                       s: Session = Depends(get_session)):
+def edit_weight_ticket(ticket_id: int, body: WeightTicketPatch, background: BackgroundTasks,
+                       _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Office corrects a ticket's figures / marks it reviewed (staff). Sending
     material_id re-resolves the material name and, when the ticket has no rate
     yet, pulls that material's default rates in."""
@@ -5171,6 +5207,7 @@ def edit_weight_ticket(ticket_id: int, body: WeightTicketPatch, _: User = Depend
             and t.gross_lb and t.tare_lb and t.gross_lb > t.tare_lb:
         t.net_tons = round((t.gross_lb - t.tare_lb) / _WT_LB_PER_TON, 2)
     s.add(t); s.commit(); s.refresh(t)
+    background.add_task(_wt_build_pdf, t.id)   # keep the PDF's typed block in step with the edit
     return _wt_json(t)
 
 
@@ -5198,7 +5235,9 @@ async def add_weight_ticket_photo(ticket_id: int, background: BackgroundTasks, f
     if not t.net_tons and ticket_convert.available() and _wt_readable_image(path):
         t.read_status = "pending"
         s.add(t); s.commit()
-        background.add_task(_wt_read_photo, t.id, path)
+        background.add_task(_wt_read_photo, t.id, path)   # rebuilds the PDF when done
+    else:
+        background.add_task(_wt_build_pdf, t.id)
     return _wt_json(t)
 
 
@@ -5221,6 +5260,24 @@ def reread_weight_ticket(ticket_id: int, background: BackgroundTasks, _: User = 
     return _wt_json(t)
 
 
+@app.get("/weight-tickets/{ticket_id}/pdf")
+def get_weight_ticket_pdf(ticket_id: int, user: User = Depends(_require_driver_or_staff),
+                          s: Session = Depends(get_session)):
+    """The readable PDF of a weight ticket (typed figures + cleaned-up photo) —
+    staff, or the driver who logged it. Built on demand if it isn't there yet
+    (e.g. the background build is still running), so this never 404s on a real
+    ticket."""
+    t = s.get(WeightTicket, ticket_id)
+    if not t or not _wt_can_see(t, user):
+        raise HTTPException(404, "Ticket not found")
+    path = _wt_pdf_path(ticket_id)
+    if not os.path.exists(path) and not _wt_build_pdf(ticket_id):
+        raise HTTPException(503, "Couldn't build the ticket PDF — try again in a moment.")
+    label = (t.ticket_no or f"AB{t.id}").replace("/", "-")
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"weight-ticket-{t.ticket_date or ''}-{label}.pdf")
+
+
 @app.get("/weight-tickets/{ticket_id}/photos/{name}")
 def get_weight_ticket_photo(ticket_id: int, name: str, user: User = Depends(_require_driver_or_staff),
                             s: Session = Depends(get_session)):
@@ -5238,10 +5295,10 @@ def get_weight_ticket_photo(ticket_id: int, name: str, user: User = Depends(_req
 
 
 @app.delete("/weight-tickets/{ticket_id}/photos/{name}")
-def delete_weight_ticket_photo(ticket_id: int, name: str, _: User = Depends(require_staff),
-                               s: Session = Depends(get_session)):
+def delete_weight_ticket_photo(ticket_id: int, name: str, background: BackgroundTasks,
+                               _: User = Depends(require_staff), s: Session = Depends(get_session)):
     """Remove one attachment from a ticket (staff)."""
-    if "/" in name or "\\" in name or ".." in name:
+    if "/" in name or "\\" in name or ".." in name or name == _WT_PDF_NAME:
         raise HTTPException(400, "Bad photo name")
     path = os.path.join(_wt_dir(ticket_id), name)
     if os.path.exists(path):
@@ -5250,4 +5307,6 @@ def delete_weight_ticket_photo(ticket_id: int, name: str, _: User = Depends(requ
         except OSError:
             pass
     t = s.get(WeightTicket, ticket_id)
+    if t:
+        background.add_task(_wt_build_pdf, t.id)
     return _wt_json(t) if t else {"ok": True}
