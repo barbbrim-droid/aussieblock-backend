@@ -254,6 +254,9 @@ class Material(SQLModel, table=True):
     # Default hauling rate ($/ton) paid to bring this material in from the pit —
     # pre-fills the haul cost on an aggregate weight ticket (staff can override per ticket).
     haul_rate: float = 0.0
+    # The last RATE_REVISION (see main.py) applied to this material, as its effective
+    # ISO date. A revision is applied once; edits made on screen afterwards stick.
+    rates_revision: Optional[str] = None
     track_inventory: bool = True                 # True = silo with on-hand draw-down; False = usage + cost only
     capacity_tons: float = 0.0                   # silo capacity (tons) — for the fill gauge
     reorder_tons: float = 0.0                    # alert when on-hand falls to/below this

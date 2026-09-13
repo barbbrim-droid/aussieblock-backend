@@ -175,6 +175,8 @@ async def keepalive_loop() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     seed_if_empty()
+    with Session(engine) as _s:
+        _ensure_materials(_s)   # seed/backfill materials + apply any dated rate revisions on deploy
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(qbo_sync_loop()),   # periodic QuickBooks A/R sync
@@ -468,7 +470,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.5-cement-rates"
+APP_VERSION = "2026-09-13.6-aggregate-rates"
 
 
 @app.get("/version")
@@ -1037,8 +1039,8 @@ _MATERIAL_SPEC = {
 DEFAULT_MATERIALS = [
     {"name": "Portland",         "unit": "ton", "track_inventory": True,  "cost_rate": 210.0},   # $/ton delivered
     {"name": "Slag",             "unit": "ton", "track_inventory": True,  "cost_rate": 165.0},   # $/ton delivered
-    {"name": "Gravel",           "unit": "ton", "track_inventory": False},
-    {"name": "Sand",             "unit": "ton", "track_inventory": False},
+    {"name": "Gravel",           "unit": "ton", "track_inventory": False, "cost_rate": 17.0, "haul_rate": 6.0},   # $/ton at the pit + $/ton to haul it in
+    {"name": "Sand",             "unit": "ton", "track_inventory": False, "cost_rate": 15.0, "haul_rate": 6.0},
     {"name": "Mac Matrix Fiber", "unit": "lb",  "track_inventory": False},
     {"name": "Masterset Delvo",  "unit": "oz",  "track_inventory": False},
     {"name": "Water Reducer",    "unit": "oz",  "track_inventory": False},
@@ -1070,7 +1072,8 @@ def _ensure_materials(s: Session) -> None:
             # (counted_on stays null) so historical actuals aren't excluded.
             s.add(Material(name=spec["name"], unit=spec["unit"],
                            track_inventory=spec["track_inventory"],
-                           cost_rate=spec.get("cost_rate", 0.0),
+                           cost_rate=spec.get("cost_rate", 0.0), haul_rate=spec.get("haul_rate", 0.0),
+                           rates_revision=max((r["effective"] for r in RATE_REVISIONS if r["material"] == spec["name"]), default=None),
                            counted_on=today if spec["track_inventory"] else None))
             changed = True
         elif spec.get("cost_rate") and not (by_name[key].cost_rate or 0):
@@ -1083,6 +1086,53 @@ def _ensure_materials(s: Session) -> None:
     for d in DEFAULT_MIX_DESIGNS:
         if d["mix"].strip().lower() not in existing:
             s.add(MixDesign(**d)); changed = True
+    if changed:
+        s.commit()
+    _apply_rate_revisions(s)
+
+
+# Dated rate changes that must reach the production database exactly once, without
+# clobbering anything the office edits afterwards. Each entry sets a material's
+# $/unit (cost_rate = the price AT THE PIT / delivered, per the material) and, for
+# aggregates, the $/ton haul-in. On the first startup on/after `effective`, every
+# material whose rates_revision is older gets the new rates, and the aggregate
+# weight tickets dated on/after `effective` that nobody has reviewed yet are
+# re-rated too (their snapshots were taken under the old prices).
+RATE_REVISIONS = [
+    # 2026-09-12: gravel/sand had been carried at a DELIVERED price. Split it: the
+    # material is $17 (gravel) / $15 (sand) per ton and delivery is $6/ton on
+    # either, so haul-in shows on its own line and isn't double counted.
+    {"effective": "2026-09-12", "material": "Gravel", "cost_rate": 17.0, "haul_rate": 6.0},
+    {"effective": "2026-09-12", "material": "Sand",   "cost_rate": 15.0, "haul_rate": 6.0},
+]
+
+
+def _apply_rate_revisions(s: Session) -> None:
+    today = _business_today().isoformat()
+    mats = {(m.name or "").strip().lower(): m for m in s.exec(select(Material)).all()}
+    changed = False
+    for rev in sorted(RATE_REVISIONS, key=lambda r: r["effective"]):
+        if rev["effective"] > today:
+            continue   # not in force yet
+        m = mats.get(rev["material"].strip().lower())
+        if not m or (m.rates_revision or "") >= rev["effective"]:
+            continue   # already applied (or superseded)
+        m.cost_rate = rev["cost_rate"]
+        if "haul_rate" in rev:
+            m.haul_rate = rev["haul_rate"]
+        m.rates_revision = rev["effective"]
+        s.add(m); changed = True
+        # Re-rate this material's unreviewed weight tickets from the effective date on.
+        for t in s.exec(select(WeightTicket).where(WeightTicket.material_id == m.id,
+                                                   WeightTicket.ticket_date >= rev["effective"])).all():
+            if t.reviewed:
+                continue
+            t.material_rate = rev["cost_rate"]
+            if "haul_rate" in rev:
+                t.haul_rate = rev["haul_rate"]
+            s.add(t)
+        print(f"rate revision {rev['effective']} applied to {m.name}: ${rev['cost_rate']}/{m.unit}"
+              + (f" + ${rev['haul_rate']}/ton haul" if "haul_rate" in rev else ""))
     if changed:
         s.commit()
 
