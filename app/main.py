@@ -468,7 +468,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.3-profit"
+APP_VERSION = "2026-09-13.4-margin-report"
 
 
 @app.get("/version")
@@ -4720,6 +4720,7 @@ def delete_time_entry(entry_id: int, _: User = Depends(require_finance), s: Sess
 # cost both roll up from net tons × the rates snapshotted on the ticket.
 from .ticketgen import read_weight_ticket as _wt_reader
 from .ticketgen import weight_ticket_pdf as _wt_pdf
+from .ticketgen import profit_report as _profit_pdf
 
 _WT_LB_PER_TON = 2000.0
 _WT_PDF_NAME = "ticket.pdf"   # the generated readable PDF, alongside the raw photos
@@ -5336,12 +5337,7 @@ def _fuel_cost_in_window(s: Session, sheet: dict, frm: str, to: str) -> dict:
     return {"gallons": round(total_gal, 1), "cost": round(total_cost, 2), "by_day": by_day}
 
 
-@app.get("/profit")
-def profit_summary(_: User = Depends(require_finance), s: Session = Depends(get_session),
-                   frm: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None)):
-    """Net profit for a date window (yyyy-mm-dd, inclusive; blank = all time).
-    Returns totals, a per-day breakdown, the orders that make up the revenue, the
-    materials that make up the material cost, and hauling by hauler."""
+def _profit_window(frm, to):
     frm = (frm or "").strip() or None
     to = (to or "").strip() or None
     for v in (frm, to):
@@ -5350,6 +5346,44 @@ def profit_summary(_: User = Depends(require_finance), s: Session = Depends(get_
                 datetime.strptime(v, "%Y-%m-%d")
             except ValueError:
                 raise HTTPException(422, "Dates must be YYYY-MM-DD.")
+    return frm, to
+
+
+@app.get("/profit")
+def profit_summary(_: User = Depends(require_finance), s: Session = Depends(get_session),
+                   frm: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None)):
+    """Net profit for a date window (yyyy-mm-dd, inclusive; blank = all time).
+    Returns totals, a per-day breakdown, the orders that make up the revenue, the
+    materials that make up the material cost, and hauling by hauler."""
+    frm, to = _profit_window(frm, to)
+    return _profit_data(s, frm, to)
+
+
+@app.get("/profit/report.pdf")
+def profit_report_pdf(_: User = Depends(require_finance), s: Session = Depends(get_session),
+                      frm: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None)):
+    """The same figures as GET /profit laid out as a ONE-PAGE Letter PDF — the
+    margin report for a day or range, ready to print or email."""
+    frm, to = _profit_window(frm, to)
+    data = _profit_data(s, frm, to)
+    try:
+        company = ticket_convert._cfg().get("company") or {}
+    except Exception:   # noqa: BLE001
+        company = {}
+    # Rendered fresh every time into a scratch folder on the data disk (one file
+    # per window; overwritten on the next request for the same window).
+    rdir = config.data_path("reports")
+    os.makedirs(rdir, exist_ok=True)
+    out = os.path.join(rdir, f"profit-{frm or 'all'}-{to or 'all'}.pdf")
+    _profit_pdf.render_profit_report(data, out, company=company,
+                                     generated_at=datetime.now(_BIZ_TZ) if _BIZ_TZ else datetime.now())
+    label = f"{frm}_to_{to}" if frm and to and frm != to else (frm or "all-time")
+    return FileResponse(out, media_type="application/pdf", filename=f"aussieblock-margin-{label}.pdf")
+
+
+def _profit_data(s: Session, frm, to) -> dict:
+    """Build the profit payload (see profit_summary). Shared by the JSON route and
+    the one-page PDF report so both always agree to the cent."""
     sheet = pricing.load_sheet()
     key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
 
