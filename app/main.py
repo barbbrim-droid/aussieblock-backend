@@ -531,7 +531,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.10-gps-odometer"
+APP_VERSION = "2026-09-13.11-profit-batched-only"
 
 
 @app.get("/version")
@@ -2113,6 +2113,24 @@ def _billable_yards(o: Order, s: Session) -> str:
         except (ValueError, TypeError):
             pass
     return o.qty
+
+
+def _batched_yards(o: Order, s: Session) -> float:
+    """Yards of concrete actually batched for an order: the loads' yards, else the
+    batch ticket's delivered yards. 0.0 when nothing was batched — unlike
+    _billable_yards, this never falls back to the ordered quantity."""
+    loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+    loaded = round(sum(pricing._num(ld.qty) for ld in loads), 2)
+    if loads and loaded > 0:
+        return loaded
+    if o.batch_data:
+        try:
+            delivered = pricing._num(json.loads(o.batch_data).get("delivered"))
+            if delivered > 0:
+                return round(delivered, 2)
+        except (ValueError, TypeError):
+            pass
+    return 0.0
 
 
 def _is_driver_of(o: Order, user: User, s: Session = None) -> bool:
@@ -5759,8 +5777,20 @@ def _profit_data(s: Session, frm, to) -> dict:
         if re.match(r"^\d{4}-\d{2}-\d{2}$", d):
             return d
         return (o.completed_at or "")[:10] or _business_today().isoformat()
-    orders = [o for o in s.exec(select(Order).where(Order.status == "complete")).all()
-              if (not frm or _pour_date(o) >= frm) and (not to or _pour_date(o) <= to)]
+    in_window = [o for o in s.exec(select(Order).where(Order.status == "complete")).all()
+                 if (not frm or _pour_date(o) >= frm) and (not to or _pour_date(o) <= to)]
+    # Only orders with concrete actually batched count: loads with yards, or a
+    # batch ticket with delivered yards. An order marked Complete with nothing
+    # batched (closed out by hand, rescheduled after the fact) would otherwise be
+    # billed at its ORDERED quantity and invent revenue on a day with no
+    # production. Those are listed separately so the office can see them.
+    orders, unbatched = [], []
+    for o in in_window:
+        if _batched_yards(o, s) > 0:
+            orders.append(o)
+        else:
+            unbatched.append({"ref": o.ref, "when": _pour_date(o), "site": o.site, "mix": o.mix,
+                              "qty": pricing._num(o.qty), "customer_id": o.customer_id})
 
     # Prefetch any missing road mileages in parallel (same trick as the Costs bulk
     # pricing) so haul figures are right the first time this is opened.
@@ -5785,6 +5815,9 @@ def _profit_data(s: Session, frm, to) -> dict:
             s.commit()
 
     cust_names = {c.id: c.name for c in s.exec(select(Customer)).all()}
+    for u in unbatched:
+        u["customer"] = cust_names.get(u.pop("customer_id"), "")
+    unbatched.sort(key=lambda u: (u["when"], u["ref"]), reverse=True)
     days: dict = {}
     haulers: dict = {}
     rows = []
@@ -5863,7 +5896,7 @@ def _profit_data(s: Session, frm, to) -> dict:
     trail_yards = 0.0
     for o in s.exec(select(Order).where(Order.status == "complete")).all():
         if trail_from <= _pour_date(o) <= end_day:
-            trail_yards += pricing._num(_billable_yards(o, s))
+            trail_yards += _batched_yards(o, s)      # same rule as revenue: only what was batched
     fuel_rate = round(trail_fuel["cost"] / trail_yards, 4) if trail_yards > 0 else 0.0
     fuel_total = round(yards_total * fuel_rate, 2)
     for dk in day_keys:
@@ -5921,5 +5954,6 @@ def _profit_data(s: Session, frm, to) -> dict:
                       for t in mat_tot.values() if t["used"] > 0],
         "haulers": hauler_rows,
         "notes": {"missing_mileage": missing_mileage,
-                  "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())]},
+                  "unmapped_mixes": [{"mix": k, "yards": v} for k, v in sorted(unmapped.items())],
+                  "unbatched": unbatched},     # completed in the window with nothing batched — not counted
     }

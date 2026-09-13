@@ -281,11 +281,15 @@ def render_profit_report(data: dict, out_path: str, company: dict = None, genera
     if notes.get("unmapped_mixes"):
         um = notes["unmapped_mixes"]
         caveats.append("Material cost missing for: " + ", ".join(f"{u.get('mix')} ({_num(u.get('yards'))} CY)" for u in um[:4]) + (" …" if len(um) > 4 else "") + " (add a mix design under Materials).")
+    if notes.get("unbatched"):
+        ub = notes["unbatched"]
+        caveats.append(f"Not counted: {len(ub)} order{'s' if len(ub) > 1 else ''} marked complete with nothing batched ("
+                       + ", ".join(f"{u.get('ref')} {_num(u.get('qty'))} CY" for u in ub[:4]) + (" …" if len(ub) > 4 else "") + ").")
     fy = pdf.h - 10 - footer_h
     pdf.set_y(fy)
     pdf.set_draw_color(*LINE); pdf.line(L, fy, L + W, fy)
     pdf.set_xy(L, fy + 1.2); pdf.set_font("DejaVu", "", 6); pdf.set_text_color(*GREY)
-    pdf.multi_cell(W, 3.1, ("How this is built: revenue is what completed orders bill for the yards actually poured (pre-tax), placed on their pour date. "
+    pdf.multi_cell(W, 3.1, ("How this is built: revenue is what completed orders bill for the yards actually batched (pre-tax), placed on their pour date; an order with nothing batched is not counted. "
                             "Materials are the tons batched into those yards × $/unit at the pit; aggregate delivery is the batched gravel/sand tons × the $/ton haul rate; "
                             "hauling is what's paid to third-party haulers; fuel is allocated per yard at the fleet's trailing 30-day $/CY. "
                             "Weight tickets and fuel fills are shown for reference and not charged to the day they arrived. " + (" ".join(caveats) if caveats else "")).strip())
