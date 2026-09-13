@@ -177,6 +177,7 @@ async def lifespan(app: FastAPI):
     seed_if_empty()
     with Session(engine) as _s:
         _ensure_materials(_s)   # seed/backfill materials + apply any dated rate revisions on deploy
+        _flag_fuel_odometers(_s)   # surface fuel fills whose typed mileage doesn't add up
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(stale_order_sweep_loop()),   # nothing stays "ongoing" past its pour day
@@ -530,7 +531,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.9-close-out-stale"
+APP_VERSION = "2026-09-13.10-gps-odometer"
 
 
 @app.get("/version")
@@ -3268,6 +3269,9 @@ def list_trucks(
          "lat": t.lat, "lng": t.lng,
          "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes,
          "kind": _truck_kind(t),
+         "gps_odometer": _truck_gps_odometer(t), "odo_baseline": t.odo_baseline,
+         "odo_baseline_at": t.odo_baseline_at, "gps_miles": round(t.gps_miles or 0.0, 1),
+         "gps_odometer_reported": t.gps_odometer_reported,
          "mixer_temp_f": latest_temp.get(t.label),
          "mixer_batt_pct": latest_batt.get(t.label),
          "mixer_updated_at": latest_at.get(t.label)}
@@ -3428,6 +3432,177 @@ class FuelMileageIn(BaseModel):
     odometer: float                # current mileage; gallons come from the meter
 
 
+# ── GPS odometer ─────────────────────────────────────────────────────────────
+# The app keeps its own odometer per truck: the dash reading the office entered
+# once (baseline) plus every mile the GPS tracker has seen since. It pre-fills
+# the driver's fuel-fill mileage and sanity-checks what they type.
+_ODO_GPS_TOLERANCE_MI = 250.0   # typed reading this far from the GPS odometer → "off_gps" ...
+_ODO_GPS_DRIFT = 0.03           # ...plus 3% of the GPS miles since the baseline (polled GPS cuts corners)
+_ODO_MAX_JUMP_MI = 3000.0     # more than this since the previous fill → "jump" (another truck's mileage / typo)
+
+
+def _truck_gps_odometer(t: Truck):
+    if t.odo_baseline is None:
+        return None
+    return round(float(t.odo_baseline) + float(t.gps_miles or 0.0), 1)
+
+
+def _odo_tolerance_mi(t: Truck) -> float:
+    return _ODO_GPS_TOLERANCE_MI + _ODO_GPS_DRIFT * float(t.gps_miles or 0.0)
+
+
+def _find_truck_by_number(veh: str, s: Session):
+    targets = veh_keys(veh)
+    if not targets:
+        return None
+    for t in s.exec(select(Truck)).all():
+        if (veh_keys(t.label) | veh_keys(t.fluidsecure_vehicle_id)) & targets:
+            return t
+    return None
+
+
+def _prev_fill_odometer(s: Session, truck_id: int, before, exclude_id=None):
+    """The odometer on the truck's most recent earlier fill that has one."""
+    best = None
+    for f in s.exec(select(FuelTransaction).where(FuelTransaction.truck_id == truck_id)).all():
+        if f.odometer is None or f.id == exclude_id or f.odometer_flag:
+            continue      # a reading already flagged as wrong isn't a baseline to check the next one against
+        when = f.occurred_at or f.created_at or datetime.min
+        if before is not None and when >= before:
+            continue
+        if best is None or when > (best.occurred_at or best.created_at or datetime.min):
+            best = f
+    return best.odometer if best else None
+
+
+def _odometer_flag(odo, gps, prev, tol_mi=_ODO_GPS_TOLERANCE_MI):
+    """Sanity-check a typed odometer. Returns None when it looks right. When the
+    fill has a GPS odometer snapshot that is the authority: within tolerance is
+    fine even if an earlier (mistyped) fill reads higher. Without GPS, fall back
+    to the sequence checks against the previous trusted reading."""
+    if odo is None:
+        return None
+    if gps:
+        return "off_gps" if abs(odo - gps) > tol_mi else None
+    if prev is not None and odo < prev:
+        return "out_of_sequence"
+    if prev is not None and odo - prev > _ODO_MAX_JUMP_MI:
+        return "jump"
+    return None
+
+
+def _stamp_fill_odometer(ft: FuelTransaction, truck: Truck) -> None:
+    """Snapshot the truck's GPS odometer onto a fill at the moment it's logged.
+    Flagging happens in _flag_fuel_odometers (call it after the commit)."""
+    ft.odometer_gps = _truck_gps_odometer(truck)
+
+
+def _flag_fuel_odometers(s: Session, truck_id=None) -> int:
+    """Re-check each fill's typed odometer: against its GPS snapshot when it has
+    one, else against the previous trusted reading. Then a backward pass — an
+    unverified reading that is HIGHER than a later GPS-verified one was mistyped
+    (the classic "entered another truck's mileage"), so it's flagged too. Runs at
+    startup (so entries logged before this check existed get flagged) and after
+    every fill logged/edited. Returns the count now flagged (for the truck, or
+    fleet-wide)."""
+    n = 0
+    q = select(FuelTransaction).where(FuelTransaction.truck_id.is_not(None))
+    if truck_id is not None:
+        q = q.where(FuelTransaction.truck_id == truck_id)
+    by_truck: dict = {}
+    for f in s.exec(q).all():
+        by_truck.setdefault(f.truck_id, []).append(f)
+    for tid, lst in by_truck.items():
+        tr = s.get(Truck, tid)
+        tol = _odo_tolerance_mi(tr) if tr else _ODO_GPS_TOLERANCE_MI
+        lst.sort(key=lambda f: f.occurred_at or f.created_at or datetime.min)
+        lst = [f for f in lst if f.odometer is not None]
+        flags = {}
+        prev = None
+        for f in lst:
+            flag = _odometer_flag(f.odometer, f.odometer_gps, prev, tol)
+            flags[f.id] = flag
+            # a flagged reading is NOT the new "previous" — otherwise one typo would
+            # flag every correct reading after it
+            if not flag:
+                prev = f.odometer
+        # backward pass: GPS-verified readings are the authority for what came before
+        floor = None
+        for f in reversed(lst):
+            if flags[f.id] is None and f.odometer_gps:
+                floor = f.odometer if floor is None else min(floor, f.odometer)
+            elif flags[f.id] is None and floor is not None and f.odometer > floor:
+                flags[f.id] = "out_of_sequence"
+        for f in lst:
+            if flags[f.id] != f.odometer_flag:
+                f.odometer_flag = flags[f.id]; s.add(f)
+            if flags[f.id]:
+                n += 1
+    s.commit()
+    if n and truck_id is None:
+        print(f"fuel: {n} fill(s) carry an odometer that doesn't add up — see the Fuel screen")
+    return n
+
+
+class TruckOdometerIn(BaseModel):
+    odometer: float               # the dash reading right now
+
+
+@app.put("/trucks/{label}/odometer")
+def set_truck_odometer(label: str, body: TruckOdometerIn, _: User = Depends(require_staff),
+                       s: Session = Depends(get_session)):
+    """Office enters a truck's real dash odometer (staff). Becomes the baseline the
+    GPS miles count up from — the app's odometer restarts from this reading."""
+    t = s.exec(select(Truck).where(Truck.label == label)).first() or _find_truck_by_number(label, s)
+    if not t:
+        raise HTTPException(404, f"No truck named '{label}'")
+    if body.odometer is None or body.odometer <= 0:
+        raise HTTPException(422, "Enter the odometer reading")
+    t.odo_baseline = float(body.odometer)
+    t.odo_baseline_at = datetime.utcnow()
+    t.gps_miles = 0.0
+    s.add(t); s.commit(); s.refresh(t)
+    return {"ok": True, "label": t.label, "gps_odometer": _truck_gps_odometer(t), "odo_baseline_at": t.odo_baseline_at}
+
+
+@app.get("/fuel/odometer")
+def fuel_odometer(truck_no: str = Query(""), user: User = Depends(get_current_user), s: Session = Depends(get_session)):
+    """What the app knows about a truck's mileage, for the fuel-fill form: the GPS
+    odometer to pre-fill, and the previous fill's reading to check against.
+    Drivers and staff."""
+    if user.role not in ("driver", "staff"):
+        raise HTTPException(403, "Driver or staff access required")
+    t = _find_truck_by_number(truck_no, s)
+    if not t:
+        return {"ok": False, "reason": "no_truck"}
+    prev_fill = None
+    for f in s.exec(select(FuelTransaction).where(FuelTransaction.truck_id == t.id)).all():
+        if f.odometer is None:
+            continue
+        if prev_fill is None or (f.occurred_at or f.created_at or datetime.min) > (prev_fill.occurred_at or prev_fill.created_at or datetime.min):
+            prev_fill = f
+    stale = t.updated_at is None or (datetime.utcnow() - t.updated_at) > timedelta(hours=6)
+    return {"ok": True, "truck": t.label, "gps_odometer": _truck_gps_odometer(t),
+            "gps_live": bool(t.gps_device_id) and not stale, "has_baseline": t.odo_baseline is not None,
+            "last_odometer": prev_fill.odometer if prev_fill else None,
+            "last_fill_at": (prev_fill.occurred_at or prev_fill.created_at).isoformat() if prev_fill else None,
+            "tolerance_mi": round(_odo_tolerance_mi(t)), "max_jump_mi": _ODO_MAX_JUMP_MI}
+
+
+@app.get("/diag/gps")
+def diag_gps(k: str = Query(""), s: Session = Depends(get_session)):
+    """Per truck: GPS odometer state and the keys the GPS platform sends on its
+    latest point (to confirm whether it reports an odometer). Secret-code gated."""
+    if k != "ab-vision-7f3a9c2e":
+        raise HTTPException(404, "Not found")
+    from .integrations import onestep_gps as _gps
+    return {"trucks": [{"label": t.label, "device": t.gps_device_id, "odo_baseline": t.odo_baseline,
+                        "gps_miles": t.gps_miles, "gps_odometer": _truck_gps_odometer(t),
+                        "gps_odometer_reported": t.gps_odometer_reported, "updated_at": t.updated_at,
+                        "point_keys": _gps.last_points.get(t.gps_device_id or "")}
+                       for t in s.exec(select(Truck)).all()]}
+
+
 @app.post("/fuel/mileage")
 def attach_fuel_mileage(body: FuelMileageIn, user: User = Depends(get_current_user),
                         s: Session = Depends(get_session)):
@@ -3459,10 +3634,13 @@ def attach_fuel_mileage(body: FuelMileageIn, user: User = Depends(get_current_us
     latest.vehicle_no = truck.label or veh
     latest.odometer = body.odometer
     latest.driver = user.company or user.email
-    s.add(latest); s.commit(); s.refresh(latest)
+    _stamp_fill_odometer(latest, truck)
+    s.add(latest); s.commit()
+    _flag_fuel_odometers(s, truck.id); s.refresh(latest)
     when = latest.occurred_at or latest.created_at
-    print(f"POST /fuel/mileage  CLAIM truck={truck.label} odo={body.odometer} by={user.email} -> fill {latest.id} ({latest.gallons} gal)")
+    print(f"POST /fuel/mileage  CLAIM truck={truck.label} odo={body.odometer} gps={latest.odometer_gps} flag={latest.odometer_flag} by={user.email} -> fill {latest.id} ({latest.gallons} gal)")
     return {"ok": True, "gallons": latest.gallons, "odometer": latest.odometer,
+            "odometer_gps": latest.odometer_gps, "odometer_flag": latest.odometer_flag,
             "truck": truck.label, "occurred_at": when.isoformat() if when else None}
 
 
@@ -3503,10 +3681,13 @@ def manual_fuel_fill(body: FuelManualIn, user: User = Depends(get_current_user),
         odometer=(body.odometer if (body.odometer and body.odometer > 0) else None),
         driver=(user.company or user.email), occurred_at=when,
         raw=json.dumps({"manual": True, "by": user.email}))
-    s.add(ft); s.commit(); s.refresh(ft)
-    print(f"POST /fuel/manual  truck={truck.label} gal={body.gallons} by={user.email} -> id={ft.id}")
+    _stamp_fill_odometer(ft, truck)
+    s.add(ft); s.commit()
+    _flag_fuel_odometers(s, truck.id); s.refresh(ft)
+    print(f"POST /fuel/manual  truck={truck.label} gal={body.gallons} odo={ft.odometer} gps={ft.odometer_gps} flag={ft.odometer_flag} by={user.email} -> id={ft.id}")
     return {"ok": True, "gallons": ft.gallons, "truck": truck.label,
-            "odometer": ft.odometer, "occurred_at": when.isoformat()}
+            "odometer": ft.odometer, "odometer_gps": ft.odometer_gps, "odometer_flag": ft.odometer_flag,
+            "occurred_at": when.isoformat()}
 
 
 class FuelAddIn(BaseModel):
@@ -3552,7 +3733,10 @@ def add_fuel_fill(body: FuelAddIn, _: User = Depends(require_staff),
         vehicle_no=truck.label, gallons=body.gallons, fuel_type="Diesel",
         odometer=(body.odometer if (body.odometer and body.odometer > 0) else None),
         occurred_at=when, raw=json.dumps({"manual": True, "staff": True}))
-    s.add(ft); s.commit(); s.refresh(ft)
+    if when >= datetime.utcnow() - timedelta(hours=1):
+        _stamp_fill_odometer(ft, truck)     # logged for "now": the GPS odometer applies; a back-dated fill has no snapshot
+    s.add(ft); s.commit()
+    _flag_fuel_odometers(s, truck.id); s.refresh(ft)
     print(f"POST /fuel  staff add truck={truck.label} gal={body.gallons} when={when.date()} -> id={ft.id}")
     return {"ok": True, "id": ft.id, "truck": truck.label, "gallons": ft.gallons}
 
@@ -3623,6 +3807,7 @@ def fuel_summary(frm: str = Query(""), to: str = Query(""),
         fleet["yards"] += yd
         rows.append({
             "label": t.label, "fuel_vehicle": t.fluidsecure_vehicle_id,
+            "gps_odometer": _truck_gps_odometer(t),
             "gallons": round(a["gallons"], 1), "cost": round(a["cost"], 2),
             "fills": a["fills"], "last_fill": a["last_fill"], "last_odometer": a["last_odometer"],
             "yards": round(yd, 1),
@@ -3630,8 +3815,20 @@ def fuel_summary(frm: str = Query(""), to: str = Query(""),
             "cost_per_yd": round(a["cost"] / yd, 2) if yd else None,
         })
     rows.sort(key=lambda r: r["gallons"], reverse=True)
+    # Fills whose typed odometer doesn't add up (all time, newest first) so the
+    # office can fix them — a bad reading distorts miles-per-gallon twice over.
+    tlabel = {t.id: t.label for t in trucks}
+    flagged = []
+    for f in txns:
+        if f.odometer_flag and f.truck_id:
+            prev = _prev_fill_odometer(s, f.truck_id, f.occurred_at or f.created_at, exclude_id=f.id)
+            flagged.append({"id": f.id, "truck": tlabel.get(f.truck_id, "?"), "when": f.occurred_at,
+                            "driver": f.driver, "gallons": f.gallons, "odometer": f.odometer,
+                            "odometer_gps": f.odometer_gps, "prev_odometer": prev, "flag": f.odometer_flag})
+    flagged.sort(key=lambda r: r["when"] or datetime.min, reverse=True)
     return {
         "trucks": rows,
+        "flagged": flagged,
         "fleet": {
             "gallons": round(fleet["gallons"], 1), "cost": round(fleet["cost"], 2),
             "yards": round(fleet["yards"], 1),
@@ -3714,9 +3911,11 @@ def truck_fuel(label: str, _: User = Depends(require_staff), s: Session = Depend
         "fuel_vehicle": truck.fluidsecure_vehicle_id,
         "fills": [
             {"id": t.id, "when": t.occurred_at, "gallons": t.gallons, "fuel_type": t.fuel_type,
-             "odometer": t.odometer, "driver": t.driver, "pin": t.pin, "vehicle_no": t.vehicle_no}
+             "odometer": t.odometer, "odometer_gps": t.odometer_gps, "odometer_flag": t.odometer_flag,
+             "driver": t.driver, "pin": t.pin, "vehicle_no": t.vehicle_no}
             for t in txns
         ],
+        "gps_odometer": _truck_gps_odometer(truck),
     }
 
 
@@ -3759,10 +3958,15 @@ def edit_fuel_fill(fill_id: int, body: FuelFillEditIn, _: User = Depends(require
         ft.gallons = body.gallons
     if body.odometer is not None:
         ft.odometer = body.odometer
-    s.add(ft); s.commit(); s.refresh(ft)
-    print(f"PATCH /fuel/{fill_id}  -> truck_id={ft.truck_id} gal={ft.gallons} odo={ft.odometer}")
+    if not ft.truck_id:
+        ft.odometer_flag = None
+    s.add(ft); s.commit()
+    if ft.truck_id:
+        _flag_fuel_odometers(s, ft.truck_id)     # re-check this fill and the ones around it
+    s.refresh(ft)
+    print(f"PATCH /fuel/{fill_id}  -> truck_id={ft.truck_id} gal={ft.gallons} odo={ft.odometer} flag={ft.odometer_flag}")
     return {"ok": True, "id": ft.id, "truck_id": ft.truck_id,
-            "gallons": ft.gallons, "odometer": ft.odometer}
+            "gallons": ft.gallons, "odometer": ft.odometer, "odometer_flag": ft.odometer_flag}
 
 
 @app.delete("/fuel/{fill_id}")
