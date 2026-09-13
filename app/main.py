@@ -16,12 +16,13 @@ from typing import List, Optional
 import glob
 import json
 import os
+import re
 import secrets
 import shutil
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Query
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -37,7 +38,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session, engine
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver, require_timeclock,
@@ -467,7 +468,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-12.1-multipage-ticket"
+APP_VERSION = "2026-09-13.2-weight-ticket-pdf"
 
 
 @app.get("/version")
@@ -1209,7 +1210,8 @@ def _materials_summary(s: Session, frm: str = None, to: str = None) -> dict:
         total_cost += cost
         item = {
             "id": m.id, "name": m.name, "unit": unit,
-            "cost_rate": m.cost_rate or 0, "track_inventory": bool(m.track_inventory),
+            "cost_rate": m.cost_rate or 0, "haul_rate": m.haul_rate or 0,
+            "track_inventory": bool(m.track_inventory),
             "counted_on": m.counted_on,
             "used_amount": round(used, 2), "used_ticket_amount": round(used_ticket, 2),
             "used_estimate_amount": round(used - used_ticket, 2),
@@ -1283,6 +1285,7 @@ class MaterialIn(BaseModel):
     on_hand_tons: Optional[float] = None         # "set current tons" — desired on-hand NOW
     counted_on: Optional[str] = None             # ISO date
     cost_rate: Optional[float] = None            # $ per unit, for usage-based cost
+    haul_rate: Optional[float] = None            # default $/ton hauling (aggregate weight tickets)
 
 
 @app.put("/materials/{material_id:int}")
@@ -1296,7 +1299,7 @@ def update_material(material_id: int, body: MaterialIn, _: User = Depends(requir
     m = s.get(Material, material_id)
     if not m:
         raise HTTPException(404, "Material not found")
-    for f in ("capacity_tons", "reorder_tons", "opening_tons", "counted_on", "cost_rate"):
+    for f in ("capacity_tons", "reorder_tons", "opening_tons", "counted_on", "cost_rate", "haul_rate"):
         v = getattr(body, f)
         if v is not None:
             setattr(m, f, v)
@@ -4708,3 +4711,602 @@ def delete_time_entry(entry_id: int, _: User = Depends(require_finance), s: Sess
     s.delete(en)
     s.commit()
     return {"ok": True, "id": entry_id}
+
+
+# ── Aggregate weight tickets ─────────────────────────────────────────────────
+# The pit/quarry scale ticket for each load of rock or sand our aggregate trucks
+# haul in. Drivers snap it on the tablet at pickup (POST /weight-tickets); the
+# office reviews and corrects it on the dispatch board. Aggregate cost and hauling
+# cost both roll up from net tons × the rates snapshotted on the ticket.
+from .ticketgen import read_weight_ticket as _wt_reader
+from .ticketgen import weight_ticket_pdf as _wt_pdf
+
+_WT_LB_PER_TON = 2000.0
+_WT_PDF_NAME = "ticket.pdf"   # the generated readable PDF, alongside the raw photos
+
+
+def _wt_root() -> str:
+    return config.data_path("weight_tickets")
+
+
+def _wt_dir(ticket_id: int, create: bool = False) -> str:
+    d = os.path.join(_wt_root(), str(ticket_id))
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _wt_photos(ticket_id: int) -> list:
+    d = _wt_dir(ticket_id)
+    if not os.path.isdir(d):
+        return []
+    names = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in _ATTACH_EXTS and f != _WT_PDF_NAME]
+    return sorted(names, key=lambda n: (int(os.path.splitext(n)[0]) if os.path.splitext(n)[0].isdigit() else 1 << 30, n))
+
+
+def _wt_pdf_path(ticket_id: int) -> str:
+    return os.path.join(_wt_dir(ticket_id), _WT_PDF_NAME)
+
+
+def _wt_build_pdf(ticket_id: int) -> str | None:
+    """(Re)generate the ticket's readable PDF from its current figures + photos:
+    a typed, searchable header block and the cleaned-up photo(s). Runs after an
+    upload, a photo read, an edit, or a photo add/remove, so the PDF always
+    matches what's on the ticket. Never raises — a PDF failure must not break
+    the request that triggered it."""
+    try:
+        with Session(engine) as s:
+            t = s.get(WeightTicket, ticket_id)
+            if not t:
+                return None
+            j = _wt_json(t)
+        photos = [os.path.join(_wt_dir(ticket_id), n) for n in _wt_photos(ticket_id)]
+        try:
+            company = ticket_convert._cfg().get("company") or {}
+        except Exception:   # noqa: BLE001 — config missing → plain header
+            company = {}
+        _wt_dir(ticket_id, create=True)   # a typed-only ticket (no photo) has no folder yet
+        return _wt_pdf.render_weight_ticket_pdf(j, photos, _wt_pdf_path(ticket_id), company=company)
+    except Exception as e:   # noqa: BLE001
+        print(f"weight ticket {ticket_id} pdf failed:", e)
+        return None
+
+
+def _wt_costs(t: WeightTicket) -> tuple:
+    tons = pricing._num(t.net_tons)
+    mat = round(tons * pricing._num(t.material_rate), 2)
+    haul = round(tons * pricing._num(t.haul_rate), 2)
+    return mat, haul
+
+
+def _wt_json(t: WeightTicket) -> dict:
+    mat_cost, haul_cost = _wt_costs(t)
+    read = None
+    if t.read_data:
+        try:
+            read = json.loads(t.read_data)
+        except (ValueError, TypeError):
+            read = None
+    return {"id": t.id, "ticket_date": t.ticket_date, "material_id": t.material_id, "material": t.material,
+            "supplier": t.supplier, "ticket_no": t.ticket_no, "truck_id": t.truck_id, "truck": t.truck_label,
+            "driver": t.driver, "gross_lb": t.gross_lb, "tare_lb": t.tare_lb, "net_tons": t.net_tons,
+            "material_rate": t.material_rate, "haul_rate": t.haul_rate,
+            "material_cost": mat_cost, "haul_cost": haul_cost, "total_cost": round(mat_cost + haul_cost, 2),
+            "notes": t.notes, "uploaded_by": t.uploaded_by, "source": t.source, "reviewed": bool(t.reviewed),
+            "read_status": t.read_status, "read": read,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "photos": _wt_photos(t.id),
+            "pdf": os.path.exists(_wt_pdf_path(t.id))}   # the readable PDF is ready to view
+
+
+def _wt_aggregate_materials(s: Session) -> list:
+    """Materials a weight ticket can be logged against: the usage-tracked
+    aggregates (Gravel, Sand — anything priced per ton that isn't a silo)."""
+    _ensure_materials(s)
+    out = []
+    for m in s.exec(select(Material)).all():
+        if (m.unit or "ton") == "ton" and not m.track_inventory:
+            out.append(m)
+    return sorted(out, key=lambda m: next((i for i, d in enumerate(DEFAULT_MATERIALS) if d["name"] == m.name), 99))
+
+
+def _wt_material_for(name: str, material_id, s: Session):
+    """Resolve the material a ticket is for: by id, else by name (exact, then a
+    keyword match so a pit's '3/4\" Limestone' lands on Gravel and 'Concrete Sand'
+    on Sand). None when nothing fits — the ticket keeps the raw product text."""
+    if material_id:
+        m = s.get(Material, int(material_id))
+        if m:
+            return m
+    n = (name or "").strip().lower()
+    if not n:
+        return None
+    mats = _wt_aggregate_materials(s)
+    for m in mats:
+        if m.name.strip().lower() == n:
+            return m
+    for m in mats:
+        if m.name.strip().lower() in n:
+            return m
+    if any(k in n for k in ("gravel", "rock", "stone", "lime", "base", "3/4", "1\"", "pea", "#57", "57")):
+        return next((m for m in mats if m.name.lower() == "gravel"), None)
+    if "sand" in n or "fines" in n or "screening" in n:
+        return next((m for m in mats if m.name.lower() == "sand"), None)
+    return None
+
+
+def _wt_truck_for(label: str, s: Session):
+    """Match a typed truck label/number to a Truck row the way fuel fills do —
+    'RTS 4554', 'rts4554' and '4554' all hit the same truck. None if no match."""
+    want = veh_keys(label)
+    if not want:
+        return None
+    for t in s.exec(select(Truck)).all():
+        if veh_keys(t.label) & want:
+            return t
+    return None
+
+
+def _wt_read_photo(ticket_id: int, path: str) -> None:
+    """Background: read the ticket photo with Claude vision and fill in whatever
+    the uploader left BLANK (never overwrite a typed value). Sets read_status."""
+    with Session(engine) as s:
+        t = s.get(WeightTicket, ticket_id)
+        if not t:
+            return
+        try:
+            d = _wt_reader.read_weight_ticket(path)
+        except Exception as e:   # noqa: BLE001 — a read failure must never lose the upload
+            print(f"weight ticket {ticket_id} read failed:", e)
+            t.read_status = "failed"
+            s.add(t); s.commit()
+            _wt_build_pdf(ticket_id)
+            return
+        t.read_data = json.dumps(d)
+        t.read_status = "done"
+        if not t.ticket_no and d.get("ticket_no"):
+            t.ticket_no = d["ticket_no"]
+        if not t.supplier and d.get("supplier"):
+            t.supplier = d["supplier"]
+        if d.get("date") and re.match(r"^\d{4}-\d{2}-\d{2}$", d["date"]) and t.source == "driver" \
+                and t.ticket_date == _business_today().isoformat() and d["date"] != t.ticket_date:
+            # the driver took the default (today); the ticket says otherwise → trust the ticket
+            t.ticket_date = d["date"]
+        if t.gross_lb is None and d.get("gross_lb"):
+            t.gross_lb = d["gross_lb"]
+        if t.tare_lb is None and d.get("tare_lb"):
+            t.tare_lb = d["tare_lb"]
+        if not t.net_tons and d.get("net_tons"):
+            t.net_tons = round(float(d["net_tons"]), 2)
+        if not t.material_id and d.get("product"):
+            m = _wt_material_for(d["product"], None, s)
+            if m:
+                t.material_id = m.id
+                t.material = t.material or m.name
+                if not t.material_rate:
+                    t.material_rate = m.cost_rate or None
+                if not t.haul_rate:
+                    t.haul_rate = m.haul_rate or None
+            elif not t.material:
+                t.material = d["product"]
+        if not t.material_rate and d.get("unit_price"):
+            t.material_rate = d["unit_price"]
+        if not t.truck_id and d.get("truck"):
+            tr = _wt_truck_for(d["truck"], s)
+            if tr:
+                t.truck_id = tr.id
+                t.truck_label = t.truck_label or tr.label
+            elif not t.truck_label:
+                t.truck_label = d["truck"]
+        s.add(t); s.commit()
+    _wt_build_pdf(ticket_id)   # the PDF carries whatever the reader filled in
+
+
+def _wt_can_see(t: WeightTicket, user: User) -> bool:
+    if user.role == "staff":
+        return True
+    if user.role == "driver":
+        me = (user.company or "").strip().lower()
+        return bool(me) and (t.driver or "").strip().lower() == me
+    return False
+
+
+def _require_driver_or_staff(user: User = Depends(get_current_user)) -> User:
+    if user.role not in ("staff", "driver"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Driver or staff access required")
+    return user
+
+
+async def _wt_store_upload(ticket_id: int, file: UploadFile) -> str:
+    """Save an uploaded photo/PDF under the ticket's folder; returns the path."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    ctype = (file.content_type or "").lower()
+    if not (ctype.startswith("image/") or ctype == "application/pdf" or ext in _ATTACH_EXTS):
+        raise HTTPException(422, "Attach a photo (JPG, PNG, HEIC…) or a PDF of the ticket.")
+    existing = _wt_photos(ticket_id)
+    if len(existing) >= 6:
+        raise HTTPException(409, "That ticket already has the maximum of 6 attachments.")
+    data = await file.read()
+    if len(data) > 15 * 1024 * 1024:
+        raise HTTPException(413, "That file is too large (15 MB max).")
+    if not data:
+        raise HTTPException(422, "The file was empty — try taking the photo again.")
+    nums = [int(os.path.splitext(n)[0]) for n in existing if os.path.splitext(n)[0].isdigit()]
+    if ext not in _ATTACH_EXTS:
+        ext = ".pdf" if ctype == "application/pdf" else ".jpg"
+    fname = f"{(max(nums) + 1) if nums else 1}{ext}"
+    path = os.path.join(_wt_dir(ticket_id, create=True), fname)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+def _wt_readable_image(path: str) -> bool:
+    """The vision reader takes a raster image. HEIC/PDF uploads are stored but not
+    auto-read (the office keys them in on review)."""
+    return os.path.splitext(path)[1].lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+@app.get("/weight-tickets/options")
+def weight_ticket_options(user: User = Depends(_require_driver_or_staff), s: Session = Depends(get_session)):
+    """What the log-a-ticket form needs: the aggregate materials (with default
+    rates for staff), the aggregate haulers first then every other truck, pits seen
+    on past tickets, and — for staff — the driver roster."""
+    mats = _wt_aggregate_materials(s)
+    trucks = s.exec(select(Truck)).all()
+    trucks = sorted(trucks, key=lambda t: (0 if _truck_kind(t) == "aggregate" else 1, t.label.lower()))
+    sups = {}
+    for t in s.exec(select(WeightTicket)).all():
+        if t.supplier:
+            k = t.supplier.strip().lower()
+            if k and k not in sups:
+                sups[k] = t.supplier.strip()
+    out = {
+        "materials": [{"id": m.id, "name": m.name,
+                       **({"cost_rate": m.cost_rate or 0, "haul_rate": m.haul_rate or 0} if user.role == "staff" else {})}
+                      for m in mats],
+        "trucks": [{"label": t.label, "kind": _truck_kind(t)} for t in trucks],
+        "suppliers": sorted(sups.values(), key=str.lower),
+        "vision": ticket_convert.available(),
+    }
+    if user.role == "staff":
+        out["drivers"] = _driver_names(s)
+    return out
+
+
+@app.post("/weight-tickets")
+async def create_weight_ticket(
+    background: BackgroundTasks,
+    file: Optional[UploadFile] = File(None),
+    ticket_date: str = Form(""),
+    material: str = Form(""),
+    material_id: str = Form(""),
+    supplier: str = Form(""),
+    ticket_no: str = Form(""),
+    truck: str = Form(""),
+    driver: str = Form(""),
+    net_tons: str = Form(""),
+    gross_lb: str = Form(""),
+    tare_lb: str = Form(""),
+    material_rate: str = Form(""),
+    haul_rate: str = Form(""),
+    notes: str = Form(""),
+    user: User = Depends(_require_driver_or_staff),
+    s: Session = Depends(get_session),
+):
+    """Log a weight ticket — from the driver tablet (photo required; the rest is
+    optional and gets read off the photo when the vision key is set) or from the
+    dispatch board (staff; photo optional). Net tons may be typed directly, or
+    computed from gross/tare lb. Rates default from the material's settings."""
+    is_driver = user.role == "driver"
+    if is_driver and file is None:
+        raise HTTPException(422, "Take a photo of the weight ticket to log it.")
+
+    def _f(v):
+        v = (v or "").strip().replace(",", "")
+        if not v:
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            raise HTTPException(422, f"'{v}' isn't a number.")
+
+    tons, gross, tare = _f(net_tons), _f(gross_lb), _f(tare_lb)
+    if tons is None and gross is not None and tare is not None:
+        if gross <= tare:
+            raise HTTPException(422, "Gross weight must be more than tare.")
+        tons = round((gross - tare) / _WT_LB_PER_TON, 2)
+    if tons is not None and tons <= 0:
+        raise HTTPException(422, "Net tons must be a positive number.")
+    if tons is not None and tons > 100:
+        raise HTTPException(422, "Net tons looks wrong (over 100) — check whether you typed pounds.")
+    td = (ticket_date or "").strip() or _business_today().isoformat()
+    try:
+        datetime.strptime(td, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(422, "Ticket date must be YYYY-MM-DD.")
+
+    m = _wt_material_for(material, material_id or None, s)
+    tr = _wt_truck_for(truck, s) if truck.strip() else None
+    drv = (user.company or "").strip() if is_driver else (driver or "").strip()
+    mrate, hrate = _f(material_rate), _f(haul_rate)
+    if is_driver:
+        mrate = hrate = None   # drivers never set money; the office's defaults apply
+    if m:
+        if mrate is None:
+            mrate = m.cost_rate or None
+        if hrate is None:
+            hrate = m.haul_rate or None
+    t = WeightTicket(
+        ticket_date=td, material_id=m.id if m else None,
+        material=(m.name if m else (material or "").strip() or None),
+        supplier=supplier.strip() or None, ticket_no=ticket_no.strip() or None,
+        truck_id=tr.id if tr else None, truck_label=(tr.label if tr else truck.strip() or None),
+        driver=drv or None, gross_lb=gross, tare_lb=tare, net_tons=tons,
+        material_rate=mrate, haul_rate=hrate, notes=notes.strip() or None,
+        uploaded_by=(user.email or user.company or "").strip() or None,
+        source="driver" if is_driver else "staff",
+    )
+    s.add(t); s.commit(); s.refresh(t)
+    path = None
+    if file is not None:
+        try:
+            path = await _wt_store_upload(t.id, file)
+        except HTTPException:
+            s.delete(t); s.commit()
+            raise
+    if path and ticket_convert.available() and _wt_readable_image(path):
+        t.read_status = "pending"
+        s.add(t); s.commit()
+        background.add_task(_wt_read_photo, t.id, path)
+    elif path:
+        t.read_status = "skipped"
+        s.add(t); s.commit()
+        background.add_task(_wt_build_pdf, t.id)
+    else:
+        background.add_task(_wt_build_pdf, t.id)   # no photo: a typed-only PDF for the file
+    print(f"POST /weight-tickets  #{t.id} {t.material or '?'} {t.net_tons or '?'} t by {user.email or user.company}")
+    return _wt_json(t)
+
+
+def _wt_summary(rows: list) -> dict:
+    """Roll tickets up: totals plus per-material, per-truck and per-pit buckets."""
+    def bucket(key):
+        out = {}
+        for t in rows:
+            k = key(t) or "—"
+            b = out.setdefault(k, {"label": k, "loads": 0, "tons": 0.0, "material_cost": 0.0, "haul_cost": 0.0})
+            mc, hc = _wt_costs(t)
+            b["loads"] += 1
+            b["tons"] += pricing._num(t.net_tons)
+            b["material_cost"] += mc
+            b["haul_cost"] += hc
+        res = []
+        for b in out.values():
+            b["tons"] = round(b["tons"], 2)
+            b["material_cost"] = round(b["material_cost"], 2)
+            b["haul_cost"] = round(b["haul_cost"], 2)
+            b["total_cost"] = round(b["material_cost"] + b["haul_cost"], 2)
+            res.append(b)
+        return sorted(res, key=lambda b: (-b["tons"], b["label"].lower()))
+    tons = round(sum(pricing._num(t.net_tons) for t in rows), 2)
+    mc = round(sum(_wt_costs(t)[0] for t in rows), 2)
+    hc = round(sum(_wt_costs(t)[1] for t in rows), 2)
+    return {"loads": len(rows), "tons": tons, "material_cost": mc, "haul_cost": hc,
+            "total_cost": round(mc + hc, 2),
+            "missing_tons": sum(1 for t in rows if not t.net_tons),
+            "unreviewed": sum(1 for t in rows if not t.reviewed),
+            "by_material": bucket(lambda t: t.material),
+            "by_truck": bucket(lambda t: t.truck_label),
+            "by_supplier": bucket(lambda t: t.supplier),
+            "by_driver": bucket(lambda t: t.driver)}
+
+
+@app.get("/weight-tickets")
+def list_weight_tickets(_: User = Depends(require_staff), s: Session = Depends(get_session),
+                        frm: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None),
+                        material_id: Optional[int] = None, truck: Optional[str] = None):
+    """Weight tickets newest first (staff), with cost roll-ups for the window.
+    from/to are ticket dates (yyyy-mm-dd, inclusive); both blank = everything."""
+    q = select(WeightTicket)
+    if frm:
+        q = q.where(WeightTicket.ticket_date >= frm)
+    if to:
+        q = q.where(WeightTicket.ticket_date <= to)
+    if material_id is not None:
+        q = q.where(WeightTicket.material_id == material_id)
+    rows = s.exec(q).all()
+    if truck:
+        want = veh_keys(truck)
+        rows = [t for t in rows if veh_keys(t.truck_label) & want]
+    rows.sort(key=lambda t: (t.ticket_date or "", t.id or 0), reverse=True)
+    return {"tickets": [_wt_json(t) for t in rows], "summary": _wt_summary(rows),
+            "vision": ticket_convert.available()}
+
+
+@app.get("/weight-tickets/mine")
+def my_weight_tickets(user: User = Depends(require_driver), s: Session = Depends(get_session),
+                      days: int = 14):
+    """The tickets THIS driver has logged recently (tablet), newest first, so they
+    can see it went through and what the reader pulled off the photo."""
+    me = (user.company or "").strip().lower()
+    since = (_business_today() - timedelta(days=max(1, min(days, 90)))).isoformat()
+    rows = [t for t in s.exec(select(WeightTicket).where(WeightTicket.ticket_date >= since)).all()
+            if me and (t.driver or "").strip().lower() == me]
+    rows.sort(key=lambda t: (t.ticket_date or "", t.id or 0), reverse=True)
+    today = _business_today().isoformat()
+    todays = [t for t in rows if t.ticket_date == today]
+    out = []
+    for t in rows:
+        j = _wt_json(t)
+        # Drivers don't see money — strip the rates/costs from their view.
+        for k in ("material_rate", "haul_rate", "material_cost", "haul_cost", "total_cost", "read"):
+            j.pop(k, None)
+        out.append(j)
+    return {"driver": user.company, "date": today, "tickets": out,
+            "today": {"loads": len(todays), "tons": round(sum(pricing._num(t.net_tons) for t in todays), 2)}}
+
+
+class WeightTicketPatch(BaseModel):
+    ticket_date: Optional[str] = None
+    material_id: Optional[int] = None
+    material: Optional[str] = None
+    supplier: Optional[str] = None
+    ticket_no: Optional[str] = None
+    truck: Optional[str] = None
+    driver: Optional[str] = None
+    gross_lb: Optional[float] = None
+    tare_lb: Optional[float] = None
+    net_tons: Optional[float] = None
+    material_rate: Optional[float] = None
+    haul_rate: Optional[float] = None
+    notes: Optional[str] = None
+    reviewed: Optional[bool] = None
+
+
+@app.patch("/weight-tickets/{ticket_id}")
+def edit_weight_ticket(ticket_id: int, body: WeightTicketPatch, background: BackgroundTasks,
+                       _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Office corrects a ticket's figures / marks it reviewed (staff). Sending
+    material_id re-resolves the material name and, when the ticket has no rate
+    yet, pulls that material's default rates in."""
+    t = s.get(WeightTicket, ticket_id)
+    if not t:
+        raise HTTPException(404, "Ticket not found")
+    data = body.model_dump(exclude_unset=True)
+    if "ticket_date" in data:
+        try:
+            datetime.strptime(data["ticket_date"] or "", "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(422, "Ticket date must be YYYY-MM-DD.")
+    if "net_tons" in data and data["net_tons"] is not None and data["net_tons"] <= 0:
+        raise HTTPException(422, "Net tons must be a positive number.")
+    if "material_id" in data:
+        m = s.get(Material, data["material_id"]) if data["material_id"] else None
+        t.material_id = m.id if m else None
+        if m:
+            t.material = m.name
+            if not t.material_rate:
+                t.material_rate = m.cost_rate or None
+            if not t.haul_rate:
+                t.haul_rate = m.haul_rate or None
+        data.pop("material_id")
+        if m:
+            data.pop("material", None)
+    if "truck" in data:
+        lbl = (data.pop("truck") or "").strip()
+        tr = _wt_truck_for(lbl, s) if lbl else None
+        t.truck_id = tr.id if tr else None
+        t.truck_label = tr.label if tr else (lbl or None)
+    for f, v in data.items():
+        if isinstance(v, str):
+            v = v.strip() or None
+        setattr(t, f, v)
+    # gross/tare edited with no explicit net → recompute
+    if ("gross_lb" in data or "tare_lb" in data) and "net_tons" not in data \
+            and t.gross_lb and t.tare_lb and t.gross_lb > t.tare_lb:
+        t.net_tons = round((t.gross_lb - t.tare_lb) / _WT_LB_PER_TON, 2)
+    s.add(t); s.commit(); s.refresh(t)
+    background.add_task(_wt_build_pdf, t.id)   # keep the PDF's typed block in step with the edit
+    return _wt_json(t)
+
+
+@app.delete("/weight-tickets/{ticket_id}")
+def delete_weight_ticket(ticket_id: int, _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove a ticket and its photos (staff)."""
+    t = s.get(WeightTicket, ticket_id)
+    if t:
+        s.delete(t); s.commit()
+    d = _wt_dir(ticket_id)
+    if os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True, "removed": ticket_id}
+
+
+@app.post("/weight-tickets/{ticket_id}/photos")
+async def add_weight_ticket_photo(ticket_id: int, background: BackgroundTasks, file: UploadFile = File(...),
+                                  user: User = Depends(_require_driver_or_staff), s: Session = Depends(get_session)):
+    """Attach another photo/PDF (e.g. the back of the ticket). Staff, or the driver
+    who logged it. A ticket with no figures yet gets the new photo auto-read."""
+    t = s.get(WeightTicket, ticket_id)
+    if not t or not _wt_can_see(t, user):
+        raise HTTPException(404, "Ticket not found")
+    path = await _wt_store_upload(t.id, file)
+    if not t.net_tons and ticket_convert.available() and _wt_readable_image(path):
+        t.read_status = "pending"
+        s.add(t); s.commit()
+        background.add_task(_wt_read_photo, t.id, path)   # rebuilds the PDF when done
+    else:
+        background.add_task(_wt_build_pdf, t.id)
+    return _wt_json(t)
+
+
+@app.post("/weight-tickets/{ticket_id}/reread")
+def reread_weight_ticket(ticket_id: int, background: BackgroundTasks, _: User = Depends(require_staff),
+                         s: Session = Depends(get_session)):
+    """Run the vision reader again on the ticket's first photo (staff) — e.g. after
+    a failed read. Only fills fields that are still blank."""
+    t = s.get(WeightTicket, ticket_id)
+    if not t:
+        raise HTTPException(404, "Ticket not found")
+    if not ticket_convert.available():
+        raise HTTPException(503, "Ticket reader unavailable (ANTHROPIC_API_KEY not set).")
+    imgs = [n for n in _wt_photos(t.id) if _wt_readable_image(n)]
+    if not imgs:
+        raise HTTPException(409, "No readable photo on this ticket (only PDF/HEIC).")
+    t.read_status = "pending"
+    s.add(t); s.commit()
+    background.add_task(_wt_read_photo, t.id, os.path.join(_wt_dir(t.id), imgs[0]))
+    return _wt_json(t)
+
+
+@app.get("/weight-tickets/{ticket_id}/pdf")
+def get_weight_ticket_pdf(ticket_id: int, user: User = Depends(_require_driver_or_staff),
+                          s: Session = Depends(get_session)):
+    """The readable PDF of a weight ticket (typed figures + cleaned-up photo) —
+    staff, or the driver who logged it. Built on demand if it isn't there yet
+    (e.g. the background build is still running), so this never 404s on a real
+    ticket."""
+    t = s.get(WeightTicket, ticket_id)
+    if not t or not _wt_can_see(t, user):
+        raise HTTPException(404, "Ticket not found")
+    path = _wt_pdf_path(ticket_id)
+    if not os.path.exists(path) and not _wt_build_pdf(ticket_id):
+        raise HTTPException(503, "Couldn't build the ticket PDF — try again in a moment.")
+    label = (t.ticket_no or f"AB{t.id}").replace("/", "-")
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"weight-ticket-{t.ticket_date or ''}-{label}.pdf")
+
+
+@app.get("/weight-tickets/{ticket_id}/photos/{name}")
+def get_weight_ticket_photo(ticket_id: int, name: str, user: User = Depends(_require_driver_or_staff),
+                            s: Session = Depends(get_session)):
+    """View a ticket photo/PDF — staff, or the driver who logged it. Authed, so the
+    app fetches it as a blob."""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Bad photo name")
+    t = s.get(WeightTicket, ticket_id)
+    if not t or not _wt_can_see(t, user):
+        raise HTTPException(404, "Ticket not found")
+    path = os.path.join(_wt_dir(ticket_id), name)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Photo not found")
+    return FileResponse(path, media_type=_media_type(path), filename=name)
+
+
+@app.delete("/weight-tickets/{ticket_id}/photos/{name}")
+def delete_weight_ticket_photo(ticket_id: int, name: str, background: BackgroundTasks,
+                               _: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Remove one attachment from a ticket (staff)."""
+    if "/" in name or "\\" in name or ".." in name or name == _WT_PDF_NAME:
+        raise HTTPException(400, "Bad photo name")
+    path = os.path.join(_wt_dir(ticket_id), name)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    t = s.get(WeightTicket, ticket_id)
+    if t:
+        background.add_task(_wt_build_pdf, t.id)
+    return _wt_json(t) if t else {"ok": True}
