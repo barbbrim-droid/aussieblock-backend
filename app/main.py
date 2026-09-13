@@ -468,7 +468,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.4-margin-report"
+APP_VERSION = "2026-09-13.5-cement-rates"
 
 
 @app.get("/version")
@@ -1031,9 +1031,12 @@ _MATERIAL_SPEC = {
     "E5 LFA":           ("e5_lfa",        "oz",  False),
 }
 # Silos (on-hand draw-down) vs usage-only (just used + cost). order = display order.
+# `cost_rate` is the DELIVERED $/unit a material starts at; it's applied when the
+# material is created and to an existing one whose rate is still 0 — a rate set on
+# the Materials screen is never overwritten.
 DEFAULT_MATERIALS = [
-    {"name": "Portland",         "unit": "ton", "track_inventory": True},
-    {"name": "Slag",             "unit": "ton", "track_inventory": True},
+    {"name": "Portland",         "unit": "ton", "track_inventory": True,  "cost_rate": 210.0},   # $/ton delivered
+    {"name": "Slag",             "unit": "ton", "track_inventory": True,  "cost_rate": 165.0},   # $/ton delivered
     {"name": "Gravel",           "unit": "ton", "track_inventory": False},
     {"name": "Sand",             "unit": "ton", "track_inventory": False},
     {"name": "Mac Matrix Fiber", "unit": "lb",  "track_inventory": False},
@@ -1059,14 +1062,20 @@ def _ensure_materials(s: Session) -> None:
         new = _RENAMES.get((m.name or "").strip().lower())
         if new and new.strip().lower() not in have:
             m.name = new; s.add(m); have.add(new.strip().lower()); changed = True
+    by_name = {(m.name or "").strip().lower(): m for m in existing_mats}
     for spec in DEFAULT_MATERIALS:
-        if spec["name"].strip().lower() not in have:
+        key = spec["name"].strip().lower()
+        if key not in have:
             # Inventory silos count from today; usage-only materials count all-time
             # (counted_on stays null) so historical actuals aren't excluded.
             s.add(Material(name=spec["name"], unit=spec["unit"],
                            track_inventory=spec["track_inventory"],
+                           cost_rate=spec.get("cost_rate", 0.0),
                            counted_on=today if spec["track_inventory"] else None))
             changed = True
+        elif spec.get("cost_rate") and not (by_name[key].cost_rate or 0):
+            # Existing material with no rate yet → start it at the default delivered rate.
+            by_name[key].cost_rate = spec["cost_rate"]; s.add(by_name[key]); changed = True
     # Backfill any default design missing by name (not just on an empty table) so
     # new defaults like TxDOT Class A reach an already-seeded production DB on
     # deploy. Office-customized lb/yd values are left untouched.
