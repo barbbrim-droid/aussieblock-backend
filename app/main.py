@@ -179,6 +179,7 @@ async def lifespan(app: FastAPI):
         _ensure_materials(_s)   # seed/backfill materials + apply any dated rate revisions on deploy
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
+        asyncio.create_task(stale_order_sweep_loop()),   # nothing stays "ongoing" past its pour day
         asyncio.create_task(qbo_sync_loop()),   # periodic QuickBooks A/R sync
         asyncio.create_task(keepalive_loop()),  # self-ping so the host never spins us down
     ]
@@ -272,6 +273,65 @@ def _complete_open_loads(o: Order, s: Session) -> int:
         s.add(ld)
         n += 1
     return n
+
+
+
+# Order stages that mean a truck is (or was) out on the job. An order still in one
+# of these after its pour day is over is a job nobody closed out on the board.
+_IN_FLIGHT_STATUSES = {"batched", "enroute", "onsite", "pouring", "washout", "returning", "ongoing"}
+
+
+def _finish_order(o: Order, s: Session, completed_on: str) -> None:
+    """Mark an order complete the way the board's Complete does (progress, standby
+    clock, completion date, mixer water, open loads), but dated `completed_on`
+    (its pour day) instead of today so it lands on the right day everywhere."""
+    o.status = "complete"
+    o.progress = _STATUS_PROGRESS["complete"]
+    stamp_departed(o)
+    if not o.completed_at:
+        o.completed_at = completed_on
+    _capture_mixer_water(o, s)
+    _complete_open_loads(o, s)
+    s.add(o)
+
+
+def _close_out_stale_orders(s: Session) -> list:
+    """Every pour or delivery still in flight after its pour day is over gets
+    completed — nothing is left 'ongoing' into the next day. A pour that runs past
+    midnight is safe: only orders whose scheduled date is BEFORE today qualify, so
+    tonight's job is untouched until tomorrow. Requested / scheduled orders that
+    never dispatched are left alone (they show as overdue on the board).
+    Runs at startup and hourly; returns the refs it completed."""
+    today = _business_today().isoformat()
+    done = []
+    for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES))).all():
+        d = (o.scheduled_for or "").strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", d) or d >= today:
+            continue
+        _finish_order(o, s, d)
+        done.append(o.ref)
+    if done:
+        s.commit()
+        print(f"closed out {len(done)} order(s) left in flight from past days: {', '.join(done)}")
+    return done
+
+
+async def stale_order_sweep_loop():
+    """Hourly: close out anything left in flight from a previous day."""
+    while True:
+        try:
+            with Session(engine) as s:
+                _close_out_stale_orders(s)
+        except Exception as e:   # noqa: BLE001 — never let the sweep kill the app
+            print("stale-order sweep failed:", e)
+        await asyncio.sleep(3600)
+
+
+@app.post("/orders/close-out-stale")
+def close_out_stale_orders(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Complete every order still in flight from a previous day, now (staff)."""
+    refs = _close_out_stale_orders(s)
+    return {"completed": refs, "count": len(refs)}
 
 
 def _load_ticket_prefix(ref: str, seq: int) -> str:
@@ -470,7 +530,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.8-profit-per-order"
+APP_VERSION = "2026-09-13.9-close-out-stale"
 
 
 @app.get("/version")
