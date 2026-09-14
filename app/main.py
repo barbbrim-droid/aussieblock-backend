@@ -531,7 +531,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-13.11-profit-batched-only"
+APP_VERSION = "2026-09-14.12-daily-incentive"
 
 
 @app.get("/version")
@@ -5660,6 +5660,79 @@ def delete_weight_ticket_photo(ticket_id: int, name: str, background: Background
     if t:
         background.add_task(_wt_build_pdf, t.id)
     return _wt_json(t) if t else {"ok": True}
+
+
+# ── Daily yardage incentive ──────────────────────────────────────────────────
+def _incentive_tiers() -> list:
+    """[(yards, bonus)] lowest first, from config INCENTIVE_TIERS ("100:25,150:50")."""
+    out = []
+    for part in (config.INCENTIVE_TIERS or "").split(","):
+        if ":" not in part:
+            continue
+        y, b = part.split(":", 1)
+        try:
+            out.append((float(y), float(b)))
+        except ValueError:
+            continue
+    return sorted(out)
+
+
+def _yards_on_day(s: Session, day: str) -> float:
+    """Yards the plant has poured on a day so far: every order placed on that day
+    (scheduled date; a legacy "today" value falls back to the completion date) that
+    has gone out — batched yards when there are loads / a batch ticket, else the
+    ordered quantity for a completed single delivery. Requested, scheduled and
+    cancelled orders don't count; a live pour counts the loads batched so far."""
+    total = 0.0
+    for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES | {"complete"}))).all():
+        d = (o.scheduled_for or "").strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+            d = (o.completed_at or "")[:10]
+        if d != day:
+            continue
+        b = _batched_yards(o, s)
+        if b > 0:
+            total += b
+        elif o.status == "complete":
+            total += pricing._num(o.qty)
+    return round(total, 2)
+
+
+def _incentive_for(yards: float, tiers: list) -> dict:
+    hit = [t for t in tiers if yards >= t[0]]
+    nxt = next((t for t in tiers if yards < t[0]), None)
+    earned = max((t[1] for t in hit), default=0.0)     # tiers step up: the top one reached is the bonus
+    top = tiers[-1] if tiers else None
+    return {
+        "yards": yards,
+        "tiers": [{"yards": t[0], "bonus": t[1], "hit": yards >= t[0]} for t in tiers],
+        "earned": earned,
+        "next": ({"yards": nxt[0], "bonus": nxt[1], "remaining": round(nxt[0] - yards, 2),
+                  "pct": round(min(100.0, yards / nxt[0] * 100.0), 1)} if nxt else None),
+        "pct_of_top": round(min(100.0, yards / top[0] * 100.0), 1) if top else 0.0,
+        "maxed": bool(top) and yards >= top[0],
+    }
+
+
+@app.get("/incentive/today")
+def incentive_today(date_: str = Query("", alias="date"), user: User = Depends(get_current_user),
+                    s: Session = Depends(get_session)):
+    """Progress toward the daily yardage bonus — for the driver app and the
+    dispatch board (drivers and staff). Today by default; ?date=YYYY-MM-DD for
+    another day. Also the last 7 days so everyone can see the run of days."""
+    if user.role not in ("driver", "staff"):
+        raise HTTPException(403, "Driver or staff access required")
+    tiers = _incentive_tiers()
+    today = _business_today()
+    day = date_ if re.match(r"^\d{4}-\d{2}-\d{2}$", date_ or "") else today.isoformat()
+    out = {"date": day, "is_today": day == today.isoformat(), **_incentive_for(_yards_on_day(s, day), tiers)}
+    week = []
+    for i in range(6, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        y = _yards_on_day(s, d)
+        week.append({"date": d, "yards": y, "earned": _incentive_for(y, tiers)["earned"]})
+    out["week"] = week
+    return out
 
 
 # ── Profit (P&L by poured yardage) ───────────────────────────────────────────
