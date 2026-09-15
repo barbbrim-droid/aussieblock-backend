@@ -531,7 +531,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-14.12-daily-incentive"
+APP_VERSION = "2026-09-15.13-incentive-start"
 
 
 @app.get("/version")
@@ -5698,13 +5698,25 @@ def _yards_on_day(s: Session, day: str) -> float:
     return round(total, 2)
 
 
-def _incentive_for(yards: float, tiers: list) -> dict:
+def _incentive_active(day: str) -> bool:
+    """The program pays out from INCENTIVE_START; earlier days are history only."""
+    start = config.INCENTIVE_START if re.match(r"^\d{4}-\d{2}-\d{2}$", config.INCENTIVE_START or "") else ""
+    return not start or day >= start
+
+
+def _incentive_for(yards: float, tiers: list, active: bool = True) -> dict:
+    if not active:
+        top = tiers[-1] if tiers else None
+        return {"yards": yards, "active": False,
+                "tiers": [{"yards": t[0], "bonus": t[1], "hit": False} for t in tiers],
+                "earned": 0.0, "next": None,
+                "pct_of_top": round(min(100.0, yards / top[0] * 100.0), 1) if top else 0.0, "maxed": False}
     hit = [t for t in tiers if yards >= t[0]]
     nxt = next((t for t in tiers if yards < t[0]), None)
     earned = max((t[1] for t in hit), default=0.0)     # tiers step up: the top one reached is the bonus
     top = tiers[-1] if tiers else None
     return {
-        "yards": yards,
+        "yards": yards, "active": True,
         "tiers": [{"yards": t[0], "bonus": t[1], "hit": yards >= t[0]} for t in tiers],
         "earned": earned,
         "next": ({"yards": nxt[0], "bonus": nxt[1], "remaining": round(nxt[0] - yards, 2),
@@ -5725,12 +5737,14 @@ def incentive_today(date_: str = Query("", alias="date"), user: User = Depends(g
     tiers = _incentive_tiers()
     today = _business_today()
     day = date_ if re.match(r"^\d{4}-\d{2}-\d{2}$", date_ or "") else today.isoformat()
-    out = {"date": day, "is_today": day == today.isoformat(), **_incentive_for(_yards_on_day(s, day), tiers)}
+    out = {"date": day, "is_today": day == today.isoformat(), "start": config.INCENTIVE_START,
+           **_incentive_for(_yards_on_day(s, day), tiers, _incentive_active(day))}
     week = []
     for i in range(6, -1, -1):
         d = (today - timedelta(days=i)).isoformat()
         y = _yards_on_day(s, d)
-        week.append({"date": d, "yards": y, "earned": _incentive_for(y, tiers)["earned"]})
+        act = _incentive_active(d)
+        week.append({"date": d, "yards": y, "active": act, "earned": _incentive_for(y, tiers, act)["earned"]})
     out["week"] = week
     return out
 
