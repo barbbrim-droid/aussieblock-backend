@@ -300,21 +300,48 @@ def _close_out_stale_orders(s: Session) -> list:
     """Every pour or delivery still in flight after its pour day is over gets
     completed — nothing is left 'ongoing' into the next day. A pour that runs past
     midnight is safe: only orders whose scheduled date is BEFORE today qualify, so
-    tonight's job is untouched until tomorrow. Requested / scheduled orders that
-    never dispatched are left alone (they show as overdue on the board).
+    tonight's job is untouched until tomorrow. An in-flight order still carrying a
+    legacy "today"/"tomorrow" date (from before ISO dates) is closed too — it is
+    long past. Requested / scheduled orders that never dispatched are left alone
+    (they show as overdue on the board).
     Runs at startup and hourly; returns the refs it completed."""
     today = _business_today().isoformat()
+    yesterday = (_business_today() - timedelta(days=1)).isoformat()
     done = []
     for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES))).all():
         d = (o.scheduled_for or "").strip()
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", d) or d >= today:
-            continue
-        _finish_order(o, s, d)
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+            if d >= today:
+                continue                      # today's (or a future) job — leave it alone
+            pour_day = d
+        else:
+            # Legacy "today"/"tomorrow" date from before ISO dates were used — that
+            # order is long past. Date its completion to the last thing that
+            # happened on it (arrival, departure, a load), else yesterday, so it
+            # never lands on today's numbers.
+            pour_day = _order_last_activity_day(o, s) or yesterday
+            if pour_day >= today:
+                pour_day = yesterday
+        _finish_order(o, s, pour_day)
         done.append(o.ref)
     if done:
         s.commit()
         print(f"closed out {len(done)} order(s) left in flight from past days: {', '.join(done)}")
     return done
+
+
+def _order_last_activity_day(o: Order, s: Session):
+    """ISO date of the most recent timestamp on an order or its loads, or None."""
+    stamps = [o.onsite_at, o.departed_at]
+    for ld in s.exec(select(Load).where(Load.order_id == o.id)).all():
+        stamps += [ld.onsite_at, ld.departed_at]
+        if ld.signed_at:
+            try:
+                stamps.append(datetime.fromisoformat(str(ld.signed_at).replace("Z", "+00:00")).replace(tzinfo=None))
+            except ValueError:
+                pass
+    stamps = [t for t in stamps if isinstance(t, datetime)]
+    return max(stamps).date().isoformat() if stamps else None
 
 
 async def stale_order_sweep_loop():
@@ -531,7 +558,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-15.13-incentive-start"
+APP_VERSION = "2026-09-15.14-close-legacy-pours"
 
 
 @app.get("/version")
