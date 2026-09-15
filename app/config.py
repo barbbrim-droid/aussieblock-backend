@@ -37,6 +37,12 @@ USE_MOCK_GPS = not bool(ONESTEP_API_KEY)
 FLUIDSECURE_TOKEN = os.getenv("FLUIDSECURE_TOKEN", "").strip()
 FLUIDSECURE_COMPANY = os.getenv("FLUIDSECURE_COMPANY", "").strip()
 FLUIDSECURE_API_BASE = os.getenv("FLUIDSECURE_API_BASE", "https://www.fluidsecure.net/api").strip()
+# ── Daily yardage incentive ──
+# Ready-mix drivers and the batch plant operator earn a bonus when the plant
+# pours past a daily yardage: "yards:dollars" pairs, lowest first. Shown as a
+# progress bar on the driver app and the dispatch board.
+INCENTIVE_TIERS = os.getenv("INCENTIVE_TIERS", "100:25,150:50").strip()
+
 # How often (seconds) to pull new fuel transactions. 3600 = hourly — fuel data
 # doesn't change minute-to-minute the way GPS positions do.
 FUEL_POLL_SECONDS = int(os.getenv("FUEL_POLL_SECONDS", "3600"))
