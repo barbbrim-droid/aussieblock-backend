@@ -558,7 +558,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-15.14-close-legacy-pours"
+APP_VERSION = "2026-09-15.15-e5-no-charge"
 
 
 @app.get("/version")
@@ -1192,6 +1192,10 @@ RATE_REVISIONS = [
     # either, so haul-in shows on its own line and isn't double counted.
     {"effective": "2026-09-12", "material": "Gravel", "cost_rate": 17.0, "haul_rate": 6.0},
     {"effective": "2026-09-12", "material": "Sand",   "cost_rate": 15.0, "haul_rate": 6.0},
+    # 2026-09-14: E5 LFA is supplied at no charge — it had been carried at a
+    # $/oz rate, which inflated material cost and pulled the margin down. Usage
+    # is still tracked; it just costs nothing.
+    {"effective": "2026-09-14", "material": "E5 LFA", "cost_rate": 0.0},
 ]
 
 
