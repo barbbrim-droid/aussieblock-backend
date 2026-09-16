@@ -178,6 +178,7 @@ async def lifespan(app: FastAPI):
     with Session(engine) as _s:
         _ensure_materials(_s)   # seed/backfill materials + apply any dated rate revisions on deploy
         _flag_fuel_odometers(_s)   # surface fuel fills whose typed mileage doesn't add up
+        _repair_wt_dates(_s)       # driver tickets the photo reader dated somewhere implausible
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(stale_order_sweep_loop()),   # nothing stays "ongoing" past its pour day
@@ -558,7 +559,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-15.15-e5-no-charge"
+APP_VERSION = "2026-09-16.16-wt-date-guard"
 
 
 @app.get("/version")
@@ -5250,8 +5251,13 @@ def _wt_read_photo(ticket_id: int, path: str) -> None:
         if not t.supplier and d.get("supplier"):
             t.supplier = d["supplier"]
         if d.get("date") and re.match(r"^\d{4}-\d{2}-\d{2}$", d["date"]) and t.source == "driver" \
-                and t.ticket_date == _business_today().isoformat() and d["date"] != t.ticket_date:
-            # the driver took the default (today); the ticket says otherwise → trust the ticket
+                and t.ticket_date == _business_today().isoformat() and d["date"] != t.ticket_date \
+                and _wt_date_plausible(d["date"]):
+            # the driver took the default (today); the ticket says otherwise (and it's a
+            # believable date — a few days back at most) → trust the ticket. A date the
+            # reader got wrong (some pits print it in a format that misreads to another
+            # month or year) would otherwise move the ticket off the driver's list and
+            # onto the wrong day.
             t.ticket_date = d["date"]
         if t.gross_lb is None and d.get("gross_lb"):
             t.gross_lb = d["gross_lb"]
@@ -5281,6 +5287,48 @@ def _wt_read_photo(ticket_id: int, path: str) -> None:
                 t.truck_label = d["truck"]
         s.add(t); s.commit()
     _wt_build_pdf(ticket_id)   # the PDF carries whatever the reader filled in
+
+
+_WT_DATE_BACK_DAYS = 7      # a ticket read off a photo may be dated up to this many days back — never ahead
+
+
+def _utc_to_biz_date(dt: datetime) -> date:
+    """The business-day (Central) date of a UTC timestamp — an evening upload in
+    Texas is still 'today' there even though the UTC clock has rolled over."""
+    if _BIZ_TZ is not None:
+        return dt.replace(tzinfo=timezone.utc).astimezone(_BIZ_TZ).date()
+    return dt.date()
+
+
+def _wt_date_plausible(iso: str, today=None) -> bool:
+    today = today or _business_today()
+    try:
+        d = date.fromisoformat(iso)
+    except ValueError:
+        return False
+    return (today - timedelta(days=_WT_DATE_BACK_DAYS)) <= d <= today
+
+
+def _repair_wt_dates(s: Session) -> int:
+    """Startup: a driver ticket whose date the photo reader moved somewhere
+    implausible (more than a week before the day it was logged, or after it) goes
+    back to the day it was logged. Runs once per ticket in effect — a repaired
+    ticket is plausible afterwards. Returns how many were fixed."""
+    n = 0
+    for t in s.exec(select(WeightTicket).where(WeightTicket.source == "driver")).all():
+        if not t.created_at or not re.match(r"^\d{4}-\d{2}-\d{2}$", t.ticket_date or ""):
+            continue
+        logged = _utc_to_biz_date(t.created_at)
+        try:
+            d = date.fromisoformat(t.ticket_date)
+        except ValueError:
+            continue
+        if d < logged - timedelta(days=_WT_DATE_BACK_DAYS) or d > logged + timedelta(days=1):
+            print(f"weight ticket {t.id}: date {t.ticket_date} is off — reset to the day it was logged ({logged.isoformat()})")
+            t.ticket_date = logged.isoformat(); s.add(t); n += 1
+    if n:
+        s.commit()
+    return n
 
 
 def _wt_can_see(t: WeightTicket, user: User) -> bool:
@@ -5512,8 +5560,11 @@ def my_weight_tickets(user: User = Depends(require_driver), s: Session = Depends
     can see it went through and what the reader pulled off the photo."""
     me = (user.company or "").strip().lower()
     since = (_business_today() - timedelta(days=max(1, min(days, 90)))).isoformat()
-    rows = [t for t in s.exec(select(WeightTicket).where(WeightTicket.ticket_date >= since)).all()
-            if me and (t.driver or "").strip().lower() == me]
+    # Recent by ticket date OR by when it was logged, so a ticket the reader dated
+    # differently never drops off the driver's screen.
+    rows = [t for t in s.exec(select(WeightTicket)).all()
+            if me and (t.driver or "").strip().lower() == me
+            and ((t.ticket_date or "") >= since or (t.created_at and _utc_to_biz_date(t.created_at).isoformat() >= since))]
     rows.sort(key=lambda t: (t.ticket_date or "", t.id or 0), reverse=True)
     today = _business_today().isoformat()
     todays = [t for t in rows if t.ticket_date == today]
