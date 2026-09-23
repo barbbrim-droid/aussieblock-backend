@@ -559,7 +559,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-23.19-pin-sqlmodel"
+APP_VERSION = "2026-09-23.20-agg-truck-card"
 
 
 @app.get("/version")
@@ -3314,11 +3314,25 @@ def list_trucks(
             latest_at[r.truck_label] = r.received_at
         if r.truck_label and r.batt_pct is not None and r.truck_label not in latest_batt:
             latest_batt[r.truck_label] = r.batt_pct
+    # Aggregate haulers: today's weight tickets, so the fleet card can say what the
+    # truck has hauled instead of pretending it has a concrete job.
+    from .integrations import onestep_gps as _gps
+    today = _business_today().isoformat()
+    agg_today: dict = {}
+    for wt in s.exec(select(WeightTicket).where(WeightTicket.ticket_date == today)).all():
+        key = wt.truck_id
+        if key is None:
+            continue
+        a = agg_today.setdefault(key, {"loads": 0, "tons": 0.0, "last_pit": None, "last_material": None})
+        a["loads"] += 1; a["tons"] = round(a["tons"] + pricing._num(wt.net_tons), 2)
+        a["last_pit"] = wt.supplier or a["last_pit"]; a["last_material"] = wt.material or a["last_material"]
     return [
         {"label": t.label, "device": t.gps_device_id, "fuel_vehicle": t.fluidsecure_vehicle_id,
          "lat": t.lat, "lng": t.lng,
          "heading": t.heading, "updated_at": t.updated_at, "notes": t.notes,
          "kind": _truck_kind(t),
+         "stopped_min": round(_gps._stopped_seconds(t.id) / 60.0, 1),
+         "agg_today": agg_today.get(t.id) if _truck_kind(t) == "aggregate" else None,
          "gps_odometer": _truck_gps_odometer(t), "odo_baseline": t.odo_baseline,
          "odo_baseline_at": t.odo_baseline_at, "gps_miles": round(t.gps_miles or 0.0, 1),
          "gps_odometer_reported": t.gps_odometer_reported,
