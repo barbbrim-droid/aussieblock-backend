@@ -411,26 +411,100 @@ def _point_odometer(point: dict):
     return None
 
 
-async def _poll_real() -> None:
+known_devices: dict = {}   # device_id -> {id, name, lat, lng, seen} — every device One Step reports, linked or not
+
+
+def _device_name(dev: dict, point: dict) -> str:
+    for src in (dev, point, dev.get("device") or {}):
+        if isinstance(src, dict):
+            for k in ("display_name", "name", "device_name", "label", "vehicle_name"):
+                v = src.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+    return ""
+
+
+def _normalize_devices(data) -> list:
+    """One Step's /device payload → [{id, name, lat, lng, heading, point}], skipping
+    devices with no id. lat/lng are None when the device has no point yet."""
+    devices = data if isinstance(data, list) else data.get("result_list", data.get("devices", []))
+    out = []
+    for dev in devices or []:
+        if not isinstance(dev, dict):
+            continue
+        dev_id = str(dev.get("device_id") or dev.get("id") or "")
+        if not dev_id:
+            continue
+        point = dev.get("latest_device_point") or dev.get("latest_point") or dev
+        if not isinstance(point, dict):
+            point = {}
+        lat = point.get("lat") or point.get("latitude")
+        lng = point.get("lng") or point.get("longitude")
+        heading = point.get("heading") or point.get("angle") or 0
+        out.append({"id": dev_id, "name": _device_name(dev, point),
+                    "lat": float(lat) if lat is not None else None,
+                    "lng": float(lng) if lng is not None else None,
+                    "heading": heading, "point": point})
+    return out
+
+
+async def _fetch_devices() -> list:
     url = f"{config.ONESTEP_API_BASE}/device"
     params = {"latest_point": "true", "api-key": config.ONESTEP_API_KEY}
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
-        data = resp.json()
+        return _normalize_devices(resp.json())
 
-    # Expecting a list of devices; each with an id and a latest point.
-    devices = data if isinstance(data, list) else data.get("result_list", data.get("devices", []))
+
+async def list_devices() -> list:
+    """Every GPS device on the One Step account (or the demo ones in mock mode),
+    for the office to pick from when linking a truck."""
+    if config.USE_MOCK_GPS:
+        with Session(engine) as s:
+            trucks = s.exec(select(Truck)).all()
+        devs = [{"id": t.gps_device_id, "name": f"Demo unit · {t.label}", "lat": t.lat, "lng": t.lng, "seen": t.updated_at}
+                for t in trucks if t.gps_device_id]
+        devs.append({"id": "DEMO-DEV-4111", "name": "Volvo VNR 4111", "lat": config.PLANT_LAT, "lng": config.PLANT_LNG, "seen": datetime.utcnow()})
+        return devs
+    devs = await _fetch_devices()
+    for d in devs:
+        known_devices[d["id"]] = {"id": d["id"], "name": d["name"], "lat": d["lat"], "lng": d["lng"], "seen": datetime.utcnow()}
+    return [{k: d[k] for k in ("id", "name", "lat", "lng")} | {"seen": datetime.utcnow()} for d in devs]
+
+
+def _digits(v: str) -> str:
+    return "".join(ch for ch in str(v or "") if ch.isdigit())
+
+
+def link_device_by_number(s: Session, dev_id: str, name: str):
+    """A device nobody has linked yet: if its One Step name carries a truck number
+    ("Volvo VNR 4111") that matches exactly one truck without a GPS device, link
+    them. Returns the truck linked, else None."""
+    num = _digits(name)
+    if len(num) < 3:
+        return None
+    hits = [t for t in s.exec(select(Truck)).all() if not t.gps_device_id and _digits(t.label) == num]
+    if len(hits) != 1:
+        return None
+    t = hits[0]
+    t.gps_device_id = dev_id
+    s.add(t); s.commit()
+    print(f"GPS: linked One Step device '{name}' ({dev_id}) to truck {t.label} by its number")
+    return t
+
+
+async def _poll_real() -> None:
+    devices = await _fetch_devices()
     with Session(engine) as s:
-        for dev in devices:
-            dev_id = str(dev.get("device_id") or dev.get("id") or "")
-            point = dev.get("latest_device_point") or dev.get("latest_point") or dev
-            lat = point.get("lat") or point.get("latitude")
-            lng = point.get("lng") or point.get("longitude")
-            heading = point.get("heading") or point.get("angle") or 0
-            if not dev_id or lat is None or lng is None:
+        for d in devices:
+            dev_id, point, lat, lng, heading = d["id"], d["point"], d["lat"], d["lng"], d["heading"]
+            known_devices[dev_id] = {"id": dev_id, "name": d["name"], "lat": lat, "lng": lng, "seen": datetime.utcnow()}
+            if lat is None or lng is None:
                 continue
             truck = s.exec(select(Truck).where(Truck.gps_device_id == dev_id)).first()
+            if not truck and d["name"]:
+                truck = link_device_by_number(s, dev_id, d["name"])   # e.g. "Volvo VNR 4111" -> truck 4111
             if truck:
                 try:
                     last_points[dev_id] = sorted(k for k in point.keys() if isinstance(k, str))[:60]

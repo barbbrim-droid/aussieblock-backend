@@ -559,7 +559,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-16.16-wt-date-guard"
+APP_VERSION = "2026-09-23.17-gps-device-picker"
 
 
 @app.get("/version")
@@ -3637,6 +3637,20 @@ def fuel_odometer(truck_no: str = Query(""), user: User = Depends(get_current_us
             "last_odometer": prev_fill.odometer if prev_fill else None,
             "last_fill_at": (prev_fill.occurred_at or prev_fill.created_at).isoformat() if prev_fill else None,
             "tolerance_mi": round(_odo_tolerance_mi(t)), "max_jump_mi": _ODO_MAX_JUMP_MI}
+
+
+@app.get("/gps/devices")
+async def gps_devices(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """The GPS units on the One Step account, with the truck each is linked to, so
+    the office can pick one under Manage trucks instead of typing a device ID."""
+    from .integrations import onestep_gps as _gps
+    try:
+        devs = await _gps.list_devices()
+    except Exception as e:   # noqa: BLE001 — surface the reason, don't 500
+        raise HTTPException(502, f"Couldn't reach One Step GPS: {e}")
+    by_dev = {t.gps_device_id: t.label for t in s.exec(select(Truck)).all() if t.gps_device_id}
+    return {"mode": "mock" if config.USE_MOCK_GPS else "live",
+            "devices": sorted(({**d, "truck": by_dev.get(d["id"])} for d in devs), key=lambda d: (d.get("name") or d["id"]).lower())}
 
 
 @app.get("/diag/gps")
