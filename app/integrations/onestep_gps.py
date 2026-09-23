@@ -514,20 +514,22 @@ async def _poll_real() -> None:
             # rest of the fleet from updating — handle each on its own.
             try:
                 _apply_device(s, d)
+                s.commit()
                 poll_state["device_errors"].pop(d["id"], None)
             except Exception as e:   # noqa: BLE001
-                poll_state["device_errors"][d["id"]] = str(e)
-                print(f"GPS: device {d['id']} ({d.get('name') or '?'}) skipped: {e}")
-        s.commit()
+                s.rollback()          # a failed write must not poison the session for the next device
+                poll_state["device_errors"][d["id"]] = str(e)[:300]
+                print(f"GPS: device {d['id']} ({d.get('name') or '?'}) skipped: {str(e)[:200]}")
     poll_state["last_ok"] = datetime.utcnow()
 
 
 def _apply_device(s: Session, d: dict) -> None:
     dev_id, point, lat, lng, heading = d["id"], d["point"], d["lat"], d["lng"], d["heading"]
     known_devices[dev_id] = {"id": dev_id, "name": d["name"], "lat": lat, "lng": lng, "seen": datetime.utcnow()}
-    truck = s.exec(select(Truck).where(Truck.gps_device_id == dev_id)).first()
-    if not truck and d["name"]:
-        truck = link_device_by_number(s, dev_id, d["name"])   # e.g. "Volvo VNR 4111" -> truck 4111
+    with s.no_autoflush:
+        truck = s.exec(select(Truck).where(Truck.gps_device_id == dev_id)).first()
+        if not truck and d["name"]:
+            truck = link_device_by_number(s, dev_id, d["name"])   # e.g. "Volvo VNR 4111" -> truck 4111
     if not truck or lat is None or lng is None:
         return
     try:
