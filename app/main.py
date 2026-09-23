@@ -559,7 +559,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-23.17-gps-device-picker"
+APP_VERSION = "2026-09-23.18-gps-poll-hardening"
 
 
 @app.get("/version")
@@ -3660,7 +3660,9 @@ def diag_gps(k: str = Query(""), s: Session = Depends(get_session)):
     if k != "ab-vision-7f3a9c2e":
         raise HTTPException(404, "Not found")
     from .integrations import onestep_gps as _gps
-    return {"trucks": [{"label": t.label, "device": t.gps_device_id, "odo_baseline": t.odo_baseline,
+    return {"mode": "mock" if config.USE_MOCK_GPS else "live", "poll": _gps.poll_state,
+            "devices_seen": list(_gps.known_devices.values()),
+            "trucks": [{"label": t.label, "device": t.gps_device_id, "odo_baseline": t.odo_baseline,
                         "gps_miles": t.gps_miles, "gps_odometer": _truck_gps_odometer(t),
                         "gps_odometer_reported": t.gps_odometer_reported, "updated_at": t.updated_at,
                         "point_keys": _gps.last_points.get(t.gps_device_id or "")}

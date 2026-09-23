@@ -412,6 +412,7 @@ def _point_odometer(point: dict):
 
 
 known_devices: dict = {}   # device_id -> {id, name, lat, lng, seen} — every device One Step reports, linked or not
+poll_state: dict = {"last_ok": None, "last_error": None, "last_error_at": None, "device_errors": {}}   # for /diag/gps
 
 
 def _device_name(dev: dict, point: dict) -> str:
@@ -438,14 +439,21 @@ def _normalize_devices(data) -> list:
         point = dev.get("latest_device_point") or dev.get("latest_point") or dev
         if not isinstance(point, dict):
             point = {}
-        lat = point.get("lat") or point.get("latitude")
-        lng = point.get("lng") or point.get("longitude")
-        heading = point.get("heading") or point.get("angle") or 0
-        out.append({"id": dev_id, "name": _device_name(dev, point),
-                    "lat": float(lat) if lat is not None else None,
-                    "lng": float(lng) if lng is not None else None,
+        lat = _num(point.get("lat") if point.get("lat") is not None else point.get("latitude"))
+        lng = _num(point.get("lng") if point.get("lng") is not None else point.get("longitude"))
+        heading = _num(point.get("heading") if point.get("heading") is not None else point.get("angle")) or 0.0
+        out.append({"id": dev_id, "name": _device_name(dev, point), "lat": lat, "lng": lng,
                     "heading": heading, "point": point})
     return out
+
+
+def _num(v):
+    """float or None — a unit with no fix reports "", "N/A" or null, never crash on it."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None   # NaN → None
 
 
 async def _fetch_devices() -> list:
@@ -495,36 +503,51 @@ def link_device_by_number(s: Session, dev_id: str, name: str):
 
 
 async def _poll_real() -> None:
-    devices = await _fetch_devices()
+    try:
+        devices = await _fetch_devices()
+    except Exception as e:   # noqa: BLE001
+        poll_state["last_error"] = f"fetch: {e}"; poll_state["last_error_at"] = datetime.utcnow()
+        raise
     with Session(engine) as s:
         for d in devices:
-            dev_id, point, lat, lng, heading = d["id"], d["point"], d["lat"], d["lng"], d["heading"]
-            known_devices[dev_id] = {"id": dev_id, "name": d["name"], "lat": lat, "lng": lng, "seen": datetime.utcnow()}
-            if lat is None or lng is None:
-                continue
-            truck = s.exec(select(Truck).where(Truck.gps_device_id == dev_id)).first()
-            if not truck and d["name"]:
-                truck = link_device_by_number(s, dev_id, d["name"])   # e.g. "Volvo VNR 4111" -> truck 4111
-            if truck:
-                try:
-                    last_points[dev_id] = sorted(k for k in point.keys() if isinstance(k, str))[:60]
-                except Exception:   # noqa: BLE001
-                    pass
-                accumulate_gps_miles(truck, float(lat), float(lng))   # before the position is overwritten
-                rep = _point_odometer(point)
-                if rep is not None:
-                    truck.gps_odometer_reported = rep
-                truck.lat = float(lat)
-                truck.lng = float(lng)
-                truck.heading = float(heading)
-                truck.updated_at = datetime.utcnow()
-                s.add(truck)
-                _update_stop_state(truck)         # track how long it's been parked (arrival detection)
-                _advance_on_yard_exit(s, truck)   # batched -> enroute when it leaves the yard
-                _advance_return(s, truck)         # onsite -> returning -> complete on the way back
-                _advance_loads_on_yard_exit(s, truck)   # same, for a pour's loads
-                _advance_loads_return(s, truck)         # same, for a pour's loads
+            # One bad device (a unit with no fix, an odd field) must never stop the
+            # rest of the fleet from updating — handle each on its own.
+            try:
+                _apply_device(s, d)
+                poll_state["device_errors"].pop(d["id"], None)
+            except Exception as e:   # noqa: BLE001
+                poll_state["device_errors"][d["id"]] = str(e)
+                print(f"GPS: device {d['id']} ({d.get('name') or '?'}) skipped: {e}")
         s.commit()
+    poll_state["last_ok"] = datetime.utcnow()
+
+
+def _apply_device(s: Session, d: dict) -> None:
+    dev_id, point, lat, lng, heading = d["id"], d["point"], d["lat"], d["lng"], d["heading"]
+    known_devices[dev_id] = {"id": dev_id, "name": d["name"], "lat": lat, "lng": lng, "seen": datetime.utcnow()}
+    truck = s.exec(select(Truck).where(Truck.gps_device_id == dev_id)).first()
+    if not truck and d["name"]:
+        truck = link_device_by_number(s, dev_id, d["name"])   # e.g. "Volvo VNR 4111" -> truck 4111
+    if not truck or lat is None or lng is None:
+        return
+    try:
+        last_points[dev_id] = sorted(k for k in point.keys() if isinstance(k, str))[:60]
+    except Exception:   # noqa: BLE001
+        pass
+    accumulate_gps_miles(truck, lat, lng)   # before the position is overwritten
+    rep = _point_odometer(point)
+    if rep is not None:
+        truck.gps_odometer_reported = rep
+    truck.lat = lat
+    truck.lng = lng
+    truck.heading = heading
+    truck.updated_at = datetime.utcnow()
+    s.add(truck)
+    _update_stop_state(truck)         # track how long it's been parked (arrival detection)
+    _advance_on_yard_exit(s, truck)   # batched -> enroute when it leaves the yard
+    _advance_return(s, truck)         # onsite -> returning -> complete on the way back
+    _advance_loads_on_yard_exit(s, truck)   # same, for a pour's loads
+    _advance_loads_return(s, truck)         # same, for a pour's loads
 
 
 # ──────────────────────────────────────────────────────────────────────────
