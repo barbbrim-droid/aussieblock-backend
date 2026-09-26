@@ -38,7 +38,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session, engine
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket, IncentiveDay
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver, require_timeclock,
@@ -559,7 +559,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-23.20-agg-truck-card"
+APP_VERSION = "2026-09-26.21-bonus-tracking"
 
 
 @app.get("/version")
@@ -5789,13 +5789,13 @@ def _incentive_tiers() -> list:
     return sorted(out)
 
 
-def _yards_on_day(s: Session, day: str) -> float:
-    """Yards the plant has poured on a day so far: every order placed on that day
-    (scheduled date; a legacy "today" value falls back to the completion date) that
-    has gone out — batched yards when there are loads / a batch ticket, else the
-    ordered quantity for a completed single delivery. Requested, scheduled and
-    cancelled orders don't count; a live pour counts the loads batched so far."""
-    total = 0.0
+def _orders_on_day(s: Session, day: str) -> list:
+    """[(order, yards)] for every order placed on that day (scheduled date; a
+    legacy "today" value falls back to the completion date) that has gone out —
+    batched yards when there are loads / a batch ticket, else the ordered quantity
+    for a completed single delivery. Requested, scheduled and cancelled orders
+    don't count; a live pour counts the loads batched so far."""
+    out = []
     for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES | {"complete"}))).all():
         d = (o.scheduled_for or "").strip()
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
@@ -5804,10 +5804,160 @@ def _yards_on_day(s: Session, day: str) -> float:
             continue
         b = _batched_yards(o, s)
         if b > 0:
-            total += b
+            out.append((o, b))
         elif o.status == "complete":
-            total += pricing._num(o.qty)
-    return round(total, 2)
+            out.append((o, pricing._num(o.qty)))
+    return out
+
+
+def _yards_on_day(s: Session, day: str) -> float:
+    """Yards the plant has poured on a day so far (see _orders_on_day)."""
+    return round(sum(y for _, y in _orders_on_day(s, day)), 2)
+
+
+def _people_on_day(s: Session, day: str, orders=None) -> list:
+    """Who earns the day's bonus automatically: every driver named on a load (or
+    on a single delivery) that counted toward the day's yards, plus the active
+    plant operators (Employee.kind == "plant"). Sorted, de-duplicated by name."""
+    orders = _orders_on_day(s, day) if orders is None else orders
+    names: dict = {}
+    def add(n):
+        n = (n or "").strip()
+        if n and n != "—":
+            names.setdefault(n.lower(), n)
+    for o, _y in orders:
+        loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+        if loads:
+            for ld in loads:
+                if ld.status not in ("scheduled", "requested", "cancelled"):
+                    add(ld.driver)
+        else:
+            add(o.driver)
+    for e in s.exec(select(Employee).where(Employee.active == True)).all():   # noqa: E712
+        if (e.kind or "") == "plant":
+            add(e.name)
+    return sorted(names.values(), key=str.lower)
+
+
+def _incentive_history(s: Session, frm: str, to: str) -> dict:
+    tiers = _incentive_tiers()
+    rows_by_date = {r.date: r for r in s.exec(select(IncentiveDay).where(IncentiveDay.date >= frm, IncentiveDay.date <= to)).all()}
+    d0, d1 = date.fromisoformat(frm), date.fromisoformat(to)
+    days, per_person = [], {}
+    d = d0
+    while d <= d1:
+        day = d.isoformat()
+        orders = _orders_on_day(s, day)
+        yards = round(sum(y for _, y in orders), 2)
+        row = rows_by_date.get(day)
+        if yards > 0 or row is not None:
+            inc = _incentive_for(yards, tiers, _incentive_active(day))
+            auto = _people_on_day(s, day, orders)
+            people = auto
+            if row is not None and row.people:
+                try:
+                    people = json.loads(row.people)
+                except ValueError:
+                    people = auto
+            bonus = inc["earned"]
+            days.append({"date": day, "yards": yards, "bonus": bonus, "active": inc["active"],
+                         "tier": next((t["yards"] for t in reversed(inc["tiers"]) if t["hit"]), None),
+                         "people": people, "auto_people": auto, "overridden": bool(row and row.people),
+                         "paid": bool(row and row.paid), "paid_at": row.paid_at if row else None,
+                         "notes": (row.notes if row else None) or "", "total": round(bonus * len(people), 2)})
+            if bonus > 0:
+                for n in people:
+                    pp = per_person.setdefault(n, {"name": n, "days": 0, "bonus": 0.0, "unpaid": 0.0})
+                    pp["days"] += 1; pp["bonus"] = round(pp["bonus"] + bonus, 2)
+                    if not (row and row.paid):
+                        pp["unpaid"] = round(pp["unpaid"] + bonus, 2)
+        d += timedelta(days=1)
+    days.sort(key=lambda r: r["date"], reverse=True)
+    bonus_days = [r for r in days if r["bonus"] > 0]
+    return {"from": frm, "to": to, "start": config.INCENTIVE_START, "tiers": [{"yards": t[0], "bonus": t[1]} for t in tiers],
+            "days": days,
+            "people": sorted(per_person.values(), key=lambda p: (-p["bonus"], p["name"].lower())),
+            "totals": {"bonus_days": len(bonus_days), "payable": round(sum(r["total"] for r in bonus_days), 2),
+                       "unpaid": round(sum(r["total"] for r in bonus_days if not r["paid"]), 2)}}
+
+
+def _incentive_range(frm: str, to: str):
+    today = _business_today()
+    to_d = date.fromisoformat(to) if re.match(r"^\d{4}-\d{2}-\d{2}$", to or "") else today
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", frm or ""):
+        frm_d = date.fromisoformat(frm)
+    else:
+        start = config.INCENTIVE_START if re.match(r"^\d{4}-\d{2}-\d{2}$", config.INCENTIVE_START or "") else None
+        frm_d = max(date.fromisoformat(start), to_d - timedelta(days=30)) if start else to_d - timedelta(days=30)
+    if (to_d - frm_d).days > 400:
+        frm_d = to_d - timedelta(days=400)
+    if frm_d > to_d:
+        frm_d = to_d
+    return frm_d.isoformat(), to_d.isoformat()
+
+
+@app.get("/incentive/history")
+def incentive_history(from_: str = Query("", alias="from"), to: str = Query(""), _: User = Depends(require_staff),
+                      s: Session = Depends(get_session)):
+    """Which days hit the bonus and who earned it (staff). Default: from the
+    program start (or 30 days back) to today."""
+    frm, to_ = _incentive_range(from_, to)
+    return _incentive_history(s, frm, to_)
+
+
+@app.get("/incentive/history.csv")
+def incentive_history_csv(from_: str = Query("", alias="from"), to: str = Query(""), _: User = Depends(require_staff),
+                          s: Session = Depends(get_session)):
+    """The same, as a CSV for payroll: one line per person per bonus day."""
+    frm, to_ = _incentive_range(from_, to)
+    h = _incentive_history(s, frm, to_)
+    import csv, io
+    buf = io.StringIO(); w = csv.writer(buf)
+    w.writerow(["Date", "Yards", "Tier (CY)", "Bonus each", "Person", "Paid", "Notes"])
+    for r in sorted(h["days"], key=lambda r: r["date"]):
+        if r["bonus"] <= 0:
+            continue
+        for n in r["people"]:
+            w.writerow([r["date"], r["yards"], r["tier"], f'{r["bonus"]:.2f}', n, "yes" if r["paid"] else "no", r["notes"]])
+    w.writerow([]); w.writerow(["Person", "Bonus days", "Total", "Unpaid"])
+    for p in h["people"]:
+        w.writerow([p["name"], p["days"], f'{p["bonus"]:.2f}', f'{p["unpaid"]:.2f}'])
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=buf.getvalue(), media_type="text/csv",
+                 headers={"Content-Disposition": f'attachment; filename="bonus_{frm}_to_{to_}.csv"'})
+
+
+class IncentiveDayIn(BaseModel):
+    paid: Optional[bool] = None
+    people: Optional[list] = None      # full list of names; [] = nobody; omit = leave as is
+    reset_people: bool = False         # back to the automatic list
+    notes: Optional[str] = None
+
+
+@app.put("/incentive/days/{day}")
+def set_incentive_day(day: str, body: IncentiveDayIn, user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Mark a bonus day paid / unpaid, correct who gets it, or add a note (staff)."""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        raise HTTPException(422, "Bad date")
+    row = s.exec(select(IncentiveDay).where(IncentiveDay.date == day)).first() or IncentiveDay(date=day)
+    if body.paid is not None:
+        row.paid = body.paid
+        row.paid_at = datetime.utcnow() if body.paid else None
+    if body.reset_people:
+        row.people = None
+    elif body.people is not None:
+        names, seen = [], set()
+        for n in body.people:
+            n = str(n or "").strip()
+            if n and n.lower() not in seen:
+                seen.add(n.lower()); names.append(n)
+        row.people = json.dumps(names)
+    if body.notes is not None:
+        row.notes = body.notes.strip() or None
+    s.add(row); s.commit()
+    print(f"PUT /incentive/days/{day}  paid={row.paid} people={row.people} by={user.email}")
+    h = _incentive_history(s, day, day)
+    return h["days"][0] if h["days"] else {"date": day, "paid": row.paid, "people": json.loads(row.people) if row.people else [], "notes": row.notes or ""}
 
 
 def _incentive_active(day: str) -> bool:

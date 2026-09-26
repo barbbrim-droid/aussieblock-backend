@@ -457,3 +457,16 @@ class WeightTicket(SQLModel, table=True):
     read_status: Optional[str] = None
     read_data: Optional[str] = None                           # JSON of what the reader saw (for audit)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class IncentiveDay(SQLModel, table=True):
+    """Office record for one day of the daily yardage bonus: whether it has been
+    paid out, and (optionally) who gets it when the automatic list — the drivers
+    who hauled concrete that day plus the plant operators — needs a correction.
+    people=None means "use the automatic list"."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: str = Field(index=True, unique=True)     # ISO date
+    paid: bool = False
+    paid_at: Optional[datetime] = None
+    people: Optional[str] = None                   # JSON list of names, or None = automatic
+    notes: Optional[str] = None
