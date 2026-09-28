@@ -5861,6 +5861,109 @@ def incentive_today(date_: str = Query("", alias="date"), user: User = Depends(g
     return out
 
 
+def _driver_roster(s: Session) -> dict:
+    """lowercased name -> display name for Aussieblock's own drivers: the name-only
+    roster plus driver logins (their name lives in User.company). Anyone else on a
+    load (a third-party hauler's driver) isn't in the bonus program."""
+    names = {}
+    for d in s.exec(select(Driver)).all():
+        if (d.name or "").strip():
+            names[d.name.strip().lower()] = d.name.strip()
+    for u in s.exec(select(User).where(User.role == "driver")).all():
+        if (u.company or "").strip():
+            names.setdefault(u.company.strip().lower(), u.company.strip())
+    return names
+
+
+@app.get("/incentive/report")
+def incentive_report(frm: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None),
+                     _: User = Depends(require_finance), s: Session = Depends(get_session)):
+    """Bonus history for a date window (yyyy-mm-dd, inclusive): each day the plant
+    poured, the tier it hit, and who earned the per-person bonus — the drivers who
+    ran loads that day and the batch plant operators on the clock — plus totals per
+    person so the office can pay it out with payroll. Same yard count as the live
+    bar (_yards_on_day). Default window: the current Mon–Sun pay week."""
+    today = _business_today()
+    ok = lambda v: bool(re.match(r"^\d{4}-\d{2}-\d{2}$", v or ""))
+    start_d = datetime.strptime(frm, "%Y-%m-%d").date() if ok(frm) else today - timedelta(days=today.weekday())
+    end_d = datetime.strptime(to, "%Y-%m-%d").date() if ok(to) else today
+    if end_d < start_d:
+        start_d, end_d = end_d, start_d
+    if (end_d - start_d).days > 400:
+        raise HTTPException(400, "Pick a window of about a year or less")
+    lo, hi = start_d.isoformat(), end_d.isoformat()
+    tiers = _incentive_tiers()
+    roster = _driver_roster(s)
+
+    # Yards + drivers per day, from the same orders the live bar counts.
+    per_day: dict = {}
+    for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES | {"complete"}))).all():
+        d = (o.scheduled_for or "").strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+            d = (o.completed_at or "")[:10]
+        if not (lo <= d <= hi):
+            continue
+        rec = per_day.setdefault(d, {"yards": 0.0, "drivers": set()})
+        b = _batched_yards(o, s)
+        if b > 0:
+            rec["yards"] += b
+        elif o.status == "complete":
+            rec["yards"] += pricing._num(o.qty)
+        loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
+        went = [ld for ld in loads if ld.status in (_IN_FLIGHT_STATUSES | {"complete"})]
+        for name in ([ld.driver for ld in went] if loads else [o.driver]):
+            if (name or "").strip():
+                rec["drivers"].add(name.strip())
+
+    # Batch plant operators on the clock each day (plant-kind employees).
+    plant = {e.id: e.name for e in s.exec(select(Employee).where(Employee.kind == "plant")).all()}
+    ops: dict = {}
+    if plant:
+        pad_lo = datetime.combine(start_d - timedelta(days=1), datetime.min.time())
+        pad_hi = datetime.combine(end_d + timedelta(days=2), datetime.min.time())
+        for te in s.exec(select(TimeEntry).where(TimeEntry.clock_in >= pad_lo, TimeEntry.clock_in < pad_hi)).all():
+            if te.employee_id not in plant:
+                continue
+            d = _utc_to_biz_date(te.clock_in).isoformat()
+            if lo <= d <= hi:
+                ops.setdefault(d, set()).add(plant[te.employee_id])
+
+    days, people = [], {}
+    for d in sorted(set(per_day) | set(ops)):
+        rec = per_day.get(d, {"yards": 0.0, "drivers": set()})
+        yards = round(rec["yards"], 2)
+        inc = _incentive_for(yards, tiers, _incentive_active(d))
+        ours = sorted({roster[n.lower()] for n in rec["drivers"] if n.lower() in roster})
+        others = sorted(n for n in rec["drivers"] if n.lower() not in roster)
+        operators = sorted(ops.get(d, set()))
+        earned = inc["earned"]
+        tier = max((t["yards"] for t in inc["tiers"] if t["hit"]), default=None) if inc["active"] else None
+        earners = ([(n, "Driver") for n in ours] + [(n, "Plant operator") for n in operators]) if earned > 0 else []
+        for n, role in earners:
+            p = people.setdefault((n.lower(), role), {"name": n, "role": role, "days": 0, "total": 0.0, "dates": []})
+            p["days"] += 1
+            p["total"] += earned
+            p["dates"].append(d)
+        if yards <= 0 and not earners:
+            continue
+        days.append({"date": d, "yards": yards, "active": inc["active"], "tier_yards": tier,
+                     "earned": earned, "drivers": ours, "other_drivers": others, "operators": operators,
+                     "payout": round(earned * len(earners), 2),
+                     "no_operator": earned > 0 and not operators})
+    plist = sorted(people.values(), key=lambda p: (-p["total"], p["role"], p["name"]))
+    for p in plist:
+        p["total"] = round(p["total"], 2)
+    return {
+        "from": lo, "to": hi, "start": config.INCENTIVE_START,
+        "tiers": [{"yards": t[0], "bonus": t[1]} for t in tiers],
+        "days": days, "people": plist,
+        "totals": {"yards": round(sum(x["yards"] for x in days), 2),
+                   "days_poured": sum(1 for x in days if x["yards"] > 0),
+                   "days_hit": sum(1 for x in days if x["earned"] > 0),
+                   "payout": round(sum(x["payout"] for x in days), 2)},
+    }
+
+
 # ── Profit (P&L by poured yardage) ───────────────────────────────────────────
 # Net profit for a day or date range, built from what the app already knows:
 #   revenue  = what customers are billed (pre-tax subtotal) for the ACTUAL yards
