@@ -38,7 +38,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session, engine
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket, IncentiveDay
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket, IncentiveDay, IncentivePayout
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver, require_timeclock,
@@ -559,7 +559,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-09-26.21-bonus-tracking"
+APP_VERSION = "2026-10-03.22-bonus-payouts"
 
 
 @app.get("/version")
@@ -5864,6 +5864,7 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
                          "tier": next((t["yards"] for t in reversed(inc["tiers"]) if t["hit"]), None),
                          "people": people, "auto_people": auto, "overridden": bool(row and row.people),
                          "paid": bool(row and row.paid), "paid_at": row.paid_at if row else None,
+                         "paid_on": (row.paid_at.date().isoformat() if row and row.paid and row.paid_at else None),
                          "notes": (row.notes if row else None) or "", "total": round(bonus * len(people), 2)})
             if bonus > 0:
                 for n in people:
@@ -5874,7 +5875,14 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
         d += timedelta(days=1)
     days.sort(key=lambda r: r["date"], reverse=True)
     bonus_days = [r for r in days if r["bonus"] > 0]
+    payouts = sorted(s.exec(select(IncentivePayout)).all(), key=lambda p: (p.through, p.id or 0))
+    last = payouts[-1] if payouts else None
     return {"from": frm, "to": to, "start": config.INCENTIVE_START, "tiers": [{"yards": t[0], "bonus": t[1]} for t in tiers],
+            "paid_through": last.through if last else None,
+            "last_payout": ({"id": last.id, "paid_on": last.paid_on, "from_day": last.from_day, "through": last.through,
+                             "amount": last.amount, "days": last.days, "notes": last.notes or ""} if last else None),
+            "payouts": [{"id": p.id, "paid_on": p.paid_on, "from_day": p.from_day, "through": p.through, "amount": p.amount,
+                         "days": p.days, "notes": p.notes or ""} for p in reversed(payouts)],
             "days": days,
             "people": sorted(per_person.values(), key=lambda p: (-p["bonus"], p["name"].lower())),
             "totals": {"bonus_days": len(bonus_days), "payable": round(sum(r["total"] for r in bonus_days), 2),
@@ -5925,6 +5933,59 @@ def incentive_history_csv(from_: str = Query("", alias="from"), to: str = Query(
     from fastapi.responses import Response as _Resp
     return _Resp(content=buf.getvalue(), media_type="text/csv",
                  headers={"Content-Disposition": f'attachment; filename="bonus_{frm}_to_{to_}.csv"'})
+
+
+class IncentivePayoutIn(BaseModel):
+    paid_on: str                       # the day the money went out
+    through: str                       # last bonus day the payment covers
+    notes: Optional[str] = None
+
+
+@app.post("/incentive/payouts")
+def record_incentive_payout(body: IncentivePayoutIn, user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """"We paid the bonus on X, covering everything through Y." Marks every
+    bonus day after the previous payout (or from the program start) through Y as
+    paid on X, and keeps a payout record with the amount that covered (staff)."""
+    for v in (body.paid_on, body.through):
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", v or ""):
+            raise HTTPException(422, "Dates must be YYYY-MM-DD")
+    prev = sorted(s.exec(select(IncentivePayout)).all(), key=lambda p: (p.through, p.id or 0))
+    if prev and body.through <= prev[-1].through:
+        raise HTTPException(422, f"Already paid through {prev[-1].through} — undo that payout first to re-do it")
+    start = config.INCENTIVE_START if re.match(r"^\d{4}-\d{2}-\d{2}$", config.INCENTIVE_START or "") else body.through
+    from_day = (date.fromisoformat(prev[-1].through) + timedelta(days=1)).isoformat() if prev else start
+    if from_day > body.through:
+        raise HTTPException(422, "Nothing to pay in that range")
+    h = _incentive_history(s, from_day, body.through)
+    paid_at = datetime.fromisoformat(body.paid_on + "T12:00:00")
+    amount, n = 0.0, 0
+    for r in h["days"]:
+        if r["bonus"] <= 0:
+            continue
+        row = s.exec(select(IncentiveDay).where(IncentiveDay.date == r["date"])).first() or IncentiveDay(date=r["date"])
+        row.paid = True; row.paid_at = paid_at
+        s.add(row); amount += r["total"]; n += 1
+    po = IncentivePayout(paid_on=body.paid_on, from_day=from_day, through=body.through, amount=round(amount, 2), days=n,
+                         notes=(body.notes or "").strip() or None, created_by=user.email)
+    s.add(po); s.commit(); s.refresh(po)
+    print(f"POST /incentive/payouts  paid_on={po.paid_on} {po.from_day}..{po.through} ${po.amount} ({n} days) by={user.email}")
+    return {"ok": True, "id": po.id, "paid_on": po.paid_on, "from_day": po.from_day, "through": po.through, "amount": po.amount, "days": n}
+
+
+@app.delete("/incentive/payouts/{payout_id}")
+def undo_incentive_payout(payout_id: int, user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Undo the most recent payout: its days go back to unpaid (staff)."""
+    po = s.get(IncentivePayout, payout_id)
+    if not po:
+        raise HTTPException(404, "No such payout")
+    latest = sorted(s.exec(select(IncentivePayout)).all(), key=lambda p: (p.through, p.id or 0))[-1]
+    if latest.id != po.id:
+        raise HTTPException(422, "Only the most recent payout can be undone")
+    for row in s.exec(select(IncentiveDay).where(IncentiveDay.date >= po.from_day, IncentiveDay.date <= po.through)).all():
+        row.paid = False; row.paid_at = None; s.add(row)
+    s.delete(po); s.commit()
+    print(f"DELETE /incentive/payouts/{payout_id}  {po.from_day}..{po.through} undone by={user.email}")
+    return {"ok": True}
 
 
 class IncentiveDayIn(BaseModel):
