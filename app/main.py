@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-10-03.24-delivery-terms"
+APP_VERSION = "2026-10-03.25-signoff-acceptance"
 
 
 @app.get("/version")
@@ -2571,6 +2571,9 @@ def _stamp_signature_pdf(pdf_path: str, signature: str, signed_by: str,
         page.draw_line((m, y), (W - m, y), color=(0.7, 0.72, 0.75), width=0.8); y += 16
         page.insert_text((m, y), "CUSTOMER SIGN-OFF", fontsize=10, fontname="hebo", color=navy)
         page.insert_text((m, y + 15), meta, fontsize=8.5, color=grey)
+        page.insert_text((m, y + 29), "By signing, the customer's representative accepted this delivery and the Terms & Conditions printed above,",
+                         fontsize=7.5, color=grey)
+        page.insert_text((m, y + 39), "and confirmed they are authorized to do so for the Purchaser.", fontsize=7.5, color=grey)
         sig_rect = fitz.Rect(W - m - 170, content_h + 18, W - m, H - 10)
         page.draw_rect(sig_rect, color=(0.8, 0.8, 0.8), width=0.6)
         page.insert_image(sig_rect, filename=sig_path, keep_proportion=True)
