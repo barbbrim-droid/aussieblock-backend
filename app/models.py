@@ -457,3 +457,31 @@ class WeightTicket(SQLModel, table=True):
     read_status: Optional[str] = None
     read_data: Optional[str] = None                           # JSON of what the reader saw (for audit)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class IncentiveDay(SQLModel, table=True):
+    """Office record for one day of the daily yardage bonus: whether it has been
+    paid out, and (optionally) who gets it when the automatic list — the drivers
+    who hauled concrete that day plus the plant operators — needs a correction.
+    people=None means "use the automatic list"."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: str = Field(index=True, unique=True)     # ISO date
+    paid: bool = False
+    paid_at: Optional[datetime] = None
+    people: Optional[str] = None                   # JSON list of names, or None = automatic
+    notes: Optional[str] = None
+
+
+class IncentivePayout(SQLModel, table=True):
+    """One bonus payout: on `paid_on` the office paid every bonus day from
+    `from_day` through `through` (inclusive). `amount` is what those days added
+    up to when it was recorded, for the audit trail."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    paid_on: str = Field(index=True)               # ISO date the money went out
+    from_day: str                                  # first bonus day covered
+    through: str = Field(index=True)               # last bonus day covered
+    amount: float = 0.0
+    days: int = 0                                  # bonus days covered
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
