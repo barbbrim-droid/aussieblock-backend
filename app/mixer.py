@@ -20,7 +20,7 @@ from sqlmodel import Session, select
 
 from .auth import require_staff
 from .db import get_session
-from .models import MixerReading, MixerReset, Truck, User
+from .models import Load, MixerReading, MixerReset, Order, Truck, User
 
 router = APIRouter(prefix="/api/mixer", tags=["mixer"])
 
@@ -92,6 +92,43 @@ def _reading_json(r: MixerReading) -> dict:
         "fw": r.fw,
         "received_at": r.received_at.isoformat() if r.received_at else None,
     }
+
+
+# Dispatch stages that mean concrete is in (or about to be in) the drum.
+ACTIVE_LOAD_STATUSES = ("batched", "enroute", "onsite")
+
+
+@router.get("/active-load")
+def active_load(truck: str = Query(..., description="Truck label, e.g. 'RTS 7329'"),
+                _: None = Depends(require_device_key),
+                s: Session = Depends(get_session)):
+    """Is this truck carrying a confirmed load right now? (device only — X-Device-Key)
+
+    The on-truck gateway polls this so the drum temperature only gets recorded
+    while dispatch shows the truck batched, en route or on site. Checks per-load
+    rows (split pours) first, then single-truck orders."""
+    label = (truck or "").strip()
+    t = s.exec(select(Truck).where(Truck.label == label)).first() if label else None
+    if not t:
+        return {"active": False, "truck": label, "reason": "unknown truck"}
+
+    ld = s.exec(select(Load)
+                .where(Load.truck_id == t.id)
+                .where(Load.status.in_(ACTIVE_LOAD_STATUSES))
+                .order_by(Load.id.desc())).first()
+    if ld:
+        o = s.get(Order, ld.order_id)
+        return {"active": True, "truck": label, "status": ld.status,
+                "ref": o.ref if o else None, "load_seq": ld.seq}
+
+    o = s.exec(select(Order)
+               .where(Order.truck_id == t.id)
+               .where(Order.status.in_(ACTIVE_LOAD_STATUSES))
+               .order_by(Order.id.desc())).first()
+    if o:
+        return {"active": True, "truck": label, "status": o.status,
+                "ref": o.ref, "load_seq": None}
+    return {"active": False, "truck": label}
 
 
 @router.post("/load")
