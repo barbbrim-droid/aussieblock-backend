@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-10-03.23-bonus-exclusions"
+APP_VERSION = "2026-10-03.24-delivery-terms"
 
 
 @app.get("/version")
@@ -6110,6 +6110,15 @@ def _incentive_for(yards: float, tiers: list, active: bool = True) -> dict:
         "pct_of_top": round(min(100.0, yards / top[0] * 100.0), 1) if top else 0.0,
         "maxed": bool(top) and yards >= top[0],
     }
+
+
+@app.get("/terms")
+def delivery_terms():
+    """The delivery terms printed on every ticket — shown to the customer at the
+    moment they sign on the driver's tablet, so the screen and the paper agree.
+    Public: no customer data, just the boilerplate."""
+    from .ticketgen.delivery_ticket import TERMS, WARNING
+    return {"terms": TERMS, "warning": WARNING}
 
 
 @app.get("/incentive/today")
