@@ -45,6 +45,10 @@ INCENTIVE_TIERS = os.getenv("INCENTIVE_TIERS", "100:25,150:50").strip()
 # The day the program started (YYYY-MM-DD). Days before it show their yards but
 # no bonus, so the history doesn't imply money was owed before the deal began.
 INCENTIVE_START = os.getenv("INCENTIVE_START", "2026-09-14").strip()
+# People who never get the bonus even when they're named on a load — third-party
+# hauler drivers (P&L Concrete). Seeds the list the office manages on the Bonus
+# screen; only used when that list is empty.
+INCENTIVE_EXCLUDE = os.getenv("INCENTIVE_EXCLUDE", "Allen,Edgar").strip()
 
 # How often (seconds) to pull new fuel transactions. 3600 = hourly — fuel data
 # doesn't change minute-to-minute the way GPS positions do.
