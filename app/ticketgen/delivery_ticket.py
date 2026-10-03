@@ -25,17 +25,22 @@ WARN_BG  = (252, 232, 230)
 # Boilerplate printed at the bottom of every ticket. Either can be overridden per
 # render by passing data["terms"] / data["warning"].
 TERMS = (
-    "Purchaser must provide suitable roadways/approaches to the delivery point; we reserve the right to "
-    "stop delivery if approaches are unsatisfactory. For delivery beyond the curb line, we assume no liability "
-    "for damage to sidewalks, driveways, or property, and Purchaser indemnifies and holds us harmless against "
-    "all resulting liability, loss, and expense. This concrete meets the mix standard designated above; if "
-    "altered by the customer, if water is added, or if not placed and cured per ASTM specifications, it may not "
-    "perform as designed and the customer assumes that risk. Aussieblock Ready Mix assumes no liability for "
-    "architectural finishes, including polished floors, colored concrete, and exposed aggregate. Purchaser "
-    "assumes all responsibility for strength, slump, and quality when water or other material is added on site. "
-    "Free unloading time is 5 min/yd after arrival; excess billed at $150.00/hr. Customer waives all rights of "
-    "personal-property exemption under Texas law, is responsible for any wrecker fees on this delivery, and may "
-    "be charged a fuel adjustment per load."
+    "Purchaser must provide safe, suitable roadways and approaches to the delivery point; we may stop delivery "
+    "if they are unsatisfactory. We deliver only. Purchaser controls the site; we do not direct placement, pumping, "
+    "finishing, curing or site safety, including clearance from overhead power lines, and we are not the renter or "
+    "customer for any pump or other equipment used on the job, even if we help arrange or bill for it. TO THE "
+    "FULLEST EXTENT THE LAW ALLOWS, PURCHASER WILL DEFEND, INDEMNIFY AND HOLD US HARMLESS FROM ALL CLAIMS FOR "
+    "INJURY, DEATH OR PROPERTY DAMAGE ARISING FROM THE SITE OR THE WORK, INCLUDING PUMPING, OVERHEAD LINES AND "
+    "DELIVERY BEYOND THE CURB LINE, AND INCLUDING CLAIMS BY PURCHASER'S EMPLOYEES AND CONTRACTORS, EVEN IF CAUSED "
+    "IN PART BY OUR NEGLIGENCE. This concrete meets the mix designated above. If water or other material is added "
+    "on site, or the concrete is not placed and cured per ASTM specifications, Purchaser assumes all responsibility "
+    "for strength, slump and quality. We assume no liability for architectural finishes, including polished floors, "
+    "colored concrete and exposed aggregate. Our liability is limited to replacing the concrete or refunding its "
+    "price. WE ARE NOT LIABLE FOR REMOVAL, REPLACEMENT OR OTHER CONSEQUENTIAL DAMAGES, AND WE DISCLAIM ALL IMPLIED "
+    "WARRANTIES, INCLUDING MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. Free unloading time is 5 min/yd "
+    "after arrival; excess is billed at $150.00/hr. Purchaser pays any wrecker fees for this delivery and may be "
+    "charged a fuel adjustment per load. The person signing confirms they are authorized to accept this delivery "
+    "and these terms for Purchaser."
 )
 WARNING = (
     "⚠ WARNING — CAUSTIC; IRRITATING TO SKIN & EYES. Take every precaution to avoid contact. "

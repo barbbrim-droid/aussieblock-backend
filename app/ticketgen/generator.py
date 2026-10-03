@@ -61,7 +61,7 @@ def render_ticket(data, out_path):
     # sheet. A TxDOT ticket adds the MPL block, which on a full mix pushes the
     # signature + terms + caustic warning off the bottom (the disclaimer got clipped).
     # Count the rows whose height scales with RH and, if the roomy 4.6 mm default
-    # would overflow, shrink RH (to a 3.8 mm floor) so everything — disclaimer
+    # would overflow, shrink RH (to a 3.5 mm floor) so everything — disclaimer
     # included — fits. Tickets that already fit keep the full 4.6 mm. The terms block
     # below also pins to the page bottom and self-shrinks as a final backstop.
     _rcp = (d.get("order", {}).get("recipe", "") or "").lower()
@@ -72,9 +72,9 @@ def render_ticket(data, out_path):
                     + max(len(d.get("materials") or []), MIN_MATERIAL_ROWS)  # BATCH INFORMATION
                     + 1 + max(len(d.get("totals") or {}), len(d.get("process") or {}))  # totals/process
                     + _mpl_rows)                                   # MPL (TxDOT only)
-    _fixed = 109.0 if _mpl_rows else 101.0          # non-row furniture (header, bars, sig box…)
-    _target_bottom = pdf.h - 6.0 - 26.0             # page minus bottom margin minus terms+warning block
-    RH = max(3.8, min(4.6, (_target_bottom - _fixed) / max(_scaled_rows, 1)))
+    _fixed = 113.0 if _mpl_rows else 105.0          # non-row furniture (header, bars, sig box…) — measured off real renders
+    _target_bottom = pdf.h - 6.0 - 34.0             # page minus bottom margin minus terms+warning block (the 2026-10 terms run ~9 lines)
+    RH = max(3.5, min(4.6, (_target_bottom - _fixed) / max(_scaled_rows, 1)))   # 3.5 mm floor still clears the 6.9 pt row text
 
     # ---------- top band: logo (left) / company / weather ----------
     top_y = pdf.get_y()
@@ -354,6 +354,8 @@ def render_ticket(data, out_path):
         term_lh = max(1.8, (avail - (HDR_H + GAP_H + wh)) / max(th / term_lh, 0.1))
         block_h, th, wh = _block_h(term_lh)
 
+    if os.environ.get("TICKET_DEBUG"):
+        print(f"ticket fit: RH={RH:.2f} rows={_scaled_rows} mpl_rows={_mpl_rows} fixed={_fixed} target={_target_bottom:.1f} content_bottom={content_bottom:.1f} avail={avail:.1f} block_h={block_h:.1f} term_lh={term_lh:.2f}")
     top = max(content_bottom, pdf.h - BOT_MARGIN - block_h)   # pin to page bottom
     pdf.set_y(top)
     pdf.set_x(10); pdf.set_font("DejaVu", "B", 6); pdf.set_text_color(*INK)
