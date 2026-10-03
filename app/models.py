@@ -485,3 +485,13 @@ class IncentivePayout(SQLModel, table=True):
     notes: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class IncentiveExclusion(SQLModel, table=True):
+    """A name that never gets the daily bonus — e.g. a P&L Concrete driver who
+    shows up on our loads but isn't our employee. Matched case-insensitively
+    against the full name on the load, or its first word."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)
+    note: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)

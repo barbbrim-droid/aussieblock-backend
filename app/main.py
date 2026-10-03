@@ -38,7 +38,7 @@ except Exception:   # noqa: BLE001 — zoneinfo/tzdata missing → fall back to 
 
 from .db import init_db, get_session, engine
 from .seed import seed_if_empty
-from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket, IncentiveDay, IncentivePayout
+from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket, IncentiveDay, IncentivePayout, IncentiveExclusion
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
     require_driver, require_timeclock,
@@ -179,6 +179,7 @@ async def lifespan(app: FastAPI):
         _ensure_materials(_s)   # seed/backfill materials + apply any dated rate revisions on deploy
         _flag_fuel_odometers(_s)   # surface fuel fills whose typed mileage doesn't add up
         _repair_wt_dates(_s)       # driver tickets the photo reader dated somewhere implausible
+        _ensure_incentive_exclusions(_s)   # P&L drivers never get the daily bonus
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(stale_order_sweep_loop()),   # nothing stays "ongoing" past its pour day
@@ -559,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-10-03.22-bonus-payouts"
+APP_VERSION = "2026-10-03.23-bonus-exclusions"
 
 
 @app.get("/version")
@@ -5815,15 +5816,42 @@ def _yards_on_day(s: Session, day: str) -> float:
     return round(sum(y for _, y in _orders_on_day(s, day)), 2)
 
 
+def _incentive_exclusions(s: Session) -> list:
+    return sorted((e.name for e in s.exec(select(IncentiveExclusion)).all()), key=str.lower)
+
+
+def _ensure_incentive_exclusions(s: Session) -> None:
+    """Seed the never-gets-it list from INCENTIVE_EXCLUDE when it's empty."""
+    if s.exec(select(IncentiveExclusion)).first() is not None:
+        return
+    seeded = 0
+    for n in (config.INCENTIVE_EXCLUDE or "").split(","):
+        n = n.strip()
+        if n:
+            s.add(IncentiveExclusion(name=n, note="P&L driver")); seeded += 1
+    if seeded:
+        s.commit(); print(f"bonus: seeded {seeded} excluded name(s): {config.INCENTIVE_EXCLUDE}")
+
+
+def _is_excluded(name: str, exclusions: list) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    first = n.split()[0]
+    return any(n == x.lower() or first == x.lower() for x in exclusions)
+
+
 def _people_on_day(s: Session, day: str, orders=None) -> list:
     """Who earns the day's bonus automatically: every driver named on a load (or
     on a single delivery) that counted toward the day's yards, plus the active
-    plant operators (Employee.kind == "plant"). Sorted, de-duplicated by name."""
+    plant operators (Employee.kind == "plant") — minus anyone on the never-gets-it
+    list (third-party hauler drivers). Sorted, de-duplicated by name."""
     orders = _orders_on_day(s, day) if orders is None else orders
+    excluded = _incentive_exclusions(s)
     names: dict = {}
     def add(n):
         n = (n or "").strip()
-        if n and n != "—":
+        if n and n != "—" and not _is_excluded(n, excluded):
             names.setdefault(n.lower(), n)
     for o, _y in orders:
         loads = s.exec(select(Load).where(Load.order_id == o.id)).all()
@@ -5879,6 +5907,7 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
     last = payouts[-1] if payouts else None
     return {"from": frm, "to": to, "start": config.INCENTIVE_START, "tiers": [{"yards": t[0], "bonus": t[1]} for t in tiers],
             "paid_through": last.through if last else None,
+            "exclusions": _incentive_exclusions(s),
             "last_payout": ({"id": last.id, "paid_on": last.paid_on, "from_day": last.from_day, "through": last.through,
                              "amount": last.amount, "days": last.days, "notes": last.notes or ""} if last else None),
             "payouts": [{"id": p.id, "paid_on": p.paid_on, "from_day": p.from_day, "through": p.through, "amount": p.amount,
@@ -5933,6 +5962,40 @@ def incentive_history_csv(from_: str = Query("", alias="from"), to: str = Query(
     from fastapi.responses import Response as _Resp
     return _Resp(content=buf.getvalue(), media_type="text/csv",
                  headers={"Content-Disposition": f'attachment; filename="bonus_{frm}_to_{to_}.csv"'})
+
+
+class IncentiveExclusionIn(BaseModel):
+    name: str
+    note: Optional[str] = None
+
+
+@app.get("/incentive/exclusions")
+def list_incentive_exclusions(_: User = Depends(require_staff), s: Session = Depends(get_session)):
+    return {"names": [{"id": e.id, "name": e.name, "note": e.note or ""} for e in
+                      sorted(s.exec(select(IncentiveExclusion)).all(), key=lambda e: e.name.lower())]}
+
+
+@app.post("/incentive/exclusions")
+def add_incentive_exclusion(body: IncentiveExclusionIn, user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    """Add a name that never gets the bonus (staff). Applies to every day's
+    automatic list, past and future; a day's edited list is left as it is."""
+    n = (body.name or "").strip()
+    if not n:
+        raise HTTPException(422, "Enter a name")
+    if s.exec(select(IncentiveExclusion).where(IncentiveExclusion.name == n)).first():
+        return {"ok": True, "name": n}
+    s.add(IncentiveExclusion(name=n, note=(body.note or "").strip() or None)); s.commit()
+    print(f"POST /incentive/exclusions  {n} by={user.email}")
+    return {"ok": True, "name": n}
+
+
+@app.delete("/incentive/exclusions/{name}")
+def remove_incentive_exclusion(name: str, user: User = Depends(require_staff), s: Session = Depends(get_session)):
+    e = s.exec(select(IncentiveExclusion).where(IncentiveExclusion.name == name)).first()
+    if e:
+        s.delete(e); s.commit()
+        print(f"DELETE /incentive/exclusions/{name} by={user.email}")
+    return {"ok": True}
 
 
 class IncentivePayoutIn(BaseModel):
