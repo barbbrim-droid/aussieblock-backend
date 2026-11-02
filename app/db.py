@@ -39,6 +39,7 @@ def init_db() -> None:
 # but never alters existing ones, so a database created before a column was added
 # needs the column backfilled. Each step is idempotent and safe to re-run.
 _COLUMN_MIGRATIONS = {
+    "incentiveexclusion": {"kind": "VARCHAR DEFAULT 'person'"},
     "customer": {"qbo_id": "VARCHAR", "cod": "BOOLEAN DEFAULT 0", "email": "VARCHAR"},
     "user": {"phone": "VARCHAR", "company": "VARCHAR", "project": "VARCHAR", "login_pin": "VARCHAR"},
     "truck": {"notes": "VARCHAR", "fluidsecure_vehicle_id": "VARCHAR", "kind": "VARCHAR DEFAULT 'mixer'",
