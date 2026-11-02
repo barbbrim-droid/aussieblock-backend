@@ -23,7 +23,8 @@ DEFAULT_SHEET = {
     "admixtures": [],   # [{"name": "Fiber", "rate": 3.75, "per": "lb"|"yard"}]
     "self_haul_customers": [],   # pickup customers (concrete only, no delivery/load fees)
     "standby_exempt_customers": [],   # customers NOT charged standby (still pay haul fees)
-    "tax_exempt_customers": ["P&L Concrete"],   # no sales tax on their tickets (resale / self-haul pickup)
+    "tax_exempt_customers": ["P&L Concrete", "P&L Trucking Services"],   # no sales tax on their tickets (P&L's self-haul pickups)
+    "tax_exempt_seed": 0,        # which built-in exempt names have been added to a saved sheet (see load_sheet)
     # Fuel cost: FluidSecure reports gallons, not dollars, so staff set a $/gal
     # rate. `fuel_prices` holds per-product rates; `fuel_price_default` covers any
     # product without one. Used to cost the fuel view's gallons.
@@ -114,8 +115,21 @@ def load_sheet() -> dict:
     merged = {**DEFAULT_SHEET, **s}
     have = {_norm(a.get("name")) for a in merged.get("admixtures", []) if a.get("name")}
     missing = [a for a in DEFAULT_ADMIXTURES if _norm(a["name"]) not in have]
+    # One-time: add the built-in tax-exempt names (P&L under either name) to a sheet
+    # saved before they existed. Done once per seed level, so a name the office
+    # removes afterwards stays removed.
+    _SEED_LEVEL = 1
+    if int(merged.get("tax_exempt_seed") or 0) < _SEED_LEVEL:
+        cur = list(merged.get("tax_exempt_customers") or [])
+        for n in DEFAULT_SHEET["tax_exempt_customers"]:
+            if not _name_listed(n, cur):
+                cur.append(n)
+        merged["tax_exempt_customers"] = cur
+        merged["tax_exempt_seed"] = _SEED_LEVEL
+        missing = missing or True   # force the write below
     if missing:
-        merged["admixtures"] = [*merged.get("admixtures", []), *missing]
+        if missing is not True:
+            merged["admixtures"] = [*merged.get("admixtures", []), *missing]
         try:
             with open(_path(), "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2)
@@ -134,6 +148,7 @@ def save_sheet(sheet: dict) -> dict:
     merged["self_haul_customers"] = sheet.get("self_haul_customers", [])
     merged["standby_exempt_customers"] = sheet.get("standby_exempt_customers", current.get("standby_exempt_customers", []))
     merged["tax_exempt_customers"] = sheet.get("tax_exempt_customers", current.get("tax_exempt_customers", DEFAULT_SHEET["tax_exempt_customers"]))
+    merged["tax_exempt_seed"] = current.get("tax_exempt_seed", DEFAULT_SHEET["tax_exempt_seed"])
     merged["delivery_brackets"] = sheet.get("delivery_brackets") or DEFAULT_BRACKETS
     # Fuel prices live in the sheet but are edited from the fuel view, not the
     # price-sheet editor — carry the saved values forward when not in this payload.
