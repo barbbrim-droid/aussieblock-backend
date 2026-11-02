@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-11-02.29-tax-exempt-match"
+APP_VERSION = "2026-11-02.30-pl-trucking-exempt"
 
 
 @app.get("/version")
@@ -2004,7 +2004,7 @@ class PriceSheetIn(BaseModel):
     admixtures: list = []   # [{"name","rate","per":"lb"|"yard"}]
     self_haul_customers: list = []   # pickup customers — no delivery/load fees
     standby_exempt_customers: list = []   # customers not charged standby (still pay haul)
-    tax_exempt_customers: list = ["P&L Concrete"]   # no sales tax on their tickets
+    tax_exempt_customers: list = ["P&L Concrete", "P&L Trucking Services"]   # no sales tax on their tickets
 
 
 @app.get("/price-sheet")
