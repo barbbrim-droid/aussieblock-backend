@@ -219,11 +219,34 @@ def is_standby_exempt(customer: str, sheet: dict = None) -> bool:
     return _norm(customer) in {_norm(c) for c in sheet.get("standby_exempt_customers", []) if c}
 
 
+def _tight(s) -> str:
+    """Letters and digits only, lower-case — so 'P&L Concrete', 'P & L Concrete',
+    'PL Concrete' and 'P&L CONCRETE, LLC' line up ('plconcrete', 'plconcretellc')."""
+    return "".join(c for c in str(s or "").lower() if c.isalnum())
+
+
+def _name_listed(customer: str, names) -> bool:
+    """Tolerant customer match for a sheet list: equal once punctuation and spaces
+    are dropped, or the customer's name starts with the listed one (so 'P&L
+    Concrete' on the sheet covers 'P&L Concrete, LLC' on the order). Listed names
+    shorter than 4 characters must match exactly, so 'PL' can't catch 'Plains'."""
+    k = _tight(customer)
+    if not k:
+        return False
+    for n in names or []:
+        t = _tight(n)
+        if not t:
+            continue
+        if k == t or (len(t) >= 4 and k.startswith(t)):
+            return True
+    return False
+
+
 def is_tax_exempt(customer: str, sheet: dict = None) -> bool:
     """True when a customer's tickets carry no sales tax (e.g. P&L Concrete's
     self-haul pickups — resale). Everything else on the ticket is unchanged."""
     sheet = sheet or load_sheet()
-    return _norm(customer) in {_norm(c) for c in sheet.get("tax_exempt_customers", []) if c}
+    return _name_listed(customer, sheet.get("tax_exempt_customers", []))
 
 
 def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):
@@ -332,7 +355,7 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
         delivery_rate = _d["rate"]
         delivery = _d["total"]
     subtotal = round(extended + adx_total + delivery + short + backhaul, 2)
-    tax_exempt = cust_n in {_norm(c) for c in sheet.get("tax_exempt_customers", []) if c}
+    tax_exempt = _name_listed(customer, sheet.get("tax_exempt_customers", []))
     tax_pct = 0.0 if tax_exempt else _num(sheet.get("tax_pct"))
     tax = round(subtotal * tax_pct / 100.0, 2)
     total = round(subtotal + tax, 2)
