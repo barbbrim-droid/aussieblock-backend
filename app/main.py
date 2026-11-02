@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-11-02.28-tax-exempt-customers"
+APP_VERSION = "2026-11-02.29-tax-exempt-match"
 
 
 @app.get("/version")
