@@ -23,6 +23,7 @@ DEFAULT_SHEET = {
     "admixtures": [],   # [{"name": "Fiber", "rate": 3.75, "per": "lb"|"yard"}]
     "self_haul_customers": [],   # pickup customers (concrete only, no delivery/load fees)
     "standby_exempt_customers": [],   # customers NOT charged standby (still pay haul fees)
+    "tax_exempt_customers": ["P&L Concrete"],   # no sales tax on their tickets (resale / self-haul pickup)
     # Fuel cost: FluidSecure reports gallons, not dollars, so staff set a $/gal
     # rate. `fuel_prices` holds per-product rates; `fuel_price_default` covers any
     # product without one. Used to cost the fuel view's gallons.
@@ -132,6 +133,7 @@ def save_sheet(sheet: dict) -> dict:
     merged["admixtures"] = sheet.get("admixtures", [])
     merged["self_haul_customers"] = sheet.get("self_haul_customers", [])
     merged["standby_exempt_customers"] = sheet.get("standby_exempt_customers", current.get("standby_exempt_customers", []))
+    merged["tax_exempt_customers"] = sheet.get("tax_exempt_customers", current.get("tax_exempt_customers", DEFAULT_SHEET["tax_exempt_customers"]))
     merged["delivery_brackets"] = sheet.get("delivery_brackets") or DEFAULT_BRACKETS
     # Fuel prices live in the sheet but are edited from the fuel view, not the
     # price-sheet editor — carry the saved values forward when not in this payload.
@@ -215,6 +217,13 @@ def is_standby_exempt(customer: str, sheet: dict = None) -> bool:
     free hour. They still pay normal delivery/haul fees — only standby is waived."""
     sheet = sheet or load_sheet()
     return _norm(customer) in {_norm(c) for c in sheet.get("standby_exempt_customers", []) if c}
+
+
+def is_tax_exempt(customer: str, sheet: dict = None) -> bool:
+    """True when a customer's tickets carry no sales tax (e.g. P&L Concrete's
+    self-haul pickups — resale). Everything else on the ticket is unchanged."""
+    sheet = sheet or load_sheet()
+    return _norm(customer) in {_norm(c) for c in sheet.get("tax_exempt_customers", []) if c}
 
 
 def strip_self_haul_fee(notes: str, customer: str, sheet: dict = None):
@@ -323,7 +332,8 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
         delivery_rate = _d["rate"]
         delivery = _d["total"]
     subtotal = round(extended + adx_total + delivery + short + backhaul, 2)
-    tax_pct = _num(sheet.get("tax_pct"))
+    tax_exempt = cust_n in {_norm(c) for c in sheet.get("tax_exempt_customers", []) if c}
+    tax_pct = 0.0 if tax_exempt else _num(sheet.get("tax_pct"))
     tax = round(subtotal * tax_pct / 100.0, 2)
     total = round(subtotal + tax, 2)
     return {
@@ -337,6 +347,7 @@ def compute_pricing(sheet: dict, mix: str, customer: str, order_qty, load_qty,
         "subtotal": subtotal,
         "tax_pct": tax_pct,
         "tax": tax,
+        "tax_exempt": tax_exempt,
         "total": total,
         "job_running_total": total,    # this load only (for now)
         "haul_internal": round(lq * haul, 2),   # tracked, not printed
