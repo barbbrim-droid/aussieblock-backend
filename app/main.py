@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-11-02.26-bonus-exclude-pl-yards"
+APP_VERSION = "2026-11-02.27-bonus-exclude-pickups"
 
 
 @app.get("/version")
@@ -5803,15 +5803,15 @@ def _orders_on_day(s: Session, day: str, counting_only: bool = True) -> list:
     out, so they never move the bonus bar."""
     out = []
     excluded = _incentive_exclusions(s, "customer") if counting_only else []
-    cust = {c.id: c.name for c in s.exec(select(Customer)).all()} if excluded else {}
+    cust = {c.id: c.name for c in s.exec(select(Customer)).all()} if counting_only else {}
     for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES | {"complete"}))).all():
         d = (o.scheduled_for or "").strip()
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
             d = (o.completed_at or "")[:10]
         if d != day:
             continue
-        if excluded and _customer_excluded(cust.get(o.customer_id, ""), excluded):
-            continue
+        if counting_only and _customer_excluded(cust.get(o.customer_id, ""), excluded):
+            continue   # self-pickup (P&L) or an excluded customer — their crew hauls it
         b = _batched_yards(o, s)
         if b > 0:
             out.append((o, b))
@@ -5854,9 +5854,25 @@ def _ensure_incentive_exclusions(s: Session) -> None:
         s.commit(); print(f"bonus: seeded exclusions: {', '.join(seeded)}")
 
 
+def _pickup_customers() -> list:
+    """Customers who pick concrete up with their own trucks (the Price sheet's
+    self-haul list, e.g. P&L Concrete). Our crew doesn't haul it, so it never
+    counts toward the daily goal."""
+    try:
+        return [c for c in (pricing.load_sheet().get("self_haul_customers") or []) if c]
+    except Exception:   # noqa: BLE001 — a bad sheet must never break the bonus
+        return []
+
+
 def _customer_excluded(name: str, excluded_customers: list) -> bool:
+    """True when the order's customer is on the doesn't-count list OR is a
+    self-pickup customer on the Price sheet."""
     k = _norm_name(name)
-    return bool(k) and any(k == _norm_name(x) or k.startswith(_norm_name(x)) for x in excluded_customers if _norm_name(x))
+    if not k:
+        return False
+    if any(k == _norm_name(x) or k.startswith(_norm_name(x)) for x in excluded_customers if _norm_name(x)):
+        return True
+    return pricing.is_self_haul(name)
 
 
 def _is_excluded(name: str, exclusions: list) -> bool:
@@ -5936,6 +5952,7 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
             "paid_through": last.through if last else None,
             "exclusions": _incentive_exclusions(s, "person"),
             "excluded_customers": _incentive_exclusions(s, "customer"),
+            "pickup_customers": _pickup_customers(),
             "last_payout": ({"id": last.id, "paid_on": last.paid_on, "from_day": last.from_day, "through": last.through,
                              "amount": last.amount, "days": last.days, "notes": last.notes or ""} if last else None),
             "payouts": [{"id": p.id, "paid_on": p.paid_on, "from_day": p.from_day, "through": p.through, "amount": p.amount,
@@ -6169,6 +6186,7 @@ def incentive_today(date_: str = Query("", alias="date"), user: User = Depends(g
     out["yards_all"] = yards_all                                   # everything poured, P&L included (the board's chip)
     out["excluded_yards"] = round(yards_all - out["yards"], 2)     # what didn't count
     out["excluded_customers"] = _incentive_exclusions(s, "customer")
+    out["pickup_customers"] = _pickup_customers()
     week = []
     for i in range(6, -1, -1):
         d = (today - timedelta(days=i)).isoformat()
