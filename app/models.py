@@ -493,5 +493,6 @@ class IncentiveExclusion(SQLModel, table=True):
     against the full name on the load, or its first word."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
+    kind: str = "person"                           # "person" (never gets the bonus) | "customer" (their yards don't count)
     note: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)

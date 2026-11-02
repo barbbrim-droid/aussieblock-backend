@@ -49,6 +49,10 @@ INCENTIVE_START = os.getenv("INCENTIVE_START", "2026-09-14").strip()
 # hauler drivers (P&L Concrete). Seeds the list the office manages on the Bonus
 # screen; only used when that list is empty.
 INCENTIVE_EXCLUDE = os.getenv("INCENTIVE_EXCLUDE", "Allen,Edgar").strip()
+# Customers whose yardage never counts toward the daily goal — concrete sold to
+# P&L Concrete is hauled by their crew, not ours. Seeds the list on the Bonus
+# screen; only used when it's empty. Matched loosely ("P&L", "PL", "P & L").
+INCENTIVE_EXCLUDE_CUSTOMERS = os.getenv("INCENTIVE_EXCLUDE_CUSTOMERS", "P&L Concrete").strip()
 
 # How often (seconds) to pull new fuel transactions. 3600 = hourly — fuel data
 # doesn't change minute-to-minute the way GPS positions do.

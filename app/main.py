@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-10-03.25-signoff-acceptance"
+APP_VERSION = "2026-11-02.26-bonus-exclude-pl-yards"
 
 
 @app.get("/version")
@@ -5793,18 +5793,24 @@ def _incentive_tiers() -> list:
     return sorted(out)
 
 
-def _orders_on_day(s: Session, day: str) -> list:
+def _orders_on_day(s: Session, day: str, counting_only: bool = True) -> list:
     """[(order, yards)] for every order placed on that day (scheduled date; a
     legacy "today" value falls back to the completion date) that has gone out —
     batched yards when there are loads / a batch ticket, else the ordered quantity
     for a completed single delivery. Requested, scheduled and cancelled orders
-    don't count; a live pour counts the loads batched so far."""
+    don't count; a live pour counts the loads batched so far. With counting_only,
+    orders for an excluded customer (P&L Concrete — their crew hauls it) are left
+    out, so they never move the bonus bar."""
     out = []
+    excluded = _incentive_exclusions(s, "customer") if counting_only else []
+    cust = {c.id: c.name for c in s.exec(select(Customer)).all()} if excluded else {}
     for o in s.exec(select(Order).where(Order.status.in_(_IN_FLIGHT_STATUSES | {"complete"}))).all():
         d = (o.scheduled_for or "").strip()
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
             d = (o.completed_at or "")[:10]
         if d != day:
+            continue
+        if excluded and _customer_excluded(cust.get(o.customer_id, ""), excluded):
             continue
         b = _batched_yards(o, s)
         if b > 0:
@@ -5814,26 +5820,43 @@ def _orders_on_day(s: Session, day: str) -> list:
     return out
 
 
-def _yards_on_day(s: Session, day: str) -> float:
+def _yards_on_day(s: Session, day: str, counting_only: bool = True) -> float:
     """Yards the plant has poured on a day so far (see _orders_on_day)."""
-    return round(sum(y for _, y in _orders_on_day(s, day)), 2)
+    return round(sum(y for _, y in _orders_on_day(s, day, counting_only)), 2)
 
 
-def _incentive_exclusions(s: Session) -> list:
-    return sorted((e.name for e in s.exec(select(IncentiveExclusion)).all()), key=str.lower)
+def _incentive_exclusions(s: Session, kind: str = "person") -> list:
+    return sorted((e.name for e in s.exec(select(IncentiveExclusion)).all() if (e.kind or "person") == kind), key=str.lower)
+
+
+def _norm_name(v: str) -> str:
+    """Loose key for a company name: 'P&L Concrete', 'PL Concrete', 'P & L Concrete'
+    all become 'plconcrete'."""
+    return re.sub(r"[^a-z0-9]", "", (v or "").lower().replace(" and ", "&"))
 
 
 def _ensure_incentive_exclusions(s: Session) -> None:
-    """Seed the never-gets-it list from INCENTIVE_EXCLUDE when it's empty."""
-    if s.exec(select(IncentiveExclusion)).first() is not None:
-        return
-    seeded = 0
-    for n in (config.INCENTIVE_EXCLUDE or "").split(","):
-        n = n.strip()
-        if n:
-            s.add(IncentiveExclusion(name=n, note="P&L driver")); seeded += 1
+    """Seed the never-gets-it people from INCENTIVE_EXCLUDE and the doesn't-count
+    customers from INCENTIVE_EXCLUDE_CUSTOMERS — each only when its list is empty."""
+    rows = s.exec(select(IncentiveExclusion)).all()
+    seeded = []
+    if not any((r.kind or "person") == "person" for r in rows):
+        for n in (config.INCENTIVE_EXCLUDE or "").split(","):
+            n = n.strip()
+            if n:
+                s.add(IncentiveExclusion(name=n, kind="person", note="P&L driver")); seeded.append(n)
+    if not any((r.kind or "person") == "customer" for r in rows):
+        for n in (config.INCENTIVE_EXCLUDE_CUSTOMERS or "").split(","):
+            n = n.strip()
+            if n:
+                s.add(IncentiveExclusion(name=n, kind="customer", note="their crew hauls it")); seeded.append(n)
     if seeded:
-        s.commit(); print(f"bonus: seeded {seeded} excluded name(s): {config.INCENTIVE_EXCLUDE}")
+        s.commit(); print(f"bonus: seeded exclusions: {', '.join(seeded)}")
+
+
+def _customer_excluded(name: str, excluded_customers: list) -> bool:
+    k = _norm_name(name)
+    return bool(k) and any(k == _norm_name(x) or k.startswith(_norm_name(x)) for x in excluded_customers if _norm_name(x))
 
 
 def _is_excluded(name: str, exclusions: list) -> bool:
@@ -5880,8 +5903,9 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
         day = d.isoformat()
         orders = _orders_on_day(s, day)
         yards = round(sum(y for _, y in orders), 2)
+        yards_all = _yards_on_day(s, day, counting_only=False)
         row = rows_by_date.get(day)
-        if yards > 0 or row is not None:
+        if yards > 0 or yards_all > 0 or row is not None:
             inc = _incentive_for(yards, tiers, _incentive_active(day))
             auto = _people_on_day(s, day, orders)
             people = auto
@@ -5891,7 +5915,7 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
                 except ValueError:
                     people = auto
             bonus = inc["earned"]
-            days.append({"date": day, "yards": yards, "bonus": bonus, "active": inc["active"],
+            days.append({"date": day, "yards": yards, "excluded_yards": round(yards_all - yards, 2), "bonus": bonus, "active": inc["active"],
                          "tier": next((t["yards"] for t in reversed(inc["tiers"]) if t["hit"]), None),
                          "people": people, "auto_people": auto, "overridden": bool(row and row.people),
                          "paid": bool(row and row.paid), "paid_at": row.paid_at if row else None,
@@ -5910,7 +5934,8 @@ def _incentive_history(s: Session, frm: str, to: str) -> dict:
     last = payouts[-1] if payouts else None
     return {"from": frm, "to": to, "start": config.INCENTIVE_START, "tiers": [{"yards": t[0], "bonus": t[1]} for t in tiers],
             "paid_through": last.through if last else None,
-            "exclusions": _incentive_exclusions(s),
+            "exclusions": _incentive_exclusions(s, "person"),
+            "excluded_customers": _incentive_exclusions(s, "customer"),
             "last_payout": ({"id": last.id, "paid_on": last.paid_on, "from_day": last.from_day, "through": last.through,
                              "amount": last.amount, "days": last.days, "notes": last.notes or ""} if last else None),
             "payouts": [{"id": p.id, "paid_on": p.paid_on, "from_day": p.from_day, "through": p.through, "amount": p.amount,
@@ -5970,26 +5995,29 @@ def incentive_history_csv(from_: str = Query("", alias="from"), to: str = Query(
 class IncentiveExclusionIn(BaseModel):
     name: str
     note: Optional[str] = None
+    kind: str = "person"               # "person": never gets the bonus; "customer": their yards don't count
 
 
 @app.get("/incentive/exclusions")
 def list_incentive_exclusions(_: User = Depends(require_staff), s: Session = Depends(get_session)):
-    return {"names": [{"id": e.id, "name": e.name, "note": e.note or ""} for e in
+    return {"names": [{"id": e.id, "name": e.name, "kind": e.kind or "person", "note": e.note or ""} for e in
                       sorted(s.exec(select(IncentiveExclusion)).all(), key=lambda e: e.name.lower())]}
 
 
 @app.post("/incentive/exclusions")
 def add_incentive_exclusion(body: IncentiveExclusionIn, user: User = Depends(require_staff), s: Session = Depends(get_session)):
-    """Add a name that never gets the bonus (staff). Applies to every day's
-    automatic list, past and future; a day's edited list is left as it is."""
+    """Add a name that never gets the bonus, or a customer whose yards don't
+    count (staff). Applies to every day, past and future; a day's edited people
+    list is left as it is."""
     n = (body.name or "").strip()
+    kind = body.kind if body.kind in ("person", "customer") else "person"
     if not n:
         raise HTTPException(422, "Enter a name")
     if s.exec(select(IncentiveExclusion).where(IncentiveExclusion.name == n)).first():
-        return {"ok": True, "name": n}
-    s.add(IncentiveExclusion(name=n, note=(body.note or "").strip() or None)); s.commit()
-    print(f"POST /incentive/exclusions  {n} by={user.email}")
-    return {"ok": True, "name": n}
+        return {"ok": True, "name": n, "kind": kind}
+    s.add(IncentiveExclusion(name=n, kind=kind, note=(body.note or "").strip() or None)); s.commit()
+    print(f"POST /incentive/exclusions  {kind}: {n} by={user.email}")
+    return {"ok": True, "name": n, "kind": kind}
 
 
 @app.delete("/incentive/exclusions/{name}")
@@ -6135,8 +6163,12 @@ def incentive_today(date_: str = Query("", alias="date"), user: User = Depends(g
     tiers = _incentive_tiers()
     today = _business_today()
     day = date_ if re.match(r"^\d{4}-\d{2}-\d{2}$", date_ or "") else today.isoformat()
+    yards_all = _yards_on_day(s, day, counting_only=False)
     out = {"date": day, "is_today": day == today.isoformat(), "start": config.INCENTIVE_START,
            **_incentive_for(_yards_on_day(s, day), tiers, _incentive_active(day))}
+    out["yards_all"] = yards_all                                   # everything poured, P&L included (the board's chip)
+    out["excluded_yards"] = round(yards_all - out["yards"], 2)     # what didn't count
+    out["excluded_customers"] = _incentive_exclusions(s, "customer")
     week = []
     for i in range(6, -1, -1):
         d = (today - timedelta(days=i)).isoformat()
