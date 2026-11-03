@@ -560,7 +560,7 @@ def health():
 
 # Deploy marker — bump APP_VERSION on each backend change so we can confirm from
 # the outside which build is actually live (the API surface alone doesn't reveal it).
-APP_VERSION = "2026-11-02.30-pl-trucking-exempt"
+APP_VERSION = "2026-11-03.31-auto-loading"
 
 
 @app.get("/version")
@@ -848,6 +848,8 @@ def update_load(ref: str, seq: int, body: LoadIn, _: User = Depends(require_staf
             ld.truck_id = None
     if body.driver is not None:
         ld.driver = body.driver.strip() or None
+    if body.status is None and (body.truck is not None or body.driver is not None):
+        _auto_start_load(ld, s)      # truck + driver on a scheduled load → batched
     if body.status is not None:
         st = body.status.strip()
         if st not in ORDER_STATUSES:
@@ -4720,6 +4722,34 @@ def set_order_status(
     return _order_json(o, s)
 
 
+def _auto_start_loading(o: Order, s: Session) -> bool:
+    """Once a scheduled order has BOTH a truck and a driver it is being loaded —
+    move it to 'batched' (Loading at yard) so the dispatcher doesn't have to, and
+    so the GPS poller can take it to En route when the truck leaves the yard. A
+    COD order still waiting on payment is left at scheduled (the same guard the
+    status endpoint applies). Returns True when the status changed."""
+    if o.status != "scheduled" or not o.truck_id or not (o.driver or "").strip():
+        return False
+    if o.prepay_required and not o.prepaid:
+        if o.prepay_invoice_id and cod_invoice_status(o.prepay_invoice_id).get("paid"):
+            o.prepaid = True
+        else:
+            return False
+    o.status = "batched"
+    o.progress = _STATUS_PROGRESS.get("batched", o.progress)
+    _capture_transition_temp(o, "batched", s)
+    print(f"{o.ref}: truck + driver assigned -> Loading at yard (auto)")
+    return True
+
+
+def _auto_start_load(ld: Load, s: Session) -> bool:
+    """Same for one load of a pour: truck + driver on a scheduled load → batched."""
+    if ld.status != "scheduled" or not ld.truck_id or not (ld.driver or "").strip():
+        return False
+    ld.status = "batched"
+    return True
+
+
 @app.post("/orders/{ref}/assign")
 def assign_truck(
     ref: str,
@@ -4744,6 +4774,7 @@ def assign_truck(
     else:
         t = _concrete_truck_or_409(label, s)
         o.truck_id = t.id
+        _auto_start_loading(o, s)   # truck + driver both set → Loading at yard
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
@@ -4751,10 +4782,14 @@ def assign_truck(
 @app.post("/orders/{ref}/driver")
 def assign_driver(ref: str, driver: str = "", _: User = Depends(require_staff),
                   s: Session = Depends(get_session)):
-    """Set (or clear) the driver on an order. Pass `?driver=Rodney`, or empty/"—" to clear."""
+    """Set (or clear) the driver on an order. Pass `?driver=Rodney`, or empty/"—" to
+    clear. With a truck already on a scheduled order, setting the driver moves it to
+    Loading at yard automatically."""
     o = _staff_order_or_404(ref, s)
     name = driver.strip()
     o.driver = None if name in ("", "—", "-") else name
+    if o.driver:
+        _auto_start_loading(o, s)
     s.add(o); s.commit(); s.refresh(o)
     return _order_json(o, s)
 
