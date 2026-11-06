@@ -5891,20 +5891,69 @@ def _ensure_incentive_exclusions(s: Session) -> None:
         s.commit(); print(f"bonus: seeded exclusions: {', '.join(seeded)}")
 
 
+def _label_nums(label: str) -> set:
+    """Every run of 3+ digits in a truck label: 'RTS 5964 (2015 Freightliner)' ->
+    {'5964', '2015'}, so a truck is recognised whichever way the office spelled it."""
+    return set(re.findall(r"\d{3,}", str(label or "")))
+
+
+def _fleet_same_truck(label: str, t: Truck) -> bool:
+    """Is truck t the one FLEET_TRUCKS calls `label`? Same label, same number
+    anywhere in its label, or named after its One Step unit (GPS_DEVICE_TRUCKS)."""
+    from .integrations.onestep_gps import _device_aliases, _squash
+    if _squash(t.label) == _squash(label):
+        return True
+    num = _truck_num(label)
+    if num and num in _label_nums(t.label):
+        return True
+    units = [u for u, lab in _device_aliases().items() if _squash(lab) == _squash(label)]
+    return _squash(t.label) in units
+
+
+def _merge_trucks(s: Session, keep: Truck, drop: Truck) -> None:
+    """Fold `drop` into `keep`: whatever keep is missing (GPS unit, odometer,
+    position, fuel id, notes) comes across, every order, load, fuel fill, mixer
+    reading and weight ticket on drop is repointed, then drop is deleted."""
+    for f in ("gps_device_id", "fluidsecure_vehicle_id", "notes", "odo_baseline", "odo_baseline_at",
+              "gps_odometer_reported", "lat", "lng", "heading", "updated_at"):
+        if getattr(keep, f) in (None, "") and getattr(drop, f) not in (None, ""):
+            setattr(keep, f, getattr(drop, f))
+    if not keep.gps_miles and drop.gps_miles:
+        keep.gps_miles = drop.gps_miles
+    for model in (Order, Load, FuelTransaction, MixerReading, WeightTicket):
+        for row in s.exec(select(model).where(model.truck_id == drop.id)).all():
+            row.truck_id = keep.id
+            s.add(row)
+    s.add(keep)
+    s.delete(drop)
+    s.commit()
+    print(f"fleet: merged duplicate truck '{drop.label}' into '{keep.label}'")
+
+
 def _ensure_fleet(s: Session) -> None:
-    """Add each truck named in FLEET_TRUCKS (e.g. "RTS 5964") unless a truck with
-    that number is already on the board, however it's spelled. Never edits or
-    removes anything — the office owns the list in Manage trucks."""
+    """Add each truck named in FLEET_TRUCKS (e.g. "RTS 5964") unless it's already
+    on the board, however the office spelled it. If a deploy once added a copy
+    beside the office's own entry, the copy is folded into the office's truck
+    (nothing on it is lost). Trucks not in FLEET_TRUCKS are never touched."""
     added = []
     for label in (config.FLEET_TRUCKS or "").split(","):
         label = " ".join(label.split())
         if not label:
             continue
-        num = _truck_num(label)
-        exists = any((t.label or "").strip().lower() == label.lower() or (num and _truck_num(t.label) == num)
-                     for t in s.exec(select(Truck)).all())
-        if not exists:
+        same = [t for t in s.exec(select(Truck)).all() if _fleet_same_truck(label, t)]
+        if not same:
             s.add(Truck(label=label, kind="mixer")); added.append(label)
+        elif len(same) == 2:
+            seeded = [t for t in same if t.label == label]
+            office = [t for t in same if t.label != label]
+            if len(seeded) == 1 and len(office) == 1:
+                keep = office[0]
+                _merge_trucks(s, keep=keep, drop=seeded[0])
+                # An office entry named after the unit ("2015 Freightliner") takes
+                # the fleet label, so fuel fills and tickets match it by number.
+                if _truck_num(label) and _truck_num(label) not in _label_nums(keep.label):
+                    keep.label = label; s.add(keep); s.commit()
+                    print(f"fleet: renamed '{seeded[0].label}' duplicate's survivor to '{label}'")
     if added:
         s.commit(); print(f"fleet: added trucks: {', '.join(added)}")
 
