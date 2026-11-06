@@ -180,6 +180,7 @@ async def lifespan(app: FastAPI):
         _flag_fuel_odometers(_s)   # surface fuel fills whose typed mileage doesn't add up
         _repair_wt_dates(_s)       # driver tickets the photo reader dated somewhere implausible
         _ensure_incentive_exclusions(_s)   # P&L drivers never get the daily bonus
+        _ensure_fleet(_s)                  # trucks from FLEET_TRUCKS exist on the board
     tasks = [
         asyncio.create_task(gps_poll_loop()),   # live truck updates
         asyncio.create_task(stale_order_sweep_loop()),   # nothing stays "ongoing" past its pour day
@@ -2063,7 +2064,7 @@ def _order_hauler(o: Order, s: Session):
 # Which trucks belong to which hauler, matched on the NUMBER in the truck label
 # ("RTS 4554" / "4554" both → "4554"), so the label text doesn't matter. EDIT
 # these as trucks change; a truck in neither list falls through to P&L Concrete.
-RTS_TRUCK_NUMBERS = {"4554", "7329", "7336"}
+RTS_TRUCK_NUMBERS = {"4554", "7329", "7336", "5964"}
 PNL_TRUCK_NUMBERS: set = set()   # P&L Concrete's trucks (optional — others default to P&L)
 
 
@@ -5888,6 +5889,24 @@ def _ensure_incentive_exclusions(s: Session) -> None:
                 s.add(IncentiveExclusion(name=n, kind="customer", note="their crew hauls it")); seeded.append(n)
     if seeded:
         s.commit(); print(f"bonus: seeded exclusions: {', '.join(seeded)}")
+
+
+def _ensure_fleet(s: Session) -> None:
+    """Add each truck named in FLEET_TRUCKS (e.g. "RTS 5964") unless a truck with
+    that number is already on the board, however it's spelled. Never edits or
+    removes anything — the office owns the list in Manage trucks."""
+    added = []
+    for label in (config.FLEET_TRUCKS or "").split(","):
+        label = " ".join(label.split())
+        if not label:
+            continue
+        num = _truck_num(label)
+        exists = any((t.label or "").strip().lower() == label.lower() or (num and _truck_num(t.label) == num)
+                     for t in s.exec(select(Truck)).all())
+        if not exists:
+            s.add(Truck(label=label, kind="mixer")); added.append(label)
+    if added:
+        s.commit(); print(f"fleet: added trucks: {', '.join(added)}")
 
 
 def _pickup_customers() -> list:
