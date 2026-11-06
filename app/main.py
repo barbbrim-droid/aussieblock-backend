@@ -5944,16 +5944,25 @@ def _ensure_fleet(s: Session) -> None:
         if not same:
             s.add(Truck(label=label, kind="mixer")); added.append(label)
         elif len(same) == 2:
-            seeded = [t for t in same if t.label == label]
-            office = [t for t in same if t.label != label]
-            if len(seeded) == 1 and len(office) == 1:
+            # Two entries for one truck. Keep the office's own (a label that isn't
+            # the seed's), else — both spelled like the seed, maybe with a stray
+            # space or case — keep the one with a GPS unit, else the older one.
+            office = [t for t in same if " ".join((t.label or "").split()).lower() != label.lower()]
+            if len(office) == 1:
                 keep = office[0]
-                _merge_trucks(s, keep=keep, drop=seeded[0])
-                # An office entry named after the unit ("2015 Freightliner") takes
-                # the fleet label, so fuel fills and tickets match it by number.
-                if _truck_num(label) and _truck_num(label) not in _label_nums(keep.label):
-                    keep.label = label; s.add(keep); s.commit()
-                    print(f"fleet: renamed '{seeded[0].label}' duplicate's survivor to '{label}'")
+            else:
+                ranked = sorted(same, key=lambda t: (0 if t.gps_device_id else 1, t.id or 0))
+                keep = ranked[0]
+            drop = [t for t in same if t is not keep][0]
+            print(f"fleet: two entries for {label}: keeping {keep.label!r} (id {keep.id}), folding in {drop.label!r} (id {drop.id})")
+            _merge_trucks(s, keep=keep, drop=drop)
+            # An office entry named after the unit ("2015 Freightliner") takes the
+            # fleet label, so fuel fills and tickets match it by number.
+            if _truck_num(label) and _truck_num(label) not in _label_nums(keep.label):
+                keep.label = label; s.add(keep); s.commit()
+                print(f"fleet: renamed the survivor to '{label}'")
+            elif " ".join((keep.label or "").split()).lower() == label.lower() and keep.label != label:
+                keep.label = label; s.add(keep); s.commit()   # tidy a stray space / case
     if added:
         s.commit(); print(f"fleet: added trucks: {', '.join(added)}")
 
