@@ -28,6 +28,16 @@ GEOCODE_API_KEY = os.getenv("GEOCODE_API_KEY", "").strip()
 # When there's no API key, run in mock mode so the app still works end-to-end.
 USE_MOCK_GPS = not bool(ONESTEP_API_KEY)
 
+# ── Fleet ──
+# Trucks that must be on the board: each label is added on deploy if no truck
+# carries that number yet ("RTS 5964" and "RTS5964" are the same truck). Trucks
+# added by hand in Manage trucks are never touched.
+FLEET_TRUCKS = os.getenv("FLEET_TRUCKS", "RTS 5964").strip()
+# One Step units whose name doesn't carry the truck number, so the poller can't
+# link them on its own — "unit name=truck label" pairs, comma separated. The unit
+# is linked the first time it's seen, as long as the truck has no unit yet.
+GPS_DEVICE_TRUCKS = os.getenv("GPS_DEVICE_TRUCKS", "2015 Freightliner=RTS 5964").strip()
+
 # ── FluidSecure (Graco) fuel tracking ──
 # Pulls fuel/fluid dispense transactions from FluidSecure's Export Transactions
 # API and attaches each fill to the matching truck (by its FluidSecure vehicle

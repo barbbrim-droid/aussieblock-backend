@@ -485,20 +485,46 @@ def _digits(v: str) -> str:
     return "".join(ch for ch in str(v or "") if ch.isdigit())
 
 
+def _squash(v: str) -> str:
+    return " ".join(str(v or "").split()).lower()
+
+
+def _device_aliases() -> dict:
+    """GPS_DEVICE_TRUCKS ("2015 Freightliner=RTS 5964, ...") as {unit name: truck label}
+    for units whose One Step name carries no truck number."""
+    out = {}
+    for pair in (config.GPS_DEVICE_TRUCKS or "").split(","):
+        if "=" not in pair:
+            continue
+        n, t = pair.split("=", 1)
+        if _squash(n) and t.strip():
+            out[_squash(n)] = t.strip()
+    return out
+
+
 def link_device_by_number(s: Session, dev_id: str, name: str):
     """A device nobody has linked yet: if its One Step name carries a truck number
     ("Volvo VNR 4111") that matches exactly one truck without a GPS device, link
-    them. Returns the truck linked, else None."""
-    num = _digits(name)
-    if len(num) < 3:
-        return None
-    hits = [t for t in s.exec(select(Truck)).all() if not t.gps_device_id and _digits(t.label) == num]
+    them. A unit named without a number ("2015 Freightliner") links through the
+    GPS_DEVICE_TRUCKS name->truck list instead. Returns the truck linked, else None."""
+    trucks = [t for t in s.exec(select(Truck)).all() if not t.gps_device_id]
+    alias = _device_aliases().get(_squash(name))
+    how = "by its number"
+    if alias:
+        hits = [t for t in trucks
+                if _squash(t.label) == _squash(alias) or (_digits(alias) and _digits(t.label) == _digits(alias))]
+        how = "by name (GPS_DEVICE_TRUCKS)"
+    else:
+        num = _digits(name)
+        if len(num) < 3:
+            return None
+        hits = [t for t in trucks if _digits(t.label) == num]
     if len(hits) != 1:
         return None
     t = hits[0]
     t.gps_device_id = dev_id
     s.add(t); s.commit()
-    print(f"GPS: linked One Step device '{name}' ({dev_id}) to truck {t.label} by its number")
+    print(f"GPS: linked One Step device '{name}' ({dev_id}) to truck {t.label} {how}")
     return t
 
 
