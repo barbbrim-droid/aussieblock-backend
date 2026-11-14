@@ -103,6 +103,16 @@ def require_staff(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+# A "sales" login is one of Aussieblock's own salespeople: every customer's
+# current and upcoming orders, the customer price list, and placing orders.
+# No dispatch board, no costs/profit, no billing, no logins.
+def require_sales(user: User = Depends(get_current_user)) -> User:
+    """Office (staff) or sales access."""
+    if user.role not in ("staff", "sales"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Staff or sales access required")
+    return user
+
+
 def require_finance(user: User = Depends(get_current_user)) -> User:
     """Endpoints that expose money / customer account info — full staff only."""
     if user.role != "staff":

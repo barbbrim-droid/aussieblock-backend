@@ -8,11 +8,13 @@ class User(SQLModel, table=True):
     """A login. `role` decides what they can see:
       • "customer" — scoped to their own Customer (via customer_id).
       • "staff"    — office/dispatch; sees everything.
+      • "sales"    — a salesperson: every customer's orders + the price list,
+                     and can place orders. No board, costs, billing or logins.
     Passwords are never stored raw — only the PBKDF2 hash (see app/auth.py)."""
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(index=True, unique=True)
     password_hash: str
-    role: str = "customer"                       # "customer" | "staff" | "worker" | "driver"
+    role: str = "customer"                       # "customer" | "staff" | "sales" | "worker" | "driver" | "kiosk"
     customer_id: Optional[int] = Field(default=None, foreign_key="customer.id")
     phone: Optional[str] = None                  # for worker logins, so they can be texted their login
     # For a "driver" login, `company` holds the driver's NAME as it appears in

@@ -41,7 +41,7 @@ from .seed import seed_if_empty
 from .models import Customer, Truck, Order, PlusLoadRequest, User, Invoice, Doc, Load, FuelTransaction, Material, MaterialReceipt, MixDesign, MixerReading, PurchaseOrder, Driver, InvoicePaidOverride, Message, PlantChecklist, Employee, TimeEntry, WeightTicket, IncentiveDay, IncentivePayout, IncentiveExclusion
 from .auth import (
     verify_password, hash_password, create_access_token, get_current_user, require_staff, require_finance,
-    require_driver, require_timeclock,
+    require_driver, require_timeclock, require_sales,
 )
 
 
@@ -678,10 +678,11 @@ def _forced_mix(customer_name: str, mix: str) -> str:
 @app.post("/orders")
 def create_order(
     body: OrderIn,
-    _: User = Depends(require_staff),
+    user: User = Depends(require_sales),
     s: Session = Depends(get_session),
 ):
-    """Schedule a new order for a customer (staff only).
+    """Schedule a new order for a customer (staff, or a salesperson — who can't
+    put it on a truck; dispatch does that from the board).
 
     Requires a customer, site, mix, quantity, and date; time and truck are
     optional. The order starts in the 'scheduled' stage — assign a truck and
@@ -700,13 +701,14 @@ def create_order(
 
     truck_id = None
     label = (body.truck or "").strip()
-    if label and label not in ("—", "-"):
+    if label and label not in ("—", "-") and user.role == "staff":
         t = _concrete_truck_or_409(label, s)
         truck_id = t.id
+    driver = ((body.driver or "").strip() or None) if user.role == "staff" else None
 
     o = Order(ref=_next_order_ref(s), customer_id=body.customer_id, site=site, mix=mix,
               qty=qty, scheduled_for=when, time=body.time.strip(), status="scheduled",
-              truck_id=truck_id, driver=(body.driver or "").strip() or None, progress=0.0,
+              truck_id=truck_id, driver=driver, progress=0.0,
               notes=pricing.strip_self_haul_fee((body.notes or "").strip() or None, customer.name),
               slump=(body.slump or "").strip() or None, admixtures=", ".join(body.admixtures) or None,
               use_for=(body.use_for or "").strip() or None, project=(body.project or "").strip() or None,
@@ -776,7 +778,7 @@ def cancel_order(ref: str, user: User = Depends(get_current_user), s: Session = 
     their own only while it's still requested/scheduled (not yet dispatched).
     Also clears any plus-load requests tied to it."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+    if not o or (user.role not in ("staff", "sales") and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
     if user.role != "staff" and o.status not in _EDITABLE_STATUSES:
         raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
@@ -792,10 +794,10 @@ def cancel_order(ref: str, user: User = Depends(get_current_user), s: Session = 
 @app.patch("/orders/{ref}")
 def edit_order(ref: str, body: OrderRequestIn, user: User = Depends(get_current_user),
                s: Session = Depends(get_session)):
-    """Modify an order's details. Staff or the owning customer, only while the
-    order is still requested/scheduled (not yet on a truck)."""
+    """Modify an order's details. Staff, sales, or the owning customer, only while
+    the order is still requested/scheduled (not yet on a truck)."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+    if not o or (user.role not in ("staff", "sales") and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
     if user.role != "staff" and o.status not in _EDITABLE_STATUSES:
         raise HTTPException(409, "This delivery is already in progress — please call the office to change it.")
@@ -2011,9 +2013,16 @@ class PriceSheetIn(BaseModel):
 
 
 @app.get("/price-sheet")
-def get_price_sheet(_: User = Depends(require_staff)):
-    """The pricing sheet that fills the ticket's pricing block (staff)."""
-    return pricing.load_sheet()
+def get_price_sheet(user: User = Depends(require_sales)):
+    """The pricing sheet that fills the ticket's pricing block (staff). Sales get
+    the customer-facing list: prices, fees, admixtures, customer set prices and
+    the exemption lists — never the haul cost we pay per yard."""
+    sheet = pricing.load_sheet()
+    if user.role == "sales":
+        sheet = {k: v for k, v in sheet.items() if k not in ("fuel_prices", "fuel_price_default")}
+        sheet["mixes"] = [{k: v for k, v in m.items() if k != "haul"} for m in sheet.get("mixes", [])]
+        sheet["read_only"] = True
+    return sheet
 
 
 @app.put("/price-sheet")
@@ -2324,16 +2333,25 @@ def _pricing_for(o: Order, s: Session, sheet: dict, key_name: dict, compute_mile
 def order_pricing(ref: str, user: User = Depends(get_current_user), s: Session = Depends(get_session)):
     """Per-order pricing: what we bill the customer + the delivery (haul) cost."""
     o = s.exec(select(Order).where(Order.ref == ref)).first()
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+    if not o or (user.role not in ("staff", "sales") and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
     key_name = {spec[0]: name for name, spec in _MATERIAL_SPEC.items()}
     payload = _pricing_for(o, s, pricing.load_sheet(), key_name)
     s.commit()   # persist a freshly-cached mileage, if any
-    return payload
+    return _sales_pricing(payload) if user.role == "sales" else payload
+
+
+def _sales_pricing(payload: dict) -> dict:
+    """What a salesperson sees of an order's pricing: the customer's side only —
+    never the haul cost, hauler split or invoice state."""
+    cp = {k: v for k, v in (payload.get("customer") or {}).items() if k != "haul_internal"}
+    return {"customer": cp, "billed_qty": payload.get("billed_qty"),
+            "ordered_qty": payload.get("ordered_qty"), "price_override": payload.get("price_override")}
 
 
 class BulkPricingIn(BaseModel):
     refs: Optional[List[str]] = None   # limit to these orders; None/empty = all completed
+    include_open: bool = False         # also price orders not yet complete (sales' upcoming list)
 
 
 @app.post("/orders/pricing-bulk")
@@ -2342,8 +2360,8 @@ def orders_pricing_bulk(body: BulkPricingIn, user: User = Depends(get_current_us
     """Pricing for many completed orders in ONE request — the Costs screen uses this
     instead of firing one request per order, which used to flood the server and lock
     the database. Returns { ref: pricingPayload } for every order the user may see."""
-    q = select(Order).where(Order.status == "complete")
-    if user.role != "staff":
+    q = select(Order) if (body.include_open and body.refs) else select(Order).where(Order.status == "complete")
+    if user.role not in ("staff", "sales"):
         q = q.where(Order.customer_id == user.customer_id)
     if body.refs:
         q = q.where(Order.ref.in_(body.refs))
@@ -2379,7 +2397,8 @@ def orders_pricing_bulk(body: BulkPricingIn, user: User = Depends(get_current_us
     out = {}
     for o in orders:
         try:
-            out[o.ref] = _pricing_for(o, s, sheet, key_name, compute_miles=False)
+            payload = _pricing_for(o, s, sheet, key_name, compute_miles=False)
+            out[o.ref] = _sales_pricing(payload) if user.role == "sales" else payload
         except Exception:
             out[o.ref] = {"error": True}
     s.commit()   # one commit for any mileages cached across the whole batch
@@ -3271,8 +3290,8 @@ def list_orders(
     s: Session = Depends(get_session),
 ):
     q = select(Order)
-    if user.role == "staff":
-        # The dispatch operator sees everything (optionally filtered to one company).
+    if user.role in ("staff", "sales"):
+        # The dispatch operator and sales see everything (optionally one company).
         if customer_id is not None:
             q = q.where(Order.customer_id == customer_id)
     elif user.customer_id is not None:
@@ -3294,8 +3313,8 @@ def get_order(
 ):
     o = s.exec(select(Order).where(Order.ref == ref)).first()
     # Company-scoped users (customer/worker) can't even tell whether another
-    # company's order exists -> 404, not 403. Only staff see any.
-    if not o or (user.role != "staff" and o.customer_id != user.customer_id):
+    # company's order exists -> 404, not 403. Staff and sales see any.
+    if not o or (user.role not in ("staff", "sales") and o.customer_id != user.customer_id):
         raise HTTPException(404, "Order not found")
     return _order_json(o, s)
 
@@ -4181,16 +4200,16 @@ def import_customers(_: User = Depends(require_finance)):
 # Lets the office create/reset the login a customer uses to see their own
 # orders & billing — without any server shell access.
 @app.get("/customers")
-def list_customers(background: BackgroundTasks, user: User = Depends(require_staff),
+def list_customers(background: BackgroundTasks, user: User = Depends(require_sales),
                    s: Session = Depends(get_session)):
     """All customers. Full staff get account info (login, contact, terms, COD) for
-    the Customers panel. Workers get only id + name — enough for the New Order
-    picker, without exposing account/financial details."""
+    the Customers panel. Sales get id, name and contact — enough for the New Order
+    picker and a phone call, without account/financial details."""
     if user.role == "staff":
         _maybe_auto_sync(background)
     customers = s.exec(select(Customer).order_by(Customer.name)).all()
-    if user.role == "worker":
-        return [{"id": c.id, "name": c.name} for c in customers]
+    if user.role != "staff":
+        return [{"id": c.id, "name": c.name, "contact": c.contact, "email": c.email, "cod": c.cod} for c in customers]
     logins = {
         u.customer_id: u.email
         for u in s.exec(select(User).where(User.role == "customer")).all()
@@ -4225,6 +4244,7 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
 
     Roles (all created here):
       • 'staff'    = the dispatch operator — full board + all companies + billing.
+      • 'sales'    = a salesperson — every customer's orders + the price list, places orders.
       • 'customer' = a company ADMIN — tied to ONE company (customer_id, REQUIRED),
                      sees that company's orders + tracking + billing.
       • 'worker'   = a company field person — ONE company, orders + tracking, NO billing.
@@ -4232,7 +4252,7 @@ def create_staff_login(body: StaffLoginIn, _: User = Depends(require_finance),
     For an EXISTING login, a blank password leaves the current one in place — so
     company/phone/project/role can be updated without resetting the password. A
     new login always requires a 6+ character password."""
-    role = body.role if body.role in ("staff", "worker", "customer", "driver", "kiosk") else "worker"
+    role = body.role if body.role in ("staff", "sales", "worker", "customer", "driver", "kiosk") else "worker"
     email = (body.email or "").strip().lower()
     pw = body.password or ""
     phone = (body.phone or "").strip() or None
@@ -4317,7 +4337,7 @@ def list_staff(_: User = Depends(require_finance), s: Session = Depends(get_sess
     """All logins — operators (staff), company admins (customer), and workers
     (full staff only). For company-scoped logins, `company` is their customer name."""
     out = []
-    for u in s.exec(select(User).where(User.role.in_(("staff", "worker", "customer", "driver")))).all():
+    for u in s.exec(select(User).where(User.role.in_(("staff", "sales", "worker", "customer", "driver")))).all():
         company = u.company
         if u.customer_id and not company:   # customer logins made via the Customers tab have no stored company name
             c = s.get(Customer, u.customer_id)
@@ -4443,7 +4463,7 @@ def delete_staff(email: str, user: User = Depends(require_finance), s: Session =
     Can't delete your own account."""
     target = (email or "").strip().lower()
     u = s.exec(select(User).where(User.email == target)).first()
-    if not u or u.role not in ("staff", "worker", "customer", "driver"):
+    if not u or u.role not in ("staff", "sales", "worker", "customer", "driver"):
         raise HTTPException(404, "Login not found")
     if u.id == user.id:
         raise HTTPException(409, "You can't remove your own login")
@@ -4638,7 +4658,7 @@ def staff_text_invite(
     provider's reason if the send fails."""
     target = (email or "").strip().lower()
     u = s.exec(select(User).where(User.email == target)).first()
-    if not u or u.role not in ("staff", "worker"):
+    if not u or u.role not in ("staff", "sales", "worker"):
         raise HTTPException(404, "Office login not found")
     if not (u.phone or "").strip():
         raise HTTPException(422, "No phone number on file for this login")
